@@ -1,0 +1,15 @@
+# build artifacts
+snake3d
+snake3d_dbg
+snake3d-*.zip
+
+# runtime data
+best.txt
+
+# debug captures
+dbg*.png
+off_*.png
+shot_*.png
+
+# os junk
+.DS_Store
