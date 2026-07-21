@@ -39,7 +39,6 @@ Particle :: struct {
 
 GameState :: enum { TITLE, PLAYING, PAUSED, GAME_OVER, WIN }
 
-Turn     :: enum { LEFT, RIGHT, UP, DOWN }
 ViewMode :: enum { FIRST, ORBIT }
 
 // ---------------------------------------------------------------------------
@@ -53,7 +52,7 @@ dir            := IV3{1, 0, 0}
 head_up        := IV3{0, 1, 0}  // snake's local up (for camera roll)
 prev_dir       := IV3{1, 0, 0}
 prev_up        := IV3{0, 1, 0}
-turn_queue     : [dynamic]Turn
+dir_queue      : [dynamic]IV3   // desired absolute directions (snapped to axes)
 pending_growth := 0
 
 view_mode      := ViewMode.ORBIT   // default: panoramic overview of the whole cube
@@ -190,7 +189,7 @@ play :: proc(s: rl.Sound) {
 reset_game :: proc() {
     clear(&snake)
     clear(&prev_snake)
-    clear(&turn_queue)
+    clear(&dir_queue)
     clear(&particles)
 
     c :: GRID_N / 2
@@ -235,20 +234,12 @@ spawn_food :: proc() {
     }
 }
 
-queue_turn :: proc(t: Turn) {
-    if len(turn_queue) >= 3 do return
-    append(&turn_queue, t)
-}
-
-// Rotate the snake's local frame (forward = dir, up = head_up) by 90°.
-apply_turn :: proc(t: Turn) {
-    f, u := dir, head_up
-    switch t {
-    case .LEFT:  dir = cross_i(u, f)              // forward rotates toward local left
-    case .RIGHT: dir = cross_i(f, u)
-    case .UP:    dir = u;     head_up = neg_i(f)  // pitch up: frame rolls
-    case .DOWN:  dir = neg_i(u); head_up = f
-    }
+queue_dir :: proc(d: IV3) {
+    if len(dir_queue) >= 3 do return
+    last := len(dir_queue) > 0 ? dir_queue[len(dir_queue) - 1] : dir
+    if d == last do return
+    if d.x == -last.x && d.y == -last.y && d.z == -last.z do return  // no 180° turns
+    append(&dir_queue, d)
 }
 
 step :: proc() {
@@ -256,11 +247,18 @@ step :: proc() {
     prev_dir = dir
     prev_up = head_up
 
-    // apply one queued relative turn per tick
-    if len(turn_queue) > 0 {
-        t := turn_queue[0]
-        _ = pop_front(&turn_queue)
-        apply_turn(t)
+    // apply one queued direction per tick, keeping the up-frame orthonormal
+    if len(dir_queue) > 0 {
+        d := dir_queue[0]
+        _ = pop_front(&dir_queue)
+        if d != dir && !(d.x == -dir.x && d.y == -dir.y && d.z == -dir.z) {
+            if d == head_up {
+                head_up = neg_i(dir)
+            } else if d == neg_i(head_up) {
+                head_up = dir
+            }
+            dir = d
+        }
     }
 
     // remember previous layout for interpolation
@@ -353,14 +351,40 @@ update_particles :: proc(dt: f32) {
     }
 }
 
-// Relative steering: turn left/right or pitch up/down in the snake's own frame.
+// Snap a world-space vector to the nearest of the 6 grid axes.
+snap_axis :: proc(v: rl.Vector3) -> IV3 {
+    ax, ay, az := abs(v.x), abs(v.y), abs(v.z)
+    if ax >= ay && ax >= az do return {v.x > 0 ? 1 : -1, 0, 0}
+    if ay >= az            do return {0, v.y > 0 ? 1 : -1, 0}
+    return {0, 0, v.z > 0 ? 1 : -1}
+}
+
+// Steering:
+// - orbit view: SCREEN-relative (A always goes screen-left, W screen-up, ...)
+// - first-person: snake-frame relative (turn left/right, pitch up/down)
 handle_input :: proc() {
-    if rl.IsKeyPressed(.A) || rl.IsKeyPressed(.LEFT)  do queue_turn(.LEFT)
-    if rl.IsKeyPressed(.D) || rl.IsKeyPressed(.RIGHT) do queue_turn(.RIGHT)
-    if rl.IsKeyPressed(.W) || rl.IsKeyPressed(.UP)    do queue_turn(.UP)
-    if rl.IsKeyPressed(.S) || rl.IsKeyPressed(.DOWN)  do queue_turn(.DOWN)
     if rl.IsKeyPressed(.V) {
         view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
+    }
+
+    go_left  := rl.IsKeyPressed(.A) || rl.IsKeyPressed(.LEFT)
+    go_right := rl.IsKeyPressed(.D) || rl.IsKeyPressed(.RIGHT)
+    go_up    := rl.IsKeyPressed(.W) || rl.IsKeyPressed(.UP)
+    go_down  := rl.IsKeyPressed(.S) || rl.IsKeyPressed(.DOWN)
+
+    if view_mode == .FIRST {
+        if go_left  do queue_dir(cross_i(head_up, dir))
+        if go_right do queue_dir(cross_i(dir, head_up))
+        if go_up    do queue_dir(head_up)
+        if go_down  do queue_dir(neg_i(head_up))
+    } else {
+        f := norm_v3(cam.target - cam.position)
+        r := norm_v3(cross_v3(f, {0, 1, 0}))
+        u := cross_v3(r, f)
+        if go_left  do queue_dir(snap_axis({-r.x, -r.y, -r.z}))
+        if go_right do queue_dir(snap_axis(r))
+        if go_up    do queue_dir(snap_axis(u))
+        if go_down  do queue_dir(snap_axis({-u.x, -u.y, -u.z}))
     }
 }
 
@@ -748,7 +772,7 @@ draw_hud :: proc() {
     draw_text(fmt.ctprintf("HEAD   (%d, %d, %d)", snake[0].x, snake[0].y, snake[0].z),
         26, 150, 18, rl.Color{150, 160, 180, 255})
 
-    draw_text("W/S or Up/Down: pitch    A/D or Left/Right: turn    V: first-person/orbit    P: pause    R: restart",
+    draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    V: view    P/Space: pause    R: restart",
         26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
 }
 
@@ -759,15 +783,17 @@ draw_title :: proc() {
         rl.Color{u8(120 * pulse + 90), 255, u8(140 * pulse + 60), 255}, true)
     draw_centered("True 3D - six directions inside a 12x12x12 cube, with a panoramic overview",
         SCREEN_H/2 - 64, 23, rl.Color{170, 175, 190, 255})
-    draw_centered("A / D: turn left & right      W / S: pitch up & down   (steer like a plane)",
+    draw_centered("A / D: screen-left & right      W / S: screen-up & down (relative to your view)",
         SCREEN_H/2 - 18, 20, rl.Color{190, 195, 210, 255})
-    draw_centered("Right-drag to orbit, wheel to zoom, V: first-person view. The dotted line shows",
+    draw_centered("J / L: rotate    I / K: tilt    U / O: zoom (or use the mouse)   V: first-person view.",
         SCREEN_H/2 + 14, 18, rl.Color{150, 155, 170, 255})
-    draw_centered("where flying straight leads. Mini-map and axis compass share the edge colors.",
+    draw_centered("Pause anytime with P or SPACE to inspect the cube. The dotted line shows where",
         SCREEN_H/2 + 38, 18, rl.Color{150, 155, 170, 255})
-    draw_centered("Press SPACE to start", SCREEN_H/2 + 72, 32, rl.RAYWHITE, true)
+    draw_centered("flying straight leads. Mini-map and axis compass share the edge colors.",
+        SCREEN_H/2 + 62, 18, rl.Color{150, 155, 170, 255})
+    draw_centered("Press SPACE to start", SCREEN_H/2 + 96, 32, rl.RAYWHITE, true)
     if best > 0 {
-        draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 122, 21, rl.GOLD)
+        draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 146, 21, rl.GOLD)
     }
 }
 
@@ -793,7 +819,7 @@ draw_win :: proc() {
 draw_paused :: proc() {
     rl.DrawRectangle(0, 0, SCREEN_W, SCREEN_H, rl.Color{0, 0, 0, 110})
     draw_centered("PAUSED", SCREEN_H/2 - 46, 64, rl.RAYWHITE, true)
-    draw_centered("Press P to resume", SCREEN_H/2 + 32, 23, rl.LIGHTGRAY)
+    draw_centered("Drag to orbit and inspect - P or SPACE to resume", SCREEN_H/2 + 32, 23, rl.LIGHTGRAY)
 }
 
 // ---------------------------------------------------------------------------
@@ -831,25 +857,36 @@ update_camera :: proc(dt: f32, alpha: f32) {
         return
     }
 
-    // orbit mode (also used on the title screen)
-    if rl.IsMouseButtonDown(.RIGHT) {
+    // orbit mode (also used on the title screen) — full free rotation,
+    // drag with either mouse button, or use the keyboard
+    if rl.IsMouseButtonDown(.RIGHT) || rl.IsMouseButtonDown(.LEFT) {
         d := rl.GetMouseDelta()
         cam_yaw   -= d.x * 0.006
         cam_pitch -= d.y * 0.006
-        cam_pitch = clamp(cam_pitch, -1.3, 1.5)   // can look from below too
     }
+    ORBIT_SPEED :: 2.2
+    if rl.IsKeyDown(.J) do cam_yaw   += ORBIT_SPEED * dt
+    if rl.IsKeyDown(.L) do cam_yaw   -= ORBIT_SPEED * dt
+    if rl.IsKeyDown(.I) do cam_pitch += ORBIT_SPEED * dt
+    if rl.IsKeyDown(.K) do cam_pitch -= ORBIT_SPEED * dt
+    cam_pitch = clamp(cam_pitch, -1.55, 1.55)   // nearly full vertical range
+    if rl.IsKeyDown(.U) do cam_dist -= 18 * dt
+    if rl.IsKeyDown(.O) do cam_dist += 18 * dt
+
     wheel := rl.GetMouseWheelMove()
     if wheel != 0 {
         cam_dist *= 1 - wheel * 0.08
-        cam_dist = clamp(cam_dist, 14, 48)
     }
+    cam_dist = clamp(cam_dist, 14, 48)
 
     if state == .TITLE {
         cam_yaw += dt * 0.25
     }
 
-    k := clamp(dt * 6, 0, 1)
-    cam_target = lerp_v3(cam_target, hp, k)
+    // orbit pivots on the CUBE CENTER: dragging rotates the whole cube
+    // (frame, snake, food) as one rigid object on screen
+    k := clamp(dt * 4, 0, 1)
+    cam_target = lerp_v3(cam_target, {0, 0, 0}, k)
 
     tgt := cam_target + shake_off
     cp := math.cos(cam_pitch)
@@ -953,11 +990,11 @@ main :: proc() {
             }
         case .PLAYING:
             handle_input()
-            if rl.IsKeyPressed(.P) { state = .PAUSED; break }
+            if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) { state = .PAUSED; break }
             if rl.IsKeyPressed(.R) { reset_game(); break }
 
             // the snake holds still until the player steers for the first time
-            if !started && len(turn_queue) > 0 do started = true
+            if !started && len(dir_queue) > 0 do started = true
 
             if started {
                 move_timer += dt
@@ -971,6 +1008,10 @@ main :: proc() {
         case .PAUSED:
             if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) do state = .PLAYING
             if rl.IsKeyPressed(.R) { reset_game(); state = .PLAYING }
+            // allow inspecting from the other view while paused
+            if rl.IsKeyPressed(.V) {
+                view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
+            }
         case .GAME_OVER, .WIN:
             if rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.R) {
                 reset_game()

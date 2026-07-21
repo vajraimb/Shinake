@@ -9,28 +9,33 @@ no gravity, no floor, pure 3D piloting.
 ## Features
 
 - **True 3D movement** — six directions (±X, ±Y, ±Z) inside a 12³ cube
-- **Panoramic orbit camera** by default (right-drag to orbit, wheel to zoom),
-  with an optional **first-person view** (press `V`)
+- **Panoramic orbit camera** by default: the whole cube rotates around its
+  center as one rigid object (keyboard `IJKL` or mouse drag), with an
+  optional **first-person view** (press `V`)
+- **Screen-relative steering** — in orbit view `A/D/W/S` always mean
+  screen-left/right/up/down, no matter how the cube is rotated
 - **Flight-path guide** — a dotted line ahead of the snake shows where flying
   straight leads, colored green → yellow → red by distance to the obstacle
 - **Navigation aids** — tri-view minimap (top / front / side projections),
   a camera-linked axis compass, and cube edges color-coded by axis
   (X = red, Y = green, Z = blue)
-- Plane-like relative steering: the snake waits for your first input
+- Pause anytime and keep orbiting the frozen cube to plan your route
 - Smooth interpolated movement and 90° turn animations, particles,
-  procedurally synthesized sound effects (no asset files), pause/restart,
+  procedurally synthesized sound effects (no asset files),
   persistent best score
 
 ## Controls
 
 | Input | Action |
 |---|---|
-| `A` / `D` or `←` / `→` | Turn left / right |
-| `W` / `S` or `↑` / `↓` | Pitch up / down |
+| `A` / `D` or `←` / `→` | Steer screen-left / screen-right |
+| `W` / `S` or `↑` / `↓` | Steer screen-up / screen-down |
+| `J` / `L` | Rotate the cube |
+| `I` / `K` | Tilt the cube |
+| `U` / `O` or mouse wheel | Zoom in / out |
+| Mouse drag (left or right) | Orbit (alternative) |
 | `V` | Toggle first-person / orbit camera |
-| Right mouse drag | Orbit camera (orbit mode) |
-| Mouse wheel | Zoom |
-| `P` | Pause |
+| `P` or `Space` | Pause / resume |
 | `R` | Restart |
 | `Space` / `Enter` | Start / play again |
 
