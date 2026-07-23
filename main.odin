@@ -14,7 +14,7 @@ import "core:strconv"
 GRID_N :: 12          // 12 x 12 x 12 cubic lattice
 CELL   :: 1.0
 
-START_INTERVAL :: 0.24   // seconds per move at start
+START_INTERVAL :: 0.27   // seconds per move at start
 MIN_INTERVAL   :: 0.08   // fastest
 SPEED_STEP     :: 0.007  // interval reduction per food
 
@@ -542,6 +542,22 @@ draw_path_hint :: proc() {
     }
 }
 
+// Dashed tether line from the head straight to the food (3D direction cue)
+draw_tether :: proc() {
+    if state != .PLAYING && state != .PAUSED do return
+    a := cell_to_world(snake[0])
+    b := cell_to_world(food)
+    SEG :: 24
+    col := rl.Color{255, 90, 90, 75}
+    for i in 0..<SEG {
+        if i % 2 == 0 {
+            t0 := f32(i) / SEG
+            t1 := f32(i + 1) / SEG
+            rl.DrawLine3D(lerp_v3(a, b, t0), lerp_v3(a, b, t1), col)
+        }
+    }
+}
+
 draw_food :: proc() {
     bob := math.sin(time_total * 3.2) * 0.08
     p := cell_to_world(food)
@@ -722,6 +738,61 @@ draw_compass :: proc() {
     draw_text("VIEW", i32(anchor.x) - 18, i32(anchor.y) + 52, 12, rl.Color{140, 146, 165, 200})
 }
 
+// Screen-space guidance: an arrow at the head pointing toward the food's
+// screen position, plus the exact keys to press (steering is screen-relative).
+draw_guidance :: proc() {
+    if state != .PLAYING do return
+    if view_mode == .FIRST do return   // first-person has beacon + path line
+
+    hp := cell_to_world(snake[0])
+    fp := cell_to_world(food)
+
+    // skip when the food is behind the camera (edge indicator handles that)
+    fwd := norm_v3(cam.target - cam.position)
+    to_food := fp - cam.position
+    if to_food.x*fwd.x + to_food.y*fwd.y + to_food.z*fwd.z < 0 do return
+
+    sh := rl.GetWorldToScreen(hp, cam)
+    sf := rl.GetWorldToScreen(fp, cam)
+    dx := sf.x - sh.x
+    dy := sf.y - sh.y
+    l := math.sqrt(dx*dx + dy*dy)
+    if l < 50 do return   // nearly there on screen
+
+    ux, uy := dx / l, dy / l
+    x0 := sh.x + ux * 46
+    y0 := sh.y + uy * 46
+    x1 := sh.x + ux * 106
+    y1 := sh.y + uy * 106
+
+    col := rl.Color{255, 110, 110, 220}
+    rl.DrawLineEx({x0, y0}, {x1, y1}, 4, col)
+    // arrowhead barbs
+    bx := -uy * 9
+    by := ux * 9
+    rl.DrawLineEx({x1, y1}, {x1 - ux*14 + bx, y1 - uy*14 + by}, 4, col)
+    rl.DrawLineEx({x1, y1}, {x1 - ux*14 - bx, y1 - uy*14 - by}, 4, col)
+
+    // which keys move the snake along the arrow (dead zone on each axis)
+    horiz: cstring = ""
+    vert: cstring = ""
+    if ux < -0.35 do horiz = "A"
+    if ux >  0.35 do horiz = "D"
+    if uy < -0.35 do vert = "W"
+    if uy >  0.35 do vert = "S"
+
+    keys: cstring
+    switch {
+    case vert != "" && horiz != "": keys = fmt.ctprintf("%s + %s", vert, horiz)
+    case vert != "":                 keys = vert
+    case horiz != "":                keys = horiz
+    case:                            keys = ""
+    }
+    if keys != "" {
+        draw_text(keys, i32(x1) + 8, i32(y1) - 10, 20, rl.RAYWHITE, true)
+    }
+}
+
 // Screen-edge arrow pointing at the food when it's outside the view (FP aid),
 // plus a subtle crosshair in first-person mode.
 draw_food_indicator :: proc() {
@@ -771,6 +842,8 @@ draw_hud :: proc() {
     draw_text(fmt.ctprintf("SPEED  x%d", speed), 26, 120, 21, rl.SKYBLUE)
     draw_text(fmt.ctprintf("HEAD   (%d, %d, %d)", snake[0].x, snake[0].y, snake[0].z),
         26, 150, 18, rl.Color{150, 160, 180, 255})
+    fd := abs(food.x - snake[0].x) + abs(food.y - snake[0].y) + abs(food.z - snake[0].z)
+    draw_text(fmt.ctprintf("FOOD    %d cells away", fd), 26, 176, 18, rl.Color{255, 140, 140, 255})
 
     draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    V: view    P/Space: pause    R: restart",
         26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
@@ -906,6 +979,7 @@ draw_frame :: proc(alpha: f32) {
 
     rl.BeginMode3D(cam)
     draw_boundaries()
+    draw_tether()
     draw_food()
     first_person := view_mode == .FIRST && state != .TITLE
     draw_snake(alpha, first_person)
@@ -917,6 +991,7 @@ draw_frame :: proc(alpha: f32) {
     draw_minimap()
     draw_compass()
     draw_food_indicator()
+    draw_guidance()
     if state == .PLAYING && !started {
         draw_centered("Steer with A / D / W / S to launch the snake", SCREEN_H - 76, 24,
             rl.Color{u8(200 + 55 * math.sin(time_total * 4)), 220, 120, 255}, true)
