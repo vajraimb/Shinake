@@ -46,6 +46,8 @@ ViewMode :: enum { FIRST, ORBIT }
 // ---------------------------------------------------------------------------
 
 state          := GameState.TITLE
+autopilot      := false          // B: AI 自动驾驶（BFS 寻路 + 安全模拟）
+restart_timer  : f32 = 0         // autopilot 死亡后的自动重开倒计时
 snake          : [dynamic]IV3   // index 0 = head
 prev_snake     : [dynamic]IV3   // positions before last tick (for smooth anim)
 dir            := IV3{1, 0, 0}
@@ -242,23 +244,30 @@ queue_dir :: proc(d: IV3) {
     append(&dir_queue, d)
 }
 
+apply_dir :: proc(d: IV3) {
+    if d == dir do return
+    if d.x == -dir.x && d.y == -dir.y && d.z == -dir.z do return  // no 180° turns
+    if d == head_up {
+        head_up = neg_i(dir)
+    } else if d == neg_i(head_up) {
+        head_up = dir
+    }
+    dir = d
+}
+
 step :: proc() {
     // remember previous frame for camera/interpolation smoothing
     prev_dir = dir
     prev_up = head_up
 
-    // apply one queued direction per tick, keeping the up-frame orthonormal
-    if len(dir_queue) > 0 {
+    // autopilot thinks every tick; otherwise apply one queued direction,
+    // keeping the up-frame orthonormal
+    if autopilot {
+        apply_dir(ai_choose())
+    } else if len(dir_queue) > 0 {
         d := dir_queue[0]
         _ = pop_front(&dir_queue)
-        if d != dir && !(d.x == -dir.x && d.y == -dir.y && d.z == -dir.z) {
-            if d == head_up {
-                head_up = neg_i(dir)
-            } else if d == neg_i(head_up) {
-                head_up = dir
-            }
-            dir = d
-        }
+        apply_dir(d)
     }
 
     // remember previous layout for interpolation
@@ -313,8 +322,172 @@ die :: proc() {
     state = .GAME_OVER
     view_mode = .ORBIT   // pull out to orbit view so the crash site is visible
     shake_time = 0.5
+    restart_timer = 1.5
     play(snd_die)
     burst(cell_to_world(snake[0]))
+}
+
+// ---------------------------------------------------------------------------
+// Autopilot (B): BFS pathfinding to the food with a survival simulation,
+// tail-chasing as fallback — the classic snake-AI strategy
+// ---------------------------------------------------------------------------
+
+CELLS :: GRID_N * GRID_N * GRID_N
+DIRS6 :: [6]IV3{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}
+
+ai_blocked : [CELLS]bool
+ai_dist    : [CELLS]i32
+// 安全模拟专用的独立工作区，避免覆盖食物的 BFS 距离场
+sim_blocked : [CELLS]bool
+sim_dist    : [CELLS]i32
+
+idx3 :: proc(c: IV3) -> int {
+    return int(c.x) + GRID_N * (int(c.y) + GRID_N * int(c.z))
+}
+
+cell3 :: proc(i: int) -> IV3 {
+    x := i % GRID_N
+    y := (i / GRID_N) % GRID_N
+    z := i / (GRID_N * GRID_N)
+    return {i32(x), i32(y), i32(z)}
+}
+
+in_bounds :: proc(c: IV3) -> bool {
+    return c.x >= 0 && c.x < GRID_N && c.y >= 0 && c.y < GRID_N && c.z >= 0 && c.z < GRID_N
+}
+
+// breadth-first distance field from target over cells marked free in blocked
+bfs :: proc(target: IV3, dist: ^[CELLS]i32, blocked: ^[CELLS]bool) {
+    for i in 0..<CELLS do dist[i] = -1
+    if !in_bounds(target) || blocked[idx3(target)] do return
+
+    q: [CELLS]int
+    head, tail := 0, 0
+    q[tail] = idx3(target)
+    tail += 1
+    dist[idx3(target)] = 0
+
+    for head < tail {
+        cur := q[head]
+        head += 1
+        c := cell3(cur)
+        d := dist[cur]
+        for off in DIRS6 {
+            n := IV3{c.x + off.x, c.y + off.y, c.z + off.z}
+            if !in_bounds(n) do continue
+            ni := idx3(n)
+            if blocked[ni] || dist[ni] >= 0 do continue
+            dist[ni] = d + 1
+            q[tail] = ni
+            tail += 1
+        }
+    }
+}
+
+mark_body :: proc(body: []IV3, blocked: ^[CELLS]bool) {
+    for i in 0..<CELLS do blocked[i] = false
+    for s in body do blocked[idx3(s)] = true
+    blocked[idx3(body[len(body) - 1])] = false  // tail tip will vacate
+    blocked[idx3(body[0])] = false              // head moves out
+}
+
+// Take the candidate first move, then walk the food distance field to the
+// food while simulating the snake's body; afterwards check the head can
+// still reach its own tail (i.e. eating here doesn't trap us).
+safe_to_eat :: proc(first: IV3) -> bool {
+    sim := make([dynamic]IV3, len(snake))
+    defer delete(sim)
+    copy(sim[:], snake[:])
+    grow := pending_growth
+
+    cur := snake[0]
+    steps := 0
+    for {
+        next := IV3{-1, -1, -1}
+        if steps == 0 {
+            next = IV3{cur.x + first.x, cur.y + first.y, cur.z + first.z}
+            if !in_bounds(next) || ai_dist[idx3(next)] < 0 do return false
+        } else {
+            dn := ai_dist[idx3(cur)]
+            for off in DIRS6 {
+                n := IV3{cur.x + off.x, cur.y + off.y, cur.z + off.z}
+                if !in_bounds(n) do continue
+                if ai_dist[idx3(n)] == dn - 1 {
+                    next = n
+                    break
+                }
+            }
+            if next == (IV3{-1, -1, -1}) do return false
+        }
+        cur = next
+
+        inject_at(&sim, 0, cur)
+        if cur == food do grow += 1
+        if grow > 0 {
+            grow -= 1
+        } else {
+            _ = pop(&sim)
+        }
+
+        steps += 1
+        if cur == food do break
+        if steps > CELLS do return false   // paranoia
+    }
+
+    // can the simulated head still reach its own tail?
+    mark_body(sim[:], &sim_blocked)
+    bfs(sim[len(sim) - 1], &sim_dist, &sim_blocked)
+    for off in DIRS6 {
+        n := IV3{sim[0].x + off.x, sim[0].y + off.y, sim[0].z + off.z}
+        if in_bounds(n) && sim_dist[idx3(n)] >= 0 do return true
+    }
+    return false
+}
+
+ai_choose :: proc() -> IV3 {
+    head := snake[0]
+    tip := snake[len(snake) - 1]
+
+    // 1. shortest safe path to the food
+    mark_body(snake[:], &ai_blocked)
+    bfs(food, &ai_dist, &ai_blocked)
+    best_dir := dir
+    best_d := i32(1 << 30)
+    found := false
+    for off in DIRS6 {
+        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
+        if !in_bounds(n) || ai_blocked[idx3(n)] do continue
+        d := ai_dist[idx3(n)]
+        if d >= 0 && d < best_d && safe_to_eat(off) {
+            best_d = d
+            best_dir = off
+            found = true
+        }
+    }
+    if found do return best_dir
+
+    // 2. no safe food route — chase our own tail to buy time
+    mark_body(snake[:], &ai_blocked)
+    bfs(tip, &ai_dist, &ai_blocked)
+    best_d = 1 << 30
+    for off in DIRS6 {
+        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
+        if !in_bounds(n) || ai_blocked[idx3(n)] do continue
+        d := ai_dist[idx3(n)]
+        if d >= 0 && d < best_d {
+            best_d = d
+            best_dir = off
+            found = true
+        }
+    }
+    if found do return best_dir
+
+    // 3. doomed — pick any non-lethal move
+    for off in DIRS6 {
+        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
+        if in_bounds(n) && !ai_blocked[idx3(n)] do return off
+    }
+    return dir
 }
 
 burst :: proc(p: rl.Vector3) {
@@ -366,6 +539,13 @@ handle_input :: proc() {
     if rl.IsKeyPressed(.V) {
         view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
     }
+
+    // B: toggle AI autopilot
+    if rl.IsKeyPressed(.B) {
+        autopilot = !autopilot
+        if autopilot do clear(&dir_queue) // AI 接管前清空玩家排队的方向
+    }
+    if autopilot do return // AI 操控时忽略方向键
 
     go_left  := rl.IsKeyPressed(.A) || rl.IsKeyPressed(.LEFT)
     go_right := rl.IsKeyPressed(.D) || rl.IsKeyPressed(.RIGHT)
@@ -844,8 +1024,13 @@ draw_hud :: proc() {
         26, 150, 18, rl.Color{150, 160, 180, 255})
     fd := abs(food.x - snake[0].x) + abs(food.y - snake[0].y) + abs(food.z - snake[0].z)
     draw_text(fmt.ctprintf("FOOD    %d cells away", fd), 26, 176, 18, rl.Color{255, 140, 140, 255})
+    if autopilot {
+        pulse := 0.65 + 0.35 * math.sin(time_total * 5)
+        draw_text("AUTOPILOT  (B to take over)", 26, 204, 19,
+            rl.Color{255, 200, u8(120 + 80 * pulse), 255}, true)
+    }
 
-    draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    -/=: speed    V: view    P/Space: pause    R: restart",
+    draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    -/=: speed    V: view    B: autopilot    P/Space: pause    R: restart",
         26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
 }
 
@@ -860,13 +1045,15 @@ draw_title :: proc() {
         SCREEN_H/2 - 18, 20, rl.Color{190, 195, 210, 255})
     draw_centered("J / L: rotate    I / K: tilt    U / O: zoom (or use the mouse)   V: first-person view.",
         SCREEN_H/2 + 14, 18, rl.Color{150, 155, 170, 255})
+    draw_centered("Press B anytime to watch the AI play (BFS pathfinding + survival lookahead).",
+        SCREEN_H/2 + 38, 18, rl.Color{255, 200, 140, 255})
     draw_centered("Pause anytime with P or SPACE to inspect the cube. The dotted line shows where",
-        SCREEN_H/2 + 38, 18, rl.Color{150, 155, 170, 255})
-    draw_centered("flying straight leads. Mini-map and axis compass share the edge colors.",
         SCREEN_H/2 + 62, 18, rl.Color{150, 155, 170, 255})
-    draw_centered("Press SPACE to start", SCREEN_H/2 + 96, 32, rl.RAYWHITE, true)
+    draw_centered("flying straight leads. Mini-map and axis compass share the edge colors.",
+        SCREEN_H/2 + 86, 18, rl.Color{150, 155, 170, 255})
+    draw_centered("Press SPACE to start", SCREEN_H/2 + 120, 32, rl.RAYWHITE, true)
     if best > 0 {
-        draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 146, 21, rl.GOLD)
+        draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 166, 21, rl.GOLD)
     }
 }
 
@@ -1073,7 +1260,7 @@ main :: proc() {
             if rl.IsKeyPressed(.EQUAL) do move_interval = max(MIN_INTERVAL, move_interval - 0.02)
 
             // the snake holds still until the player steers for the first time
-            if !started && len(dir_queue) > 0 do started = true
+            if !started && (len(dir_queue) > 0 || autopilot) do started = true
 
             if started {
                 move_timer += dt
@@ -1096,6 +1283,14 @@ main :: proc() {
                 reset_game()
                 state = .PLAYING
             }
+            // autopilot 死亡后自动重开，继续演示
+            if autopilot && state == .GAME_OVER {
+                restart_timer -= dt
+                if restart_timer <= 0 {
+                    reset_game()
+                    state = .PLAYING
+                }
+            }
             update_particles(dt)
         }
 
@@ -1111,9 +1306,13 @@ main :: proc() {
                 shots = 1
                 state = .PLAYING
                 started = true
-            } else if shots == 1 && time_total > 1.5 {
+                autopilot = true // DEBUG: 让 AI 自动驾驶演示
+            } else if shots == 1 && time_total > 8.0 {
                 capture("shot_play.png", alpha)
                 shots = 2
+            } else if shots == 2 && time_total > 20.0 {
+                capture("shot_late.png", alpha)
+                shots = 3
             }
         }
 
