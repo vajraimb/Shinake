@@ -845,7 +845,7 @@ draw_hud :: proc() {
     fd := abs(food.x - snake[0].x) + abs(food.y - snake[0].y) + abs(food.z - snake[0].z)
     draw_text(fmt.ctprintf("FOOD    %d cells away", fd), 26, 176, 18, rl.Color{255, 140, 140, 255})
 
-    draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    V: view    P/Space: pause    R: restart",
+    draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    -/=: speed    V: view    P/Space: pause    R: restart",
         26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
 }
 
@@ -1067,6 +1067,10 @@ main :: proc() {
             handle_input()
             if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) { state = .PAUSED; break }
             if rl.IsKeyPressed(.R) { reset_game(); break }
+
+            // manual speed control (auto-acceleration on food still applies)
+            if rl.IsKeyPressed(.MINUS) do move_interval = min(0.50, move_interval + 0.02)
+            if rl.IsKeyPressed(.EQUAL) do move_interval = max(MIN_INTERVAL, move_interval - 0.02)
 
             // the snake holds still until the player steers for the first time
             if !started && len(dir_queue) > 0 do started = true
