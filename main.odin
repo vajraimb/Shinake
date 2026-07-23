@@ -58,6 +58,7 @@ dir_queue      : [dynamic]IV3   // desired absolute directions (snapped to axes)
 pending_growth := 0
 
 view_mode      := ViewMode.ORBIT   // default: panoramic overview of the whole cube
+modern_skin    := true             // M: 现代/经典蛇身皮肤切换
 
 food           := IV3{8, 8, 8}
 score          := 0
@@ -545,6 +546,8 @@ handle_input :: proc() {
         autopilot = !autopilot
         if autopilot do clear(&dir_queue) // AI 接管前清空玩家排队的方向
     }
+    // M: modern / classic snake skin
+    if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
     if autopilot do return // AI 操控时忽略方向键
 
     go_left  := rl.IsKeyPressed(.A) || rl.IsKeyPressed(.LEFT)
@@ -806,6 +809,94 @@ draw_snake :: proc(alpha: f32, hide_head: bool) {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Modern skin: glossy capsule-tube body, specular highlights, depth fog, glow
+// ---------------------------------------------------------------------------
+
+seg_radius :: proc(i, n: int) -> f32 {
+    if i == 0 do return 0.46
+    t := f32(i) / f32(max(n - 1, 1))
+    return 0.40 * (1 - 0.62 * t)   // taper toward the tail tip
+}
+
+seg_color :: proc(i, n: int) -> rl.Color {
+    t := f32(i) / f32(max(n - 1, 1))
+    // emerald head -> teal -> deep ocean tail, with subtle scale banding
+    band: f32 = (i % 4) < 2 ? 1.0 : 0.80
+    r := (86  - 61 * t) * band
+    g := (245 - 105 * t) * band
+    b := (150 + 45 * t) * band
+    return {u8(clamp(r, 0, 255)), u8(clamp(g, 0, 255)), u8(clamp(b, 0, 255)), 240}
+}
+
+dist_v3 :: proc(a, b: rl.Vector3) -> f32 {
+    dx, dy, dz := a.x - b.x, a.y - b.y, a.z - b.z
+    return math.sqrt(dx * dx + dy * dy + dz * dz)
+}
+
+draw_snake_modern :: proc(alpha: f32, hide_head: bool) {
+    n := len(snake)
+    h := half_extent()
+    light := norm_v3(rl.Vector3{0.45, 1.0, 0.3})
+    fog_ref := cam_dist * 2.0 + 10
+
+    // interpolated joint positions
+    pts := make([]rl.Vector3, n)
+    defer delete(pts)
+    for i in 0..<n {
+        cur := cell_to_world(snake[i])
+        j := min(i, len(prev_snake) - 1)
+        pts[i] = j >= 0 ? lerp_v3(cell_to_world(prev_snake[j]), cur, alpha) : cur
+    }
+
+    // floor projection shadows (depth cue)
+    for i in 0..<n {
+        p := pts[i]
+        r := seg_radius(i, n)
+        rl.DrawCubeV({p.x, -h + 0.02, p.z}, {r * 1.7, 0.03, r * 1.7}, rl.Color{60, 200, 130, 20})
+    }
+    // head height guide (skip in first-person)
+    if !hide_head {
+        hp := pts[0]
+        rl.DrawLine3D({hp.x, hp.y, hp.z}, {hp.x, -h, hp.z}, rl.Color{200, 255, 220, 30})
+    }
+
+    // tube body: tapered cylinders + joint spheres + specular glints, tail -> head
+    for i := n - 1; i >= 0; i -= 1 {
+        if hide_head && i == 0 do break
+        r := seg_radius(i, n) * (1 + 0.045 * math.sin(time_total * 3 + f32(i) * 0.5))
+        col := seg_color(i, n)
+        // manual distance fog: far segments sink back, near ones pop — layering
+        fog := clamp(1.18 - dist_v3(pts[i], cam.position) / fog_ref, 0.40, 1)
+        body := rl.Color{u8(f32(col.r) * fog), u8(f32(col.g) * fog), u8(f32(col.b) * fog), col.a}
+
+        if i < n - 1 {
+            rn := seg_radius(i + 1, n) * (1 + 0.045 * math.sin(time_total * 3 + f32(i + 1) * 0.5))
+            rl.DrawCylinderEx(pts[i], pts[i + 1], r, rn, 10, body)
+        }
+        rl.DrawSphereEx(pts[i], r, 12, 9, body)
+        // glossy highlight bump toward the light
+        rl.DrawSphereEx(pts[i] + light * (r * 0.58), r * 0.40, 8, 6, rl.Color{255, 255, 255, 52})
+
+        if i == 0 && !hide_head {
+            f := rl.Vector3{f32(dir.x), f32(dir.y), f32(dir.z)}
+            s := abs(f.y) == 1 ? rl.Vector3{1, 0, 0} : norm_v3(cross_v3(f, {0, 1, 0}))
+            u := norm_v3(cross_v3(s, f))
+            e1 := pts[0] + f * 0.40 + s * 0.21 + u * 0.19
+            e2 := pts[0] + f * 0.40 - s * 0.21 + u * 0.19
+            rl.DrawSphereEx(e1, 0.12, 8, 8, rl.WHITE)
+            rl.DrawSphereEx(e2, 0.12, 8, 8, rl.WHITE)
+            rl.DrawSphereEx(e1 + f * 0.07, 0.06, 8, 8, rl.BLACK)
+            rl.DrawSphereEx(e2 + f * 0.07, 0.06, 8, 8, rl.BLACK)
+            // soft pulsing aura around the head
+            rl.BeginBlendMode(.ADDITIVE)
+            rl.DrawSphereEx(pts[0], 0.85 + 0.1 * math.sin(time_total * 2.5), 14, 10,
+                rl.Color{50, 230, 130, 30})
+            rl.EndBlendMode()
+        }
+    }
+}
+
 draw_particles :: proc() {
     for p in particles {
         a := p.life / p.max_life
@@ -1030,7 +1121,7 @@ draw_hud :: proc() {
             rl.Color{255, 200, u8(120 + 80 * pulse), 255}, true)
     }
 
-    draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    -/=: speed    V: view    B: autopilot    P/Space: pause    R: restart",
+    draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    -/=: speed    V: view    B: autopilot    M: skin    P/Space: pause    R: restart",
         26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
 }
 
@@ -1047,13 +1138,15 @@ draw_title :: proc() {
         SCREEN_H/2 + 14, 18, rl.Color{150, 155, 170, 255})
     draw_centered("Press B anytime to watch the AI play (BFS pathfinding + survival lookahead).",
         SCREEN_H/2 + 38, 18, rl.Color{255, 200, 140, 255})
+    draw_centered("Press M to switch between the modern tube skin and the classic cube skin.",
+        SCREEN_H/2 + 62, 18, rl.Color{140, 230, 190, 255})
     draw_centered("Pause anytime with P or SPACE to inspect the cube. The dotted line shows where",
-        SCREEN_H/2 + 62, 18, rl.Color{150, 155, 170, 255})
-    draw_centered("flying straight leads. Mini-map and axis compass share the edge colors.",
         SCREEN_H/2 + 86, 18, rl.Color{150, 155, 170, 255})
-    draw_centered("Press SPACE to start", SCREEN_H/2 + 120, 32, rl.RAYWHITE, true)
+    draw_centered("flying straight leads. Mini-map and axis compass share the edge colors.",
+        SCREEN_H/2 + 110, 18, rl.Color{150, 155, 170, 255})
+    draw_centered("Press SPACE to start", SCREEN_H/2 + 144, 32, rl.RAYWHITE, true)
     if best > 0 {
-        draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 166, 21, rl.GOLD)
+        draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 190, 21, rl.GOLD)
     }
 }
 
@@ -1169,7 +1262,11 @@ draw_frame :: proc(alpha: f32) {
     draw_tether()
     draw_food()
     first_person := view_mode == .FIRST && state != .TITLE
-    draw_snake(alpha, first_person)
+    if modern_skin {
+        draw_snake_modern(alpha, first_person)
+    } else {
+        draw_snake(alpha, first_person)
+    }
     draw_path_hint()
     draw_particles()
     rl.EndMode3D()
@@ -1278,6 +1375,7 @@ main :: proc() {
             if rl.IsKeyPressed(.V) {
                 view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
             }
+            if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
         case .GAME_OVER, .WIN:
             if rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.R) {
                 reset_game()
