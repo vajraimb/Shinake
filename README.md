@@ -1,37 +1,36 @@
-# 3D Snake (Odin + raylib)
+# 3D 贪食蛇（Odin + raylib）
 
-A single-player, true-3D snake game written in **Odin** with **raylib**.
-The snake flies through a 12×12×12 cubic lattice in **six directions** —
-no gravity, no floor, pure 3D piloting.
+> 语言：**简体中文** | [English](README_EN.md)
 
-![AI autopilot demo](docs/autopilot.webp)
+用 **Odin** + **raylib** 写的单人真·3D 贪食蛇。蛇在 12×12×12 的立方格子里
+沿**六个方向**飞行——没有重力，没有地面，纯粹的 3D 驾驶。
 
-*The built-in AI (press `B`) piloting a 90+ segment snake — BFS pathfinding
-with survival lookahead, shown in the modern tube skin.*
+![AI 自动驾驶演示](docs/autopilot.webp)
 
-## Feeding Lab (投喂实验室)
+*内置 AI（按 `B`）驾驶 90 多节的长蛇——BFS 寻路 + 生存预判，
+图中为现代圆管皮肤。*
 
-Press `F` on the title screen: the roles flip — **the AI flies the snake, you
-invent the food**. Type any word (`T`) and the game deterministically
-generates a food from it: color, shape, spin, rarity, and 1–3 effects
-(speed burst, freeze, growth, body chop, score bonus/penalty, dizziness,
-explosion…). The AI places it in the cube and hunts it down.
+## 投喂实验室
 
-![feeding lab demo](docs/feeding.webp)
+在标题界面按 `F`，角色互换——**AI 开蛇，你来发明食物**。随便输入一个词
+（按 `T`），游戏就会用它确定性地生成一种食物：颜色、形状、旋转、稀有度，
+以及 1–3 种效果（暴走加速、冰冻减速、生长、炸尾、加分/扣分、眩晕、
+爆炸……）。AI 把食物放进立方体并追猎它。
 
-*A scripted tasting menu: apple + star → chili speed rage → grenade blows
-the tail off → poop & poison mushroom (the snake will remember these).*
+![投喂实验室演示](docs/feeding.webp)
 
-- **8 preset foods** on keys `1`–`8`: 苹果, 辣椒 (speed rage), 冰棍 (slow-mo),
-  手榴弹 (blows off tail segments), 便便 (score penalty), 毒蘑菇 (dizziness),
-  星星 (legendary bonus), 神秘蛋 (random effects every time)
-- **Free-form foods** — every word becomes a unique, repeatable recipe;
-  rare and legendary rolls get extra effects and a glowing aura
-- **The snake learns** — hurt it twice with the same food name and it
-  refuses to eat that food ever again (it rots away). Keep inventing!
-- 蛇的"学习"按净收益判断（生长×2 + 分数/10 − 眩晕×1.5）——带副作用但大补的
-  食物不会被拒食；连续吃亏两次才免疫，免疫时会弹提示
-- **Food dex** (`Tab`) — every kind you've discovered, with its effect tags
+*一出剧本化的品尝菜单：苹果 + 星星 → 辣椒暴走 → 手榴弹炸尾 →
+便便 & 毒蘑菇（蛇会记住这两样）。*
+
+- **8 种预设食物**，数字键 `1`–`8`：苹果、辣椒（暴走）、冰棍（慢速）、
+  手榴弹（炸掉尾巴）、便便（扣分）、毒蘑菇（眩晕）、星星（传说加分）、
+  神秘蛋（每次效果随机）
+- **自由造词** — 每个词都会变成独一无二、可复现的配方；稀有和传说
+  档位附带额外效果和发光光环
+- **蛇会学习** — 按净收益判断好坏（生长×2 + 分数/10 − 眩晕×1.5），
+  带副作用但大补的食物不会被拒食；用同一种食物坑它两次，它就终身
+  拒吃（食物会腐烂消失），免疫时会弹提示。继续发明新词吧！
+- **食物图鉴**（`Tab`）— 你发现过的每一种食物及其效果标签
 
 ### AI 配方（可选）
 
@@ -95,101 +94,95 @@ export FEED_LLM_MODEL=kimi-k2-0905-preview           # 默认值
 
 | 手动设计 | AI 创意蓝图 |
 | :---: | :---: |
-| ![workshop](docs/workshop.png) | ![workshop blueprint](docs/workshop-blueprint.png) |
+| ![创造台](docs/workshop.png) | ![创造台蓝图模式](docs/workshop-blueprint.png) |
 
-## Features
+## 特色功能
 
-- **True 3D movement** — six directions (±X, ±Y, ±Z) inside a 12³ cube
-- **AI autopilot** (`B`) — watch the AI play: BFS shortest path to the food,
-  plus a survival simulation that only commits to a meal when the head can
-  still reach its own tail afterwards; falls back to tail-chasing to stay
-  alive and auto-restarts after death. Take back control anytime with `B`
-- **Two snake skins** (`M`) — a glossy modern tube body (tapered capsules,
-  emerald→ocean gradient, specular glints, head aura, distance fog) or the
-  classic cube look
-- **Panoramic orbit camera** by default: the whole cube rotates around its
-  center as one rigid object (keyboard `IJKL` or mouse drag), with an
-  optional **first-person view** (press `V`)
-- **Screen-relative steering** — in orbit view `A/D/W/S` always mean
-  screen-left/right/up/down, no matter how the cube is rotated
-- **Flight-path guide** — a dotted line ahead of the snake shows where flying
-  straight leads, colored green → yellow → red by distance to the obstacle
-- **Navigation aids** — tri-view minimap (top / front / side projections),
-  a camera-linked axis compass, an on-screen guidance arrow with key hints,
-  a dashed head→food tether line, and a live "cells away" readout
-- **Speed control** — `-` slows down, `=` speeds up; eating also accelerates
-- Pause anytime and keep orbiting the frozen cube to plan your route
-- Smooth interpolated movement and 90° turn animations, particles,
-  procedurally synthesized sound effects (no asset files),
-  persistent best score
+- **真·3D 移动** — 12³ 立方体内六向飞行（±X、±Y、±Z）
+- **AI 自动驾驶**（`B`）— 看 AI 自己玩：到食物的 BFS 最短路径 +
+  生存模拟（只有模拟出吃完后蛇头仍能够到自己尾巴，才会真正下口）；
+  找不到安全路线就追自己尾巴保命，死亡后自动重开。随时按 `B` 夺回控制
+- **两套蛇身皮肤**（`M`）— 流光现代圆管（渐缩胶囊、祖母绿→深海渐变、
+  高光、头部光环、距离雾）或经典方块
+- **全景环绕相机**（默认）— 整个立方体绕中心刚体旋转（键盘 `IJKL`
+  或鼠标拖拽），也可切换**第一人称视角**（按 `V`）
+- **屏幕相对转向** — 环绕视角下 `A/D/W/S` 永远对应屏幕左/右/上/下，
+  无论立方体转到什么角度
+- **航迹引导** — 蛇头前方的虚线显示直飞的落点，按到障碍物的距离
+  由绿→黄→红渐变
+- **导航辅助** — 三视图小地图（顶/前/侧投影）、相机联动的轴向罗盘、
+  带按键提示的屏幕指引箭头、蛇头→食物的虚线牵引线、实时"距离 N 格"读数
+- **速度调节** — `-` 减速，`=` 加速；进食也会提速
+- 随时暂停，继续环绕观察静止的立方体来规划路线
+- 平滑插值移动与 90° 转向动画、粒子效果、程序化合成音效（无音频资源
+  文件）、最高分持久化
 
-## Screenshots
+## 截图
 
-| Modern tube skin | AI autopilot, 94 segments |
+| 现代圆管皮肤 | AI 自动驾驶，94 节 |
 |---|---|
-| ![gameplay](docs/gameplay.png) | ![long snake](docs/snake-long.png) |
+| ![游戏画面](docs/gameplay.png) | ![长蛇](docs/snake-long.png) |
 
-![title screen](docs/title.png)
+![标题界面](docs/title.png)
 
-## Controls
+## 操作
 
-| Input | Action |
+| 按键 | 作用 |
 |---|---|
-| `A` / `D` or `←` / `→` | Steer screen-left / screen-right |
-| `W` / `S` or `↑` / `↓` | Steer screen-up / screen-down |
-| `B` | Toggle AI autopilot |
-| `M` | Toggle modern / classic skin |
-| `J` / `L` | Rotate the cube |
-| `I` / `K` | Tilt the cube |
-| `U` / `O` or mouse wheel | Zoom in / out |
-| Mouse drag (left or right) | Orbit (alternative) |
-| `V` | Toggle first-person / orbit camera |
-| `-` / `=` | Slow down / speed up |
-| `P` or `Space` | Pause / resume |
-| `R` | Restart |
-| `Space` / `Enter` | Start / play again |
+| `A` / `D` 或 `←` / `→` | 屏幕左 / 右转向 |
+| `W` / `S` 或 `↑` / `↓` | 屏幕上 / 下转向 |
+| `B` | AI 自动驾驶开关 |
+| `M` | 现代 / 经典皮肤切换 |
+| `J` / `L` | 旋转立方体 |
+| `I` / `K` | 俯仰立方体 |
+| `U` / `O` 或鼠标滚轮 | 拉近 / 拉远 |
+| 鼠标拖拽（左键或右键） | 环绕视角（替代方式） |
+| `V` | 第一人称 / 环绕视角切换 |
+| `-` / `=` | 减速 / 加速 |
+| `P` 或 `空格` | 暂停 / 继续 |
+| `R` | 重开 |
+| `空格` / `Enter` | 开始 / 再来一局 |
 
-### Feeding Lab only
+### 投喂实验室专用
 
-| Input | Action |
+| 按键 | 作用 |
 |---|---|
-| `T` | Open the feed box — type any word, Enter to cast it |
-| `1` – `8` | Cast a preset food instantly |
+| `T` | 打开投喂框——输入任意词，回车投放 |
+| `1` – `8` | 立即投放预设食物 |
 | `⇧1` – `⇧8` | 快捷投喂作品库里的自创作品（最近保存的在前） |
-| `E` | Open the 创造台 (Creator Workshop); with the dex open, remix the selected kind |
-| `Tab` | Toggle the food dex (discovered kinds & effects) |
-| `↑` / `↓` (in dex) | Select a row |
-| `Enter` (in dex) | 投喂选中的食物（图鉴保持打开） |
-| `X` (in dex) | 从作品库删除选中的自创作品 |
-| `C` | Copy the share code (last cast, or the selected dex row) |
-| `Cmd+V` (in feed box) | Paste a `SNAKE3D1.` share code to import |
+| `E` | 打开创造台；图鉴打开时按 `E` 以此为基础改造选中食物 |
+| `Tab` | 食物图鉴开关（已发现的食物与效果） |
+| `↑` / `↓`（图鉴内） | 选择一行 |
+| `Enter`（图鉴内） | 投喂选中的食物（图鉴保持打开） |
+| `X`（图鉴内） | 从作品库删除选中的自创作品 |
+| `C` | 复制分享码（最近投放的，或图鉴中选中的那行） |
+| `Cmd+V`（投喂框内） | 粘贴 `SNAKE3D1.` 分享码导入 |
 
-### 创造台 (Creator Workshop) only
+### 创造台专用
 
-| Input | Action |
+| 按键 | 作用 |
 |---|---|
-| `↑` / `↓` | Move the field cursor |
-| `←` / `→` | Adjust the value (hold to auto-repeat) |
-| `Enter` | Edit text / trigger the button |
-| `Esc` | Cancel the current input, then close the workshop |
+| `↑` / `↓` | 移动字段光标 |
+| `←` / `→` | 调整数值（按住连续调整） |
+| `Enter` | 编辑文本 / 触发按钮 |
+| `Esc` | 取消当前输入，再按关闭创造台 |
 
-## Download
+## 下载
 
-Grab the prebuilt binary from
-[Releases](../../releases) (`snake3d-macos-arm64.zip`, macOS Apple Silicon).
-The binary is self-contained (raylib statically linked, system fonts only).
+从 [Releases](../../releases) 下载预编译二进制
+（`snake3d-macos-arm64.zip`，macOS Apple Silicon）。二进制完全自包含
+（raylib 静态链接，只用系统字体）。
 
-> First launch: macOS Gatekeeper may block an unsigned download —
-> right-click the app and choose **Open**, or run
-> `xattr -d com.apple.quarantine snake3d`.
+> 首次运行：macOS Gatekeeper 可能拦截未签名的下载——右键点 App 选
+> **打开**，或执行 `xattr -d com.apple.quarantine snake3d`。
 
-## Build from source
+## 从源码构建
 
-Requires the [Odin compiler](https://odin-lang.org/) (ships with `vendor:raylib`):
+需要 [Odin 编译器](https://odin-lang.org/)（自带 `vendor:raylib`）：
 
 ```bash
 odin build . -out:snake3d -o:speed
 ./snake3d
 ```
 
-Single file: `main.odin`, no other dependencies.
+单文件：`main.odin`，没有其他依赖。
