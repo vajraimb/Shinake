@@ -2,12 +2,17 @@ package snake3d
 
 import rl "vendor:raylib"
 import rlgl "vendor:raylib/rlgl"
+import "core:encoding/base64"
+import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:os"
 import "core:strconv"
 import "core:strings"
+import "core:sync"
+import "core:thread"
+import "core:time"
 import "core:unicode/utf8"
 
 // ---------------------------------------------------------------------------
@@ -54,6 +59,9 @@ FoodShape :: enum { SPHERE, CUBE, CONE, GEM }
 
 FoodKind :: struct {
     name:       string,   // display name (owned clone)
+    author:     string,   // 预设 / 本地 / AI / 分享
+    flavor:     string,   // short Chinese flavor line (owned clone, may be "")
+    hue:        int,      // 0-359, regenerated into `color` via hsv_rgb(hue, 0.72, 1.0)
     color:      rl.Color,
     shape:      FoodShape,
     size:       f32,
@@ -133,9 +141,28 @@ confuse_timer  : f32 = 0
 tint_timer     : f32 = 0
 tint_color     := rl.Color{0, 0, 0, 0}
 input_open     := false
-input_buf      : [24]u8
+input_buf      : [512]u8   // long enough to hold a pasted SNAKE3D1. share code
 input_len      := 0
 dex_open       := false          // Tab: 图鉴面板
+dex_sel        := 0              // keyboard selection inside the dex panel
+last_cast_kind := -1             // kinds index of the most recently cast food
+
+// --- toast notifications (bottom-center, ~2.5s) ---
+toast          : string          // owned clone
+toast_t        : f32 = 0
+
+// --- LLM recipe generation (FEED_LLM_* env config) ---
+LLM_State :: enum { IDLE, COOKING, READY, FAILED }
+
+llm_enabled    := false
+llm_api_key    : string
+llm_base_url   : string
+llm_model      : string
+llm_state      := LLM_State.IDLE // written by the worker under llm_mutex
+llm_mutex      : sync.Mutex
+llm_recipe     : Recipe          // written by the worker under llm_mutex
+llm_word       : string          // HUD copy, owned by the main thread
+llm_kind_idx   := -1             // placeholder kind index awaiting the recipe
 
 font_ui        : rl.Font
 font_bold      : rl.Font
@@ -626,9 +653,9 @@ hsv_rgb :: proc(h, s, v: f32) -> rl.Color {
 // generate a FoodKind deterministically from a word (seed 0 = use word hash)
 gen_kind :: proc(name: string, seed: u32) -> FoodKind {
     h := seed != 0 ? seed : word_hash(name)
-    k := FoodKind{name = name}
-    hue := f32(xnext(&h, 360))
-    k.color = hsv_rgb(hue, 0.72, 1.0)
+    k := FoodKind{name = name, author = "本地", flavor = ""}
+    k.hue = int(xnext(&h, 360))
+    k.color = hsv_rgb(f32(k.hue), 0.72, 1.0)
     k.shape = FoodShape(xnext(&h, 4))
     k.size = 0.26 + 0.05 * f32(xnext(&h, 4))
     k.spin = 1.2 + 0.8 * f32(xnext(&h, 4))
@@ -684,24 +711,25 @@ kind_harmful :: proc(k: FoodKind) -> bool {
 }
 
 make_presets :: proc() {
-    add :: proc(name: string, color: rl.Color, shape: FoodShape, size: f32,
+    add :: proc(name: string, hue: int, color: rl.Color, shape: FoodShape, size: f32,
                 rarity: int, speed: f32, speed_t: f32, growth: int, score: int,
                 shake: f32, tint: rl.Color, confuse: f32, bursts: int) {
         append(&kinds, FoodKind{
-            name = strings.clone(name), color = color, shape = shape, size = size,
+            name = strings.clone(name), author = "预设", flavor = "", hue = hue,
+            color = color, shape = shape, size = size,
             spin = 2.0, rarity = rarity, fx_speed = speed, fx_speed_t = speed_t,
             fx_growth = growth, fx_score = score, fx_shake = shake,
             fx_tint = tint, fx_confuse = confuse, fx_bursts = bursts,
         })
         kind_by_name[kinds[len(kinds) - 1].name] = len(kinds) - 1
     }
-    add("苹果",   {230, 60, 60, 255},   .SPHERE, 0.30, 0, 0, 0, 1, 10, 0, {}, 0, 1)
-    add("辣椒",   {255, 90, 30, 255},   .CONE,   0.30, 1, 0.5, 5, 1, 20, 0, {255, 120, 30, 60}, 0, 2)
-    add("冰棍",   {120, 220, 255, 255}, .CUBE,   0.28, 1, 1.7, 4, 1, 15, 0, {120, 200, 255, 60}, 0, 1)
-    add("手榴弹", {70, 80, 70, 255},    .SPHERE, 0.30, 1, 0, 0, -4, 0, 0.7, {255, 160, 60, 90}, 0, 4)
-    add("便便",   {130, 85, 40, 255},   .GEM,    0.28, 0, 0, 0, -1, -25, 0, {120, 80, 30, 100}, 0, 1)
-    add("毒蘑菇", {170, 70, 220, 255},  .CONE,   0.30, 1, 0, 0, 0, 5, 0, {170, 70, 220, 80}, 4, 2)
-    add("星星",   {255, 220, 80, 255},  .GEM,    0.30, 2, 0, 0, 2, 80, 0, {255, 220, 80, 60}, 0, 4)
+    add("苹果",   0,   {230, 60, 60, 255},   .SPHERE, 0.30, 0, 0, 0, 1, 10, 0, {}, 0, 1)
+    add("辣椒",   14,  {255, 90, 30, 255},   .CONE,   0.30, 1, 0.5, 5, 1, 20, 0, {255, 120, 30, 60}, 0, 2)
+    add("冰棍",   195, {120, 220, 255, 255}, .CUBE,   0.28, 1, 1.7, 4, 1, 15, 0, {120, 200, 255, 60}, 0, 1)
+    add("手榴弹", 120, {70, 80, 70, 255},    .SPHERE, 0.30, 1, 0, 0, -4, 0, 0.7, {255, 160, 60, 90}, 0, 4)
+    add("便便",   30,  {130, 85, 40, 255},   .GEM,    0.28, 0, 0, 0, -1, -25, 0, {120, 80, 30, 100}, 0, 1)
+    add("毒蘑菇", 280, {170, 70, 220, 255},  .CONE,   0.30, 1, 0, 0, 0, 5, 0, {170, 70, 220, 80}, 4, 2)
+    add("星星",   50,  {255, 220, 80, 255},  .GEM,    0.30, 2, 0, 0, 2, 80, 0, {255, 220, 80, 60}, 0, 4)
     // "神秘蛋" 由 cast_preset 特判：每次生成随机效果
 }
 
@@ -737,7 +765,19 @@ spawn_kind :: proc(kind_idx: int) {
 
 cast_word :: proc(word: string) {
     if len(word) == 0 do return
-    spawn_kind(kind_index(word))
+    if idx, ok := kind_by_name[word]; ok {
+        spawn_kind(idx)
+        last_cast_kind = idx
+        return
+    }
+    idx := kind_index(word) // placeholder via the local hash generator
+    spawn_kind(idx)
+    last_cast_kind = idx
+    // new word: ask the LLM for a real recipe (worker thread, non-blocking);
+    // only one request in flight — extra words keep the local recipe
+    if llm_enabled && llm_state == .IDLE {
+        llm_start(word, idx)
+    }
 }
 
 cast_preset :: proc(i: int) {
@@ -749,9 +789,475 @@ cast_preset :: proc(i: int) {
         k.color = hsv_rgb(f32(xnext(&h, 360)), 0.5, 1.0)
         append(&kinds, k)
         spawn_kind(len(kinds) - 1)
+        last_cast_kind = len(kinds) - 1
         return
     }
     spawn_kind(i)
+    last_cast_kind = i
+}
+
+// ---------------------------------------------------------------------------
+// Recipes: shared clamping, share codes (SNAKE3D1.*) and LLM generation
+// ---------------------------------------------------------------------------
+
+Recipe_FX :: struct {
+    speed_mult: f32,
+    speed_secs: f32,
+    growth:     int,
+    score:      int,
+    shake:      f32,
+    confuse:    f32,
+    bursts:     int,
+    tint:       Maybe([3]int),
+}
+
+Recipe :: struct {
+    hue:    int,
+    shape:  int,
+    rarity: int,
+    flavor: string,
+    fx:     Recipe_FX,
+}
+
+// share code wire format: "SNAKE3D1." + base64url(json.marshal(Share_Recipe))
+Share_Recipe :: struct {
+    v:      int,
+    name:   string,
+    hue:    int,
+    shape:  int,
+    rarity: int,
+    flavor: string,
+    fx:     Recipe_FX,
+}
+
+SHARE_PREFIX :: "SNAKE3D1."
+
+// single source of truth for recipe sanity (LLM results and share imports)
+clamp_recipe :: proc(r: ^Recipe) {
+    r.hue = r.hue %% 360 // floored: wraps negatives into 0-359
+    r.shape  = clamp(r.shape, 0, 3)
+    r.rarity = clamp(r.rarity, 0, 2)
+    r.fx.speed_mult = clamp(r.fx.speed_mult, 0.45, 2.0)
+    if abs(r.fx.speed_mult - 1) < 0.05 do r.fx.speed_secs = 0 // ~1.0 = no speed effect
+    r.fx.speed_secs = clamp(r.fx.speed_secs, 0, 8)
+    r.fx.growth  = clamp(r.fx.growth, -6, 6)
+    r.fx.score   = clamp(r.fx.score, -50, 100)
+    r.fx.shake   = clamp(r.fx.shake, 0, 1)
+    r.fx.confuse = clamp(r.fx.confuse, 0, 6)
+    r.fx.bursts  = clamp(r.fx.bursts, 1, 4)
+    // never a total dud (same spirit as gen_kind)
+    if r.fx.growth == 0 && r.fx.score == 0 && r.fx.speed_secs == 0 &&
+       r.fx.confuse == 0 && r.fx.shake == 0 {
+        r.fx.growth = 1
+        r.fx.score  = 10
+    }
+}
+
+// overwrite everything a recipe defines onto a kind (keeps name/size/spin).
+// r.flavor must be a persistent owned string (or "").
+apply_recipe_to_kind :: proc(k: ^FoodKind, r: Recipe, author: string) {
+    k.hue    = r.hue
+    k.color  = hsv_rgb(f32(r.hue), 0.72, 1.0)
+    k.shape  = FoodShape(r.shape)
+    k.rarity = r.rarity
+    k.author = author
+    k.flavor = r.flavor
+    k.fx_speed   = r.fx.speed_mult
+    k.fx_speed_t = r.fx.speed_secs
+    k.fx_growth  = r.fx.growth
+    k.fx_score   = r.fx.score
+    k.fx_shake   = r.fx.shake
+    k.fx_confuse = r.fx.confuse
+    k.fx_bursts  = r.fx.bursts
+    k.fx_tint = {}
+    if t, ok := r.fx.tint.?; ok {
+        k.fx_tint = {u8(clamp(t[0], 0, 255)), u8(clamp(t[1], 0, 255)), u8(clamp(t[2], 0, 255)), 90}
+    }
+}
+
+set_toast :: proc(s: string) {
+    delete(toast)
+    toast = strings.clone(s)
+    toast_t = 2.5
+}
+
+// ---------------------------------------------------------------------------
+// Share codes: export a kind as "SNAKE3D1.<base64url(json)>", import it back
+// ---------------------------------------------------------------------------
+
+export_share_code :: proc(idx: int, allocator := context.temp_allocator) -> string {
+    k := kinds[idx]
+    tint: Maybe([3]int)
+    if k.fx_tint.a > 0 {
+        tint = [3]int{int(k.fx_tint.r), int(k.fx_tint.g), int(k.fx_tint.b)}
+    }
+    sr := Share_Recipe{
+        v = 1, name = k.name, hue = k.hue, shape = int(k.shape),
+        rarity = k.rarity, flavor = k.flavor,
+        fx = {
+            speed_mult = k.fx_speed, speed_secs = k.fx_speed_t,
+            growth = k.fx_growth, score = k.fx_score, shake = k.fx_shake,
+            confuse = k.fx_confuse, bursts = k.fx_bursts, tint = tint,
+        },
+    }
+    data, merr := json.marshal(sr, allocator = allocator)
+    if merr != nil do return ""
+    defer delete(data, allocator)
+    b64, berr := base64.encode(data, base64.ENC_URL_TABLE, allocator)
+    if berr != nil do return ""
+    defer delete(b64, allocator)
+    // URL-safe alphabet, padding stripped (decode re-adds it)
+    return strings.concatenate({SHARE_PREFIX, strings.trim_right(b64, "=")}, allocator)
+}
+
+// decode + clamp + register as a NEW kind (author "分享"); returns kinds index.
+// Existing kinds are never mutated — live foods reference them — so a name
+// clash gets a ~2, ~3, ... suffix until unique.
+import_share_code :: proc(text: string) -> (int, bool) {
+    payload := strings.trim_space(text)
+    if !strings.has_prefix(payload, SHARE_PREFIX) do return -1, false
+    payload = payload[len(SHARE_PREFIX):]
+    if len(payload) == 0 do return -1, false
+    padded := payload
+    switch len(payload) % 4 {
+    case 1: return -1, false // impossible length for base64
+    case 2: padded = strings.concatenate({payload, "=="}, context.temp_allocator)
+    case 3: padded = strings.concatenate({payload, "="}, context.temp_allocator)
+    }
+    data, derr := base64.decode(padded, base64.DEC_URL_TABLE, allocator = context.temp_allocator)
+    if derr != nil || len(data) == 0 do return -1, false
+    sr: Share_Recipe
+    if json.unmarshal(data, &sr, allocator = context.temp_allocator) != nil do return -1, false
+    if sr.v != 1 || sr.name == "" do return -1, false
+
+    r := Recipe{hue = sr.hue, shape = sr.shape, rarity = sr.rarity,
+                flavor = strings.clone(sr.flavor), fx = sr.fx}
+    clamp_recipe(&r)
+
+    name := sr.name
+    suffix := 1
+    for {
+        if _, taken := kind_by_name[name]; !taken do break
+        suffix += 1
+        name = fmt.tprintf("%s~%d", sr.name, suffix)
+    }
+    k := gen_kind(strings.clone(name), 0) // base gives persistent name + size/spin
+    apply_recipe_to_kind(&k, r, "分享")
+    append(&kinds, k)
+    idx := len(kinds) - 1
+    kind_by_name[k.name] = idx
+    return idx, true
+}
+
+// ---------------------------------------------------------------------------
+// LLM recipe generation: worker thread + curl via a config file, so neither
+// the API key nor the word ever appear on the command line.
+// ---------------------------------------------------------------------------
+
+LLM_SYSTEM_PROMPT :: `你在为一个3D贪吃蛇游戏设计食物。玩家给出食物名称，你只输出一个JSON对象，不要输出任何其他文字。字段：hue(0-359整数,符合该食物直觉颜色的色相), shape(0球1方块2圆锥3宝石,选最像的), rarity(0常见1稀有2传说,日常食物0,稀奇或离谱的1-2), flavor(不超过16字的中文幽默点评), fx对象:{speed_mult(0.45-2.0,小于1=加速,大于1=减速,1=无速度效果), speed_secs(0-8), growth(-6到6整数,正=长身体,负=炸掉尾巴), score(-50到100整数), shake(0-1,爆炸震屏), confuse(0-6,AI眩晕秒数), bursts(1-4,粒子烟花数), tint(全屏闪光颜色[r,g,b]各0-255,无闪光则null)}。要贴合食物真实特性:辣椒加速,冰棍减速,手榴弹炸尾,便便扣分,毒蘑菇眩晕;普通食物给温和正面效果;有害效果(负growth/负score/confuse大于0)必须有合理理由。`
+
+LLM_Chat_Message :: struct {
+    role:    string,
+    content: string,
+}
+
+LLM_Chat_Request :: struct {
+    model:       string,
+    temperature: f32,
+    messages:    []LLM_Chat_Message,
+}
+
+LLM_Resp_Message :: struct { content: string }
+LLM_Resp_Choice  :: struct { message: LLM_Resp_Message }
+LLM_Response     :: struct { choices: []LLM_Resp_Choice }
+
+LLM_Job :: struct {
+    word: string, // heap clone owned by the worker, freed when done
+}
+
+// read once at startup: no key = LLM path fully disabled (local hash only)
+llm_init_config :: proc() {
+    llm_api_key = os.get_env("FEED_LLM_API_KEY", context.allocator)
+    if llm_api_key == "" do return
+    llm_enabled = true
+    llm_base_url = os.get_env("FEED_LLM_BASE_URL", context.allocator)
+    if llm_base_url == "" do llm_base_url = "https://api.moonshot.cn/v1"
+    llm_model = os.get_env("FEED_LLM_MODEL", context.allocator)
+    if llm_model == "" do llm_model = "kimi-k2-0905-preview"
+}
+
+llm_start :: proc(word: string, kind_idx: int) {
+    job := new(LLM_Job)
+    job.word = strings.clone(word)
+    sync.mutex_lock(&llm_mutex)
+    llm_state = .COOKING
+    sync.mutex_unlock(&llm_mutex)
+    llm_kind_idx = kind_idx
+    llm_word = strings.clone(word)
+    // nil init_context: the worker gets its own default context (own temp
+    // allocator); self_cleanup frees the Thread struct on exit
+    if thread.create_and_start_with_data(job, llm_worker, nil, .Normal, true) == nil {
+        llm_state = .IDLE // spawn failed: stay fully local
+        llm_kind_idx = -1
+        delete(llm_word)
+        llm_word = ""
+        delete(job.word)
+        free(job)
+    }
+}
+
+llm_worker :: proc(data: rawptr) {
+    // NOTE: runs off the main thread — never call raylib here
+    job := cast(^LLM_Job)data
+    recipe: Recipe
+    ok := false
+    defer {
+        sync.mutex_lock(&llm_mutex)
+        if ok do llm_recipe = recipe
+        llm_state = ok ? LLM_State.READY : LLM_State.FAILED
+        sync.mutex_unlock(&llm_mutex)
+        delete(job.word)
+        free(job)
+    }
+
+    dir, terr := os.temp_dir(context.allocator)
+    if terr != nil do return
+    defer delete(dir, context.allocator)
+    pid := os.get_pid()
+    cfg_path  := fmt.aprintf("%s/snake3d_llm_%d.cfg", dir, pid, allocator = context.allocator)
+    req_path  := fmt.aprintf("%s/snake3d_llm_%d_req.json", dir, pid, allocator = context.allocator)
+    resp_path := fmt.aprintf("%s/snake3d_llm_%d_resp.json", dir, pid, allocator = context.allocator)
+    defer delete(cfg_path, context.allocator)
+    defer delete(req_path, context.allocator)
+    defer delete(resp_path, context.allocator)
+    defer {
+        _ = os.remove(cfg_path)
+        _ = os.remove(req_path)
+        _ = os.remove(resp_path)
+    }
+
+    // request body — json.marshal handles all escaping of prompt and word
+    req := LLM_Chat_Request{
+        model = llm_model, temperature = 0.9,
+        messages = {
+            {role = "system", content = LLM_SYSTEM_PROMPT},
+            {role = "user",   content = job.word},
+        },
+    }
+    body, merr := json.marshal(req, allocator = context.allocator)
+    if merr != nil do return
+    defer delete(body, context.allocator)
+    if os.write_entire_file(req_path, body) != nil do return
+
+    // curl -K config: the API key lives here, never in argv
+    cfg := fmt.aprintf(
+        "url = \"%s/chat/completions\"\n" +
+        "header = \"Authorization: Bearer %s\"\n" +
+        "header = \"Content-Type: application/json\"\n" +
+        "data = \"@%s\"\n" +
+        "output = \"%s\"\n" +
+        "max-time = 12\n" +
+        "silent\n" +
+        "show-error\n",
+        llm_base_url, llm_api_key, req_path, resp_path, allocator = context.allocator)
+    defer delete(cfg, context.allocator)
+    if os.write_entire_file(cfg_path, cfg) != nil do return
+
+    desc: os.Process_Desc
+    desc.command = {"curl", "-K", cfg_path}
+    child, perr := os.process_start(desc)
+    if perr != nil do return
+    pstate, werr := os.process_wait(child)
+    if werr != nil || !pstate.exited || pstate.exit_code != 0 do return
+
+    resp, rerr := os.read_entire_file(resp_path, context.allocator)
+    if rerr != nil do return
+    defer delete(resp, context.allocator)
+
+    // outer envelope: {"choices":[{"message":{"content":"..."}}]}
+    // unmarshal allocations (outer + recipe strings) intentionally persist:
+    // recipe.flavor is handed to kinds[] on success, and at most one request
+    // is ever in flight, so this stays a few KB per cooked word.
+    outer: LLM_Response
+    if json.unmarshal(resp, &outer, allocator = context.allocator) != nil do return
+    if len(outer.choices) == 0 do return
+    content := strip_json_fences(outer.choices[0].message.content)
+    if len(content) == 0 do return
+    if json.unmarshal(transmute([]u8)content, &recipe, allocator = context.allocator) != nil do return
+    ok = true
+}
+
+// strip an optional ```json ... ``` fence the model may wrap the object in
+strip_json_fences :: proc(s: string) -> string {
+    t := strings.trim_space(s)
+    if strings.has_prefix(t, "```") {
+        i := strings.index_byte(t, '\n')
+        if i < 0 do return ""
+        t = strings.trim_space(t[i + 1:])
+        if strings.has_suffix(t, "```") do t = t[:len(t) - 3]
+        t = strings.trim_space(t)
+    }
+    return t
+}
+
+// main thread, every frame: pick up the worker's result and apply it onto the
+// placeholder kind (gen_kind output stays intact on failure)
+llm_poll :: proc() {
+    if llm_state == .IDLE || llm_state == .COOKING do return
+    sync.mutex_lock(&llm_mutex)
+    st := llm_state
+    r := llm_recipe
+    if st != .COOKING do llm_state = .IDLE
+    sync.mutex_unlock(&llm_mutex)
+
+    idx := llm_kind_idx
+    if st == .READY && idx >= 0 && idx < len(kinds) {
+        clamp_recipe(&r)
+        apply_recipe_to_kind(&kinds[idx], r, "AI")
+        set_toast(fmt.tprintf("AI 烹饪完成: %s", kinds[idx].name))
+    } else if st == .FAILED {
+        set_toast("AI 烹饪失败，已使用本地配方")
+    }
+    if llm_word != "" {
+        delete(llm_word)
+        llm_word = ""
+    }
+    llm_kind_idx = -1
+}
+
+// SNAKE_SELFTEST=1: headless share-code roundtrip (runs before raylib init)
+self_test :: proc() -> bool {
+    orig := FoodKind{
+        name = strings.clone("自测辣翅"), author = "本地", flavor = strings.clone("辣到灵魂出窍"),
+        hue = 14, color = hsv_rgb(14, 0.72, 1.0), shape = .CONE,
+        size = 0.30, spin = 2.0, rarity = 1,
+        fx_speed = 0.5, fx_speed_t = 5, fx_growth = 2, fx_score = 25,
+        fx_shake = 0.3, fx_tint = {255, 120, 30, 90}, fx_confuse = 0, fx_bursts = 2,
+    }
+    append(&kinds, orig)
+    kind_by_name[orig.name] = 0
+
+    code := export_share_code(0, context.allocator)
+    fmt.println("share code:", code)
+    idx, ok := import_share_code(code)
+    if !ok {
+        fmt.println("SELFTEST FAIL: import rejected the exported code")
+        return false
+    }
+    k := kinds[idx]
+    checks := [?]struct{field: string, pass: bool}{
+        {"name",    k.name == "自测辣翅~2"}, // orig is registered, so the clone is suffixed
+        {"author",  k.author == "分享"},
+        {"flavor",  k.flavor == orig.flavor},
+        {"hue",     k.hue == orig.hue},
+        {"color",   k.color == hsv_rgb(14, 0.72, 1.0)},
+        {"shape",   k.shape == orig.shape},
+        {"rarity",  k.rarity == orig.rarity},
+        {"speed",   k.fx_speed == orig.fx_speed},
+        {"speed_t", k.fx_speed_t == orig.fx_speed_t},
+        {"growth",  k.fx_growth == orig.fx_growth},
+        {"score",   k.fx_score == orig.fx_score},
+        {"shake",   k.fx_shake == orig.fx_shake},
+        {"confuse", k.fx_confuse == orig.fx_confuse},
+        {"bursts",  k.fx_bursts == orig.fx_bursts},
+        {"tint",    k.fx_tint == rl.Color{255, 120, 30, 90}},
+    }
+    all := true
+    for c in checks {
+        if !c.pass {
+            fmt.println("SELFTEST FAIL: field", c.field, "mismatch")
+            all = false
+        }
+    }
+    fmt.println("roundtrip:", all ? "PASS" : "FAIL")
+    if !all do return false
+
+    // case 2: no tint → tint must come back absent (alpha 0)
+    plain := FoodKind{
+        name = strings.clone("plain"), author = "本地", flavor = "",
+        hue = 200, color = hsv_rgb(200, 0.72, 1.0), shape = .SPHERE,
+        rarity = 0, fx_growth = 1, fx_score = 10, fx_bursts = 1,
+    }
+    append(&kinds, plain)
+    kind_by_name[plain.name] = len(kinds) - 1
+    code2 := export_share_code(len(kinds) - 1, context.allocator)
+    idx2, ok2 := import_share_code(code2)
+    if !ok2 || kinds[idx2].fx_tint.a != 0 {
+        fmt.println("SELFTEST FAIL: null-tint roundtrip")
+        return false
+    }
+
+    // case 3: out-of-range wire values must be clamped
+    extreme := Share_Recipe{
+        v = 1, name = "extreme", hue = 725, shape = 9, rarity = 7, flavor = "",
+        fx = {speed_mult = 9.9, speed_secs = 99, growth = 99, score = -999,
+              shake = 5, confuse = 42, bursts = 0,
+              tint = [3]int{999, -5, 12}},
+    }
+    raw, _ := json.marshal(extreme, allocator = context.temp_allocator)
+    b64, _ := base64.encode(raw, base64.ENC_URL_TABLE, context.temp_allocator)
+    code3 := strings.concatenate({SHARE_PREFIX, strings.trim_right(b64, "=")}, context.temp_allocator)
+    idx3, ok3 := import_share_code(code3)
+    if !ok3 {
+        fmt.println("SELFTEST FAIL: extreme recipe rejected")
+        return false
+    }
+    k3 := kinds[idx3]
+    clamped := k3.hue == 5 && k3.shape == .GEM && k3.rarity == 2 &&
+        k3.fx_speed == 2.0 && k3.fx_speed_t == 8 && k3.fx_growth == 6 &&
+        k3.fx_score == -50 && k3.fx_shake == 1 && k3.fx_confuse == 6 &&
+        k3.fx_bursts == 1 && k3.fx_tint == rl.Color{255, 0, 12, 90}
+    if !clamped {
+        fmt.println("SELFTEST FAIL: clamping mismatch:", k3)
+        return false
+    }
+
+    // case 4: garbage codes must be rejected
+    bads := [?]string{
+        "SNAKE3D1.not*valid*base64",
+        "SNAKE3D1.aGVsbG8",          // valid base64, not JSON
+        "SNAKE3D1.",
+        "SNAKE3D1.eyJ2IjoyfQ",       // {"v":2} wrong version
+    }
+    for bad in bads {
+        if _, ok4 := import_share_code(bad); ok4 {
+            fmt.println("SELFTEST FAIL: bad code accepted:", bad)
+            return false
+        }
+    }
+
+    fmt.println("roundtrip+clamp+reject: PASS")
+    return true
+}
+
+// SNAKE_LLMTEST=1: headless end-to-end test of the LLM worker (curl + parse).
+// Needs FEED_LLM_API_KEY; point FEED_LLM_BASE_URL at a mock to test offline.
+llm_test :: proc() -> bool {
+    llm_init_config()
+    if !llm_enabled {
+        fmt.println("LLMTEST SKIP: FEED_LLM_API_KEY not set")
+        return false
+    }
+    idx := kind_index("榴莲")
+    llm_start("榴莲", idx)
+    for i := 0; i < 600 && llm_state == .COOKING; i += 1 {
+        time.sleep(50 * time.Millisecond)
+    }
+    if llm_state == .COOKING {
+        fmt.println("LLMTEST FAIL: worker timed out")
+        return false
+    }
+    llm_poll()
+    k := kinds[idx]
+    fmt.println("word:  榴莲")
+    fmt.printf("kind:  author=%s hue=%d shape=%v rarity=%d flavor=%s\n",
+        k.author, k.hue, k.shape, k.rarity, k.flavor)
+    fmt.printf("fx:    speed=%.2f/%.1fs growth=%d score=%d shake=%.2f confuse=%.1f bursts=%d tint=%v\n",
+        k.fx_speed, k.fx_speed_t, k.fx_growth, k.fx_score, k.fx_shake,
+        k.fx_confuse, k.fx_bursts, k.fx_tint)
+    ok := k.author == "AI"
+    fmt.println("llm roundtrip:", ok ? "PASS" : "FAIL (fell back to local recipe)")
+    return ok
 }
 
 // nearest food the snake is willing to eat (not rotting, not immune-refused)
@@ -817,6 +1323,9 @@ eat_food :: proc(i: int) {
     confuse_timer = max(confuse_timer, k.fx_confuse)
     if kind_harmful(k) {
         snake_memory[k.name] += 1 // 蛇会记住这次伤害
+    }
+    if k.flavor != "" {
+        set_toast(fmt.tprintf("AI 点评: %s", k.flavor))
     }
     for _ in 0..<max(k.fx_bursts, 1) do burst_col(cell_to_world(f.pos), k.color, 24)
     if audio_ok {
@@ -909,7 +1418,8 @@ snap_axis :: proc(v: rl.Vector3) -> IV3 {
 // - orbit view: SCREEN-relative (A always goes screen-left, W screen-up, ...)
 // - first-person: snake-frame relative (turn left/right, pitch up/down)
 handle_input :: proc() {
-    if rl.IsKeyPressed(.V) {
+    // (!input_open: V also pastes into the feed box — don't flip the camera then)
+    if rl.IsKeyPressed(.V) && !input_open {
         view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
     }
     // M: modern / classic snake skin
@@ -917,7 +1427,10 @@ handle_input :: proc() {
 
     if game_mode == .FEEDING {
         // 投喂模式：蛇永远是 AI 操控，玩家只管投喂
-        if rl.IsKeyPressed(.TAB) do dex_open = !dex_open
+        if rl.IsKeyPressed(.TAB) {
+            dex_open = !dex_open
+            dex_sel = 0
+        }
         if rl.IsKeyPressed(.T) {
             input_open = true
             input_len = 0
@@ -931,6 +1444,16 @@ handle_input :: proc() {
             if rl.IsKeyPressed(.SIX)   do cast_preset(5)
             if rl.IsKeyPressed(.SEVEN) do cast_preset(6)
             if rl.IsKeyPressed(.EIGHT) do cast_preset(7)
+            if dex_open {
+                rows := dex_visible_rows()
+                if rl.IsKeyPressed(.UP)   do dex_sel = max(0, dex_sel - 1)
+                if rl.IsKeyPressed(.DOWN) && rows > 0 do dex_sel = min(rows - 1, dex_sel + 1)
+                if rl.IsKeyPressed(.C) && rows > 0 {
+                    copy_share_code(min(dex_sel, rows - 1))
+                }
+            } else if rl.IsKeyPressed(.C) && last_cast_kind >= 0 && last_cast_kind < len(kinds) {
+                copy_share_code(last_cast_kind)
+            }
         }
         return
     }
@@ -974,10 +1497,36 @@ handle_text_input :: proc() {
             input_len += 1
         }
     }
+    // Cmd+V: paste (share codes are long, typing them is not realistic)
+    if rl.IsKeyPressed(.V) && (rl.IsKeyDown(.LEFT_SUPER) || rl.IsKeyDown(.RIGHT_SUPER)) {
+        clip := rl.GetClipboardText()
+        if clip != nil {
+            p := transmute([^]u8)clip
+            for i := 0; p[i] != 0 && input_len < len(input_buf) - 1; i += 1 {
+                if p[i] >= 32 && p[i] < 127 { // same ASCII-only filter as typing
+                    input_buf[input_len] = p[i]
+                    input_len += 1
+                }
+            }
+        }
+    }
     if rl.IsKeyPressed(.BACKSPACE) && input_len > 0 do input_len -= 1
     if rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.KP_ENTER) {
         if input_len > 0 {
-            cast_word(string(input_buf[:input_len]))
+            text := string(input_buf[:input_len])
+            if strings.has_prefix(text, SHARE_PREFIX) {
+                // importing a recipe shared by another player
+                idx, ok := import_share_code(text)
+                if ok {
+                    spawn_kind(idx)
+                    last_cast_kind = idx
+                    set_toast(fmt.tprintf("已投喂: %s", kinds[idx].name))
+                } else {
+                    set_toast("分享码无效")
+                }
+            } else {
+                cast_word(text)
+            }
         }
         input_open = false
         input_len = 0
@@ -986,6 +1535,14 @@ handle_text_input :: proc() {
         input_open = false
         input_len = 0
     }
+}
+
+// C: copy a kind's share code to the clipboard
+copy_share_code :: proc(idx: int) {
+    code := export_share_code(idx)
+    if code == "" do return
+    rl.SetClipboardText(fmt.ctprintf("%s", code))
+    set_toast(fmt.tprintf("分享码已复制: %s", kinds[idx].name))
 }
 
 // ---------------------------------------------------------------------------
@@ -1263,23 +1820,49 @@ draw_tint :: proc() {
     rl.DrawRectangle(0, 0, SCREEN_W, SCREEN_H, c)
 }
 
-// 图鉴: all food kinds discovered so far
+DEX_ROW_BASE   :: 26
+DEX_ROW_FLAVOR :: 14
+
+dex_row_h :: proc(k: FoodKind) -> i32 {
+    return DEX_ROW_BASE + (k.flavor != "" ? DEX_ROW_FLAVOR : 0)
+}
+
+// how many kinds fit the panel with the current (variable) row heights
+dex_visible_rows :: proc() -> int {
+    budget := SCREEN_H - 170 - 40 - 60 // panel top, bottom margin, header
+    rows := 0
+    used := 0
+    for rows < len(kinds) {
+        used += int(dex_row_h(kinds[rows]))
+        if used > budget do break
+        rows += 1
+    }
+    return rows
+}
+
+// 图鉴: all food kinds discovered so far (↑/↓ select, C copies the share code)
 draw_dex :: proc() {
     if !dex_open do return
-    w: i32 = 340
+    w: i32 = 360
     x := SCREEN_W - w - 20
     y: i32 = 170
-    rows := min(len(kinds), 22)
-    h := i32(60 + rows * 26)
+    rows := dex_visible_rows()
+    total := 0
+    for i in 0..<rows do total += int(dex_row_h(kinds[i]))
+    h := i32(60 + total)
     rl.DrawRectangle(x, y, w, h, {12, 14, 24, 225})
     rl.DrawRectangleLinesEx({f32(x), f32(y), f32(w), f32(h)}, 1, {120, 128, 150, 180})
     draw_text(fmt.ctprintf("食物图鉴 · 已发现 %d 种", len(kinds)), x + 16, y + 12, 20,
         rl.RAYWHITE, true)
 
     buf: [192]u8
+    sel := min(dex_sel, rows - 1)
+    ry := y + 44
     for i in 0..<rows {
         k := kinds[i]
-        ry := y + 44 + i32(i) * 26
+        if i == sel {
+            rl.DrawRectangle(x + 6, ry - 4, w - 12, dex_row_h(k), {70, 90, 130, 70})
+        }
         rl.DrawCircle(x + 24, ry + 8, 5, k.color)
         // effect tags（中文标签 + ASCII 数值，各自用 bprintf 写入 buf 避免重叠）
         n := 0
@@ -1306,11 +1889,19 @@ draw_dex :: proc() {
         stars := k.rarity == 2 ? "***" : (k.rarity == 1 ? "**" : "*")
         rc := RARITY_COLORS[k.rarity]
         draw_text(fmt.ctprintf("%s", k.name), x + 40, ry, 18, rc, true)
+        nw := measure_text(fmt.ctprintf("%s", k.name), 18, true)
+        if k.author != "" {
+            draw_text(fmt.ctprintf("%s", k.author), x + 46 + nw, ry + 5, 12, {125, 130, 148, 230})
+        }
         draw_text(fmt.ctprintf("%s  %s", stars, cstring(raw_data(buf[:]))),
-            x + 130, ry + 2, 14, {170, 175, 190, 255})
+            x + 150, ry + 2, 14, {170, 175, 190, 255})
+        if k.flavor != "" {
+            draw_text(fmt.ctprintf("%s", k.flavor), x + 40, ry + 22, 13, {150, 152, 168, 225})
+        }
+        ry += dex_row_h(k)
     }
     if len(kinds) > rows {
-        draw_text(fmt.ctprintf("... and %d more", len(kinds) - rows), x + 40, y + 44 + i32(rows) * 26, 14,
+        draw_text(fmt.ctprintf("... and %d more", len(kinds) - rows), x + 40, ry, 14,
             {120, 125, 140, 255})
     }
 }
@@ -1325,13 +1916,18 @@ draw_input_box :: proc() {
     rl.DrawRectangle(x, y, w, h, {16, 20, 32, 240})
     rl.DrawRectangleLinesEx({f32(x), f32(y), f32(w), f32(h)}, 2, {255, 200, 120, 220})
     draw_text("投喂什么？", x + 18, y + 10, 15, {200, 190, 160, 255})
+    // long share codes: show the tail so the pasted code stays verifiable
     typed := string(input_buf[:input_len])
-    draw_text(fmt.ctprintf("%s", typed), x + 18, y + 30, 24, rl.RAYWHITE, true)
+    shown := typed
+    if len(shown) > 56 {
+        shown = strings.concatenate({"...", shown[len(shown) - 53:]}, context.temp_allocator)
+    }
+    draw_text(fmt.ctprintf("%s", shown), x + 18, y + 30, 24, rl.RAYWHITE, true)
     if time_total * 2 - math.floor(time_total * 2) < 0.55 {
-        w := measure_text(fmt.ctprintf("%s", typed), 24, true)
+        w := measure_text(fmt.ctprintf("%s", shown), 24, true)
         draw_text("_", x + 18 + w + 3, y + 30, 24, rl.RAYWHITE, true)
     }
-    draw_text("Enter 投放 · Esc 取消", x + w - 190, y + 12, 13, {140, 145, 160, 255})
+    draw_text("输入食物名，或粘贴 SNAKE3D1. 分享码 · Enter 投放 · Esc 取消", x + 18, y + h + 8, 13, {140, 145, 160, 255})
 }
 
 draw_snake :: proc(alpha: f32, hide_head: bool) {
@@ -1502,28 +2098,53 @@ CJK_SOURCE :: [?]string{
     "投喂什么？",
     "投放 取消",
     "蛇自动觅食，你来发明食物 —",
+    "预设 本地 分享 烹饪中 完成 失败 使用 配方 点评 复制 码 粘贴 无效 输入 或 已投喂",
 }
 
+// top-1400 Han chars by frequency, counted from ~100k chars of real Chinese
+// prose (Wikipedia: 汉字/中国菜/中国历史/食物/水果/蔬菜/辣/甜/酸) — this gives
+// the AI-written flavor lines near-complete glyph coverage
+COMMON_CJK :: "一丁七万三上下不与专且世丘业东两严並个中临丹为主举久义之乌乐乘乙九也习书乱乳乾亂了予争事二于云互五亚些亞亡交亦产京亲人仁仅今仍从他付代令以仪们仰件价任份企伊伏伐休众优会传伤伦伯似但佈位低住体佔何余佛作使來例供依侯侵便係促俄俗俘保信修個們候借倡值假偏做停健備傳像僚儒儿元充先光克免党入內全兩八公六共关兴兵其具典养兼内再写军农冲决冷准凉减几凱出击刀分切划列刘则创初判別利别到制刺刻則削剌前割創劃劉力功加务动助努势動勢包匈化北区區十千升半华协卑单南博占卫印危即卻历压厘厚原厥去县参參又及友双反发叔取受变叙叛口古句另只召可台史右叶号司吃各合吉同名后吏向吕君吞否含启吴呈告员周味命和咸哀品哈响唐唯商問喀善喜單嗣嘉器噶嚴四回因团困围固国图圈國圖土在地场址均坏块坡型城域培基塊境墓增墨士处备复夏外多大天太夫央失头夷夹夺奇奉契奠女奴好如始姓委威子孔字存孙季学學宁它守安宋完宗官定实宣室宦宪宫宰害家容宽密富寒察實寫对导封射将將專尊對導小少尔尖尚尤就尼局层居届展属屠屬山岁岛岸島崇崛崩川州工左巨差己已巴巾币市布师帝带席帶常干平年并幾广庄序库应底庚府废度座庫康廢廣延廷建开异弃式引弘弟张弱張強强归当录形彩彭影役往征很律後徐得從御復微德心必志忠快念忽怀态思性总恢恩恭息患情想意感態慎慢應懿戎成戒或战戚戰户房所手才打托执扩扶批找承技把投抗折护担拆拉拥括拼持指损据授掉掌排採探接控推措描提握揮援操據支收改攻放政故效敗教敬数整數文斗料断斯新斷方於施旁族旗无日旧早时昌明易春昭是显時晉晋晚普景暴更書曹曾替最會月有服望朝期木未末本术朱机杀杂权李材村束条来杨東松极构林果某查标校样核根格栽桂案桓档梁條植椒楚業極楷概構標模樣機橫權次歐止正此步武歧歷死段殷母每毒比毛毫氏民气氟氢氣氧氫氯水永汁求汉汗江汤決沒沙没河油治沿況法泛注泰泽洋洛洪洲活派流济浓海消液淮深混清渐減渡温港游湖湾源準溫溶滅满滿演漠漢漸澳激濃濟灣火灭灵灾炎点為烈烤烧烹無然照熙熟熱燕營爆爭爱爲父爾片版牛牧物特状狀独猜献獨獻玄率玉王环现珍班現球理瑞瑭璋瓜瓦甘甚甜生產用田由甲电画界留略番畫異當疆疫病登發白百的皆皇皮益盐监盘盛盟目直相盾省看真着督矛知短石码研破础硝硫确碗碘碱碳確碼礎示礼社祀祖神祥祭祸禁禅福离私秋种科秦秩积称移稀程税種稱稳穆究空突窦立章端竹笔符第筆等筑策筷签简算管節範篆篡簡簽籍米类粉精糖系紀約紅純紙級素索細終組結給統經維線編總繁織繼红约级纪纳纵纷线组细织终经结给绝统继续维绿缓编缺网罗置署美群義羽習翻老考者而耕耗职联聯聲肉育肴胜胡能脱腐臣臨自至致臺與興舉舊舌舜航般船良色节花芽苏若苦英范茄草荒荣药荷获莽菌菜華营萬落葉著董蒙蔡蔬薄藏藝藩蘇虎處號虽蛋蜀蝕融血行衍術衛衡补表衰袁被袭裂製複西要覆見規視覺见观规视觉角解言計記設許註詞試話該認語說調論謂謎識譯議讀變计订认讨让议记讲许论设证识词试诛话该语说诸调豆象豪貿資質负贡财贤败货质贵贸资赋赖赤赫走赵起趁超越趋足跋距路身軍較載輸轉车转轻载较辅输辛辞辣辨農边辽达迁迅过迎运近还这进远连迫述追退送逃选透逐途這通逝速造連進遇運遍過道達遗遠適遭遷選遼避還邓邦郑郡部郭都鄭配酒酱酸采释里重野量金銀錄铁铜银错镇長长門開間閣關门问间队防阳阶阿附际陆陈降限陕院除陳陵陶陷陸隆隋随隔際隨难集雍雖雙雜離難電需震霍露霸青靖非面革韓韩音響項須頒領頭題顏類顯页项顺顿领题風风食飲養餐饪饭饮馆首香馬马驾骨體高鬥魏鮮鱼鲁鲜鳥鹹鹽麻黃黄黎黑點黨鼎齐龍龙"
+
 load_cjk_font :: proc() {
-    runes: [dynamic]rune
-    defer delete(runes)
-    for c in 32..=126 do append(&runes, rune(c))
-    for s in CJK_SOURCE {
+    try_load :: proc(runes: []rune) -> (rl.Font, bool) {
+        // 注意：raylib 无法解析 .ttc（会静默回退成内置默认字体），必须用纯 .ttf
+        f := rl.LoadFontEx("/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+            64, raw_data(runes), i32(len(runes)))
+        if rl.IsFontValid(f) && f.baseSize == 64 {
+            return f, true
+        }
+        return {}, false
+    }
+    collect :: proc(s: string, runes: ^[dynamic]rune) {
         i := 0
         for i < len(s) {
             r, size := utf8.decode_rune_in_string(s[i:])
             if r != utf8.RUNE_ERROR && r > 126 {
                 dup := false
                 for e in runes do if e == r { dup = true; break }
-                if !dup do append(&runes, r)
+                if !dup do append(runes, r)
             }
             i += size
         }
     }
-    // 注意：raylib 无法解析 .ttc（会静默回退成内置默认字体），必须用纯 .ttf
-    f := rl.LoadFontEx("/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
-        64, raw_data(runes), i32(len(runes)))
-    if rl.IsFontValid(f) && f.baseSize == 64 {
+
+    runes: [dynamic]rune
+    defer delete(runes)
+    for c in 32..=126 do append(&runes, rune(c))
+    for s in CJK_SOURCE do collect(s, &runes)
+    collect(COMMON_CJK, &runes)
+    if f, ok := try_load(runes[:]); ok {
+        font_cjk = f
+        cjk_ok = true
+        rl.SetTextureFilter(font_cjk.texture, .BILINEAR)
+        return
+    }
+    // fallback: minimal UI-only glyph set (pre-LLM behavior)
+    clear(&runes)
+    for c in 32..=126 do append(&runes, rune(c))
+    for s in CJK_SOURCE do collect(s, &runes)
+    if f, ok := try_load(runes[:]); ok {
         font_cjk = f
         cjk_ok = true
         rl.SetTextureFilter(font_cjk.texture, .BILINEAR)
@@ -1770,8 +2391,14 @@ draw_hud :: proc() {
         }
         if confuse_timer > 0 {
             draw_text(fmt.ctprintf("眩晕 %.0fs", confuse_timer), 26, fy, 17, {200, 120, 255, 255}, true)
+            fy += 22
         }
-        draw_text("T: 投喂    1-8: 快捷食物    Tab: 图鉴    V: 视角    M: 皮肤    IJKL: 转视角    P/Space: 暂停    R: 重开",
+        if llm_is_cooking() && llm_word != "" {
+            pulse := 0.6 + 0.4 * math.sin(time_total * 6)
+            draw_text(fmt.ctprintf("AI 烹饪中: %s...", llm_word), 26, fy, 17,
+                {255, u8(180 + 40 * pulse), 110, 255}, true)
+        }
+        draw_text("T: 投喂    1-8: 快捷食物    Tab: 图鉴    C: 复制分享码    粘贴分享码投喂    V: 视角    M: 皮肤    IJKL: 转视角    P/Space: 暂停    R: 重开",
             26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
         return
     }
@@ -1786,6 +2413,24 @@ draw_hud :: proc() {
 
     draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    -/=: speed    V: view    B: autopilot    M: skin    P/Space: pause    R: restart",
         26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
+}
+
+llm_is_cooking :: proc() -> bool {
+    sync.mutex_lock(&llm_mutex)
+    s := llm_state == .COOKING
+    sync.mutex_unlock(&llm_mutex)
+    return s
+}
+
+draw_toast :: proc() {
+    if toast_t <= 0 || toast == "" do return
+    a := u8(235 * clamp(toast_t / 0.5, 0, 1))
+    w := measure_text(fmt.ctprintf("%s", toast), 19, true)
+    x := (SCREEN_W - w) / 2
+    y: i32 = SCREEN_H - 78
+    rl.DrawRectangle(x - 14, y - 6, w + 28, 32, {10, 12, 20, u8(f32(a) * 0.8)})
+    rl.DrawRectangleLinesEx({f32(x - 14), f32(y - 6), f32(w + 28), 32}, 1, {255, 210, 140, a / 2})
+    draw_text(fmt.ctprintf("%s", toast), x, y, 19, {255, 232, 175, a}, true)
 }
 
 draw_title :: proc() {
@@ -1949,6 +2594,7 @@ draw_frame :: proc(alpha: f32) {
     draw_food_labels()
     draw_dex()
     draw_input_box()
+    draw_toast()
     if state == .PLAYING && !started {
         draw_centered("Steer with A / D / W / S to launch the snake", SCREEN_H - 76, 24,
             rl.Color{u8(200 + 55 * math.sin(time_total * 4)), 220, 120, 255}, true)
@@ -1980,6 +2626,16 @@ capture :: proc(filename: cstring, alpha: f32) {
 // ---------------------------------------------------------------------------
 
 main :: proc() {
+    // headless self-test: SNAKE_SELFTEST=1 ./snake3d
+    if os.get_env("SNAKE_SELFTEST", context.allocator) == "1" {
+        os.exit(self_test() ? 0 : 1)
+    }
+    if os.get_env("SNAKE_LLMTEST", context.allocator) == "1" {
+        os.exit(llm_test() ? 0 : 1)
+    }
+
+    llm_init_config() // FEED_LLM_API_KEY / FEED_LLM_BASE_URL / FEED_LLM_MODEL
+
     rl.SetConfigFlags({.MSAA_4X_HINT})
     rl.InitWindow(SCREEN_W, SCREEN_H, "3D Snake — true 3D (Odin + raylib)")
     rl.SetTargetFPS(60)
@@ -2015,6 +2671,8 @@ main :: proc() {
     for !rl.WindowShouldClose() {
         dt := min(rl.GetFrameTime(), 0.05)
         time_total += dt
+        toast_t = max(0, toast_t - dt)
+        llm_poll()
 
         alpha := clamp(move_timer / move_interval, 0, 1)
 

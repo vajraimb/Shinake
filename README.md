@@ -31,6 +31,36 @@ the tail off → poop & poison mushroom (the snake will remember these).*
   refuses to eat that food ever again (it rots away). Keep inventing!
 - **Food dex** (`Tab`) — every kind you've discovered, with its effect tags
 
+### AI 配方（可选）
+
+投喂一个新词时，游戏可以先让大语言模型为这个词现场"烹饪"一份配方：
+颜色、形状、稀有度、一句幽默点评，以及加速/炸尾/眩晕等效果，全部贴合
+食物的真实特性。配置方式（任何一个 OpenAI 兼容端点都可以，比如
+Kimi、OpenAI 或本地 Ollama）：
+
+```bash
+export FEED_LLM_API_KEY=sk-...                     # 不设置 = 完全离线，纯本地生成
+export FEED_LLM_BASE_URL=https://api.moonshot.cn/v1  # 默认值，可改成任意兼容端点
+export FEED_LLM_MODEL=kimi-k2-0905-preview           # 默认值
+```
+
+- **无网络/无 key 也能玩** — 没有配置 key 时一切照旧（本地哈希生成）；
+  请求失败、超时（12 秒）或 AI 输出解析失败时，也会自动保留本地配方
+- **不卡游戏** — 请求在工作线程里通过 `curl` 发出，游戏循环照常运行；
+  HUD 会显示 `AI 烹饪中: <词>`，完成后配方就地替换占位食物
+- **同一时刻只烹饪一个词** — 烹饪期间再投喂新词将直接使用本地配方
+- 词的来源会在图鉴中标注：`预设` / `本地` / `AI` / `分享`
+
+### 分享码
+
+每种食物都可以变成一串可移植的分享码（`SNAKE3D1.` 开头，base64url
+编码的 JSON 配方）：
+
+- 投喂后按 `C` — 复制最近一次投放的食物的分享码
+- 图鉴（`Tab`）里用 `↑` / `↓` 选择，按 `C` 复制选中那一行
+- 在投喂框（`T`）里 `Cmd+V` 粘贴别人的 `SNAKE3D1.…` 分享码并回车 —
+  解码、校验、数值钳制后作为新食物投放（重名会自动加 `~2` 后缀）
+
 ## Features
 
 - **True 3D movement** — six directions (±X, ±Y, ±Z) inside a 12³ cube
@@ -90,6 +120,9 @@ the tail off → poop & poison mushroom (the snake will remember these).*
 | `T` | Open the feed box — type any word, Enter to cast it |
 | `1` – `8` | Cast a preset food instantly |
 | `Tab` | Toggle the food dex (discovered kinds & effects) |
+| `↑` / `↓` (in dex) | Select a row |
+| `C` | Copy the share code (last cast, or the selected dex row) |
+| `Cmd+V` (in feed box) | Paste a `SNAKE3D1.` share code to import |
 
 ## Download
 
