@@ -7,6 +7,7 @@ import "core:encoding/json"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
+import "core:mem"
 import "core:os"
 import "core:strconv"
 import "core:strings"
@@ -75,6 +76,8 @@ FoodKind :: struct {
     fx_tint:    rl.Color, // a > 0 → fullscreen flash
     fx_confuse: f32,      // seconds of AI dizziness
     fx_bursts:  int,      // particle burst count
+    blueprint:  string,   // 效果蓝图 JSON {"do":[...]} (owned clone, "" = none; supersedes classic fx)
+    byline:     string,   // share v2 创作者落款 (owned clone, "" = none)
 }
 
 Food :: struct {
@@ -141,11 +144,30 @@ confuse_timer  : f32 = 0
 tint_timer     : f32 = 0
 tint_color     := rl.Color{0, 0, 0, 0}
 input_open     := false
-input_buf      : [512]u8   // long enough to hold a pasted SNAKE3D1. share code
+input_buf      : [3072]u8  // share v2 codes carrying blueprints+macros can reach ~1-2 KB
 input_len      := 0
 dex_open       := false          // Tab: 图鉴面板
 dex_sel        := 0              // keyboard selection inside the dex panel
 last_cast_kind := -1             // kinds index of the most recently cast food
+
+// --- 创造台 (Creator Workshop) state ---
+// edit_kind is a SCRATCH FoodKind (owned name/flavor clones, NOT in kinds[]);
+// edit_blueprint is the owned raw JSON, "" = none.
+editor_open      := false
+editor_sel       := 0
+edit_kind        : FoodKind
+edit_blueprint   : string
+edit_has_blueprint := false     // true: fx sliders hidden, blueprint rules
+edit_tint_idx    := 0           // 闪光: 0 = 无, 1..12 = hue (idx-1)*30
+edit_target      := Edit_Target.NONE
+edit_buf         : [512]u8      // shared text-edit buffer (name/flavor/creative/…)
+edit_len         := 0
+edit_rep_timer   : f32 = 0      // ←→ key-repeat timer
+editor_showcase  := IV3{GRID_N / 2, GRID_N - 2, GRID_N / 2} // live-preview cell
+editor_base_name : string       // borrowed dex name when 以此为基础改造 ("" = blank)
+pending_save     := false       // a save is waiting on the nickname prompt
+pending_copy     := false       // ... and it came from the 复制分享码 row
+creator_asked    := false       // nickname prompt already shown this session
 
 // --- toast notifications (bottom-center, ~2.5s) ---
 toast          : string          // owned clone
@@ -163,6 +185,8 @@ llm_mutex      : sync.Mutex
 llm_recipe     : Recipe          // written by the worker under llm_mutex
 llm_word       : string          // HUD copy, owned by the main thread
 llm_kind_idx   := -1             // placeholder kind index awaiting the recipe
+llm_job_mode   := LLM_Job_Mode.RECIPE // mode of the job currently in flight
+llm_creative_raw : string        // worker→main handoff of raw creative JSON
 
 font_ui        : rl.Font
 font_bold      : rl.Font
@@ -298,6 +322,11 @@ reset_game :: proc() {
     fx_speed_mult = 1
     confuse_timer = 0
     tint_timer = 0
+    play_clock = 0
+    shield_timer = 0
+    score_mult = 1
+    score_mult_timer = 0
+    clear_sched_queue()
     input_open = false
     input_len = 0
     ai_has_target = false
@@ -390,6 +419,7 @@ step :: proc() {
     if nh.x < 0 || nh.x >= GRID_N ||
        nh.y < 0 || nh.y >= GRID_N ||
        nh.z < 0 || nh.z >= GRID_N {
+        if shield_timer > 0 do return  // 护盾：撞墙不死，原地停一拍
         die()
         return
     }
@@ -397,6 +427,7 @@ step :: proc() {
     body := pending_growth > 0 ? snake[:] : snake[:len(snake) - 1]
     for s in body {
         if s == nh {
+            if shield_timer > 0 do break  // 护盾：允许咬到自己，穿身而过
             die()
             return
         }
@@ -440,8 +471,9 @@ die :: proc() {
     view_mode = .ORBIT   // pull out to orbit view so the crash site is visible
     shake_time = 0.5
     restart_timer = 1.5
-    play(snd_die)
+    death_squawk = true  // the frame loop plays snd_die — keeps die() raylib-free
     burst(cell_to_world(snake[0]))
+    clear_sched_queue()  // 死亡即清空蓝图计划动作
 }
 
 // ---------------------------------------------------------------------------
@@ -882,28 +914,59 @@ set_toast :: proc(s: string) {
 }
 
 // ---------------------------------------------------------------------------
-// Share codes: export a kind as "SNAKE3D1.<base64url(json)>", import it back
+// Share codes: export a kind as "SNAKE3D1.<base64url(json)>", import it back.
+// Wire format v2 (always exported): {"v":2,"name","hue","shape","rarity",
+// "flavor","fx":{...}(as v1), optional "blueprint":{...}, optional
+// "macros":{"name":{blueprint},...}(every macro the blueprint references),
+// optional "by":"creator"}. v1 payloads ({"v":1,...}) still import unchanged.
 // ---------------------------------------------------------------------------
 
 export_share_code :: proc(idx: int, allocator := context.temp_allocator) -> string {
     k := kinds[idx]
+    sb := strings.builder_make(context.temp_allocator)
+    strings.write_string(&sb, `{"v":2,"name":`)
+    write_json_string(&sb, k.name)
+    fmt.sbprintf(&sb, `,"hue":%d,"shape":%d,"rarity":%d,"flavor":`, k.hue, int(k.shape), k.rarity)
+    write_json_string(&sb, k.flavor)
     tint: Maybe([3]int)
     if k.fx_tint.a > 0 {
         tint = [3]int{int(k.fx_tint.r), int(k.fx_tint.g), int(k.fx_tint.b)}
     }
-    sr := Share_Recipe{
-        v = 1, name = k.name, hue = k.hue, shape = int(k.shape),
-        rarity = k.rarity, flavor = k.flavor,
-        fx = {
-            speed_mult = k.fx_speed, speed_secs = k.fx_speed_t,
-            growth = k.fx_growth, score = k.fx_score, shake = k.fx_shake,
-            confuse = k.fx_confuse, bursts = k.fx_bursts, tint = tint,
-        },
+    fx := Recipe_FX{
+        speed_mult = k.fx_speed, speed_secs = k.fx_speed_t,
+        growth = k.fx_growth, score = k.fx_score, shake = k.fx_shake,
+        confuse = k.fx_confuse, bursts = k.fx_bursts, tint = tint,
     }
-    data, merr := json.marshal(sr, allocator = allocator)
+    fxj, merr := json.marshal(fx, allocator = context.temp_allocator)
     if merr != nil do return ""
-    defer delete(data, allocator)
-    b64, berr := base64.encode(data, base64.ENC_URL_TABLE, allocator)
+    strings.write_string(&sb, `,"fx":`)
+    strings.write_string(&sb, string(fxj))
+    if k.blueprint != "" {
+        strings.write_string(&sb, `,"blueprint":`)
+        strings.write_string(&sb, k.blueprint)
+        // bundle every macro the blueprint references so codes are self-contained
+        bundle := collect_macro_bundle(k.blueprint)
+        if len(bundle) > 0 {
+            strings.write_string(&sb, `,"macros":{`)
+            first := true
+            for mname, mtext in bundle {
+                if !first do strings.write_string(&sb, ",")
+                first = false
+                write_json_string(&sb, mname)
+                strings.write_string(&sb, ":")
+                strings.write_string(&sb, mtext)
+            }
+            strings.write_string(&sb, "}")
+        }
+    }
+    byline := k.byline != "" ? k.byline : creator_byline
+    if byline != "" {
+        strings.write_string(&sb, `,"by":`)
+        write_json_string(&sb, byline)
+    }
+    strings.write_string(&sb, "}")
+    raw := strings.to_string(sb)
+    b64, berr := base64.encode(transmute([]u8)raw, base64.ENC_URL_TABLE, allocator)
     if berr != nil do return ""
     defer delete(b64, allocator)
     // URL-safe alphabet, padding stripped (decode re-adds it)
@@ -926,27 +989,770 @@ import_share_code :: proc(text: string) -> (int, bool) {
     }
     data, derr := base64.decode(padded, base64.DEC_URL_TABLE, allocator = context.temp_allocator)
     if derr != nil || len(data) == 0 do return -1, false
+    // peek at the version: v1 keeps the legacy typed decode, v2 walks the tree
+    root, perr := json.parse(data, .JSON, true, context.temp_allocator)
+    if perr != nil do return -1, false
+    obj, ok := root.(json.Object)
+    if !ok do return -1, false
+    switch int(jnum(obj, "v", -1)) {
+    case 1: return import_share_v1(data)
+    case 2: return import_share_v2(obj)
+    }
+    return -1, false
+}
+
+import_share_v1 :: proc(data: []u8) -> (int, bool) {
     sr: Share_Recipe
     if json.unmarshal(data, &sr, allocator = context.temp_allocator) != nil do return -1, false
     if sr.v != 1 || sr.name == "" do return -1, false
-
     r := Recipe{hue = sr.hue, shape = sr.shape, rarity = sr.rarity,
                 flavor = strings.clone(sr.flavor), fx = sr.fx}
     clamp_recipe(&r)
+    return register_shared_kind(sr.name, r, "", "")
+}
 
-    name := sr.name
+import_share_v2 :: proc(obj: json.Object) -> (int, bool) {
+    name := jstr_or(obj, "name", "")
+    if name == "" do return -1, false
+    fxv, fok := obj["fx"]
+    fx, fxok := fxv.(json.Object)
+    if !fok || !fxok do return -1, false
+    r := Recipe{
+        hue = int(jnum(obj, "hue", 0)), shape = int(jnum(obj, "shape", 0)),
+        rarity = int(jnum(obj, "rarity", 0)), flavor = strings.clone(jstr_or(obj, "flavor", "")),
+        fx = {
+            speed_mult = f32(jnum(fx, "speed_mult", 1)),
+            speed_secs = f32(jnum(fx, "speed_secs", 0)),
+            growth     = int(jnum(fx, "growth", 0)),
+            score      = int(jnum(fx, "score", 0)),
+            shake      = f32(jnum(fx, "shake", 0)),
+            confuse    = f32(jnum(fx, "confuse", 0)),
+            bursts     = int(jnum(fx, "bursts", 1)),
+        },
+    }
+    if tv, tok := fx["tint"]; tok {
+        if arr, aok := tv.(json.Array); aok && len(arr) == 3 {
+            r.fx.tint = [3]int{int(jnumv(arr[0], 0)), int(jnumv(arr[1], 0)), int(jnumv(arr[2], 0))}
+        }
+    }
+
+    // bundled macros (re-serialized compactly for local storage)
+    bundled := make(map[string]string, allocator = context.temp_allocator)
+    if mv, mok := obj["macros"]; mok {
+        mo, mook := mv.(json.Object)
+        if !mook do return -1, false
+        for mname, mval in mo {
+            msb := strings.builder_make(context.temp_allocator)
+            jwrite(&msb, mval)
+            bundled[strings.clone(mname, context.temp_allocator)] =
+                strings.clone(strings.to_string(msb), context.temp_allocator)
+        }
+    }
+
+    // optional blueprint: must test-compile with bundled + local macros available
+    bp_text := ""
+    if bv, bok := obj["blueprint"]; bok {
+        bsb := strings.builder_make(context.temp_allocator)
+        jwrite(&bsb, bv)
+        bp_text = strings.to_string(bsb)
+        actions, cok := bp_compile(bp_text, &bundled)
+        if !cok do return -1, false   // 蓝图无效 → 整码拒绝（分享码无效）
+        bp_free_actions(&actions)
+    }
+
+    clamp_recipe(&r)
+
+    // register bundled macros locally — never overwrite same-named local macros
+    changed := false
+    for mname, mtext in bundled {
+        if _, taken := macros[mname]; !taken {
+            macros[strings.clone(mname)] = strings.clone(mtext)
+            changed = true
+        }
+    }
+    if changed do save_macros()
+
+    return register_shared_kind(name, r, bp_text, jstr_or(obj, "by", ""))
+}
+
+// shared tail of both import versions: unique-name suffixing + kind registration
+register_shared_kind :: proc(base_name: string, r: Recipe, bp_text: string, byline: string) -> (int, bool) {
+    name := base_name
     suffix := 1
     for {
         if _, taken := kind_by_name[name]; !taken do break
         suffix += 1
-        name = fmt.tprintf("%s~%d", sr.name, suffix)
+        name = fmt.tprintf("%s~%d", base_name, suffix)
     }
     k := gen_kind(strings.clone(name), 0) // base gives persistent name + size/spin
     apply_recipe_to_kind(&k, r, "分享")
+    if bp_text != "" do k.blueprint = strings.clone(bp_text)
+    if byline != "" do k.byline = strings.clone(byline)
     append(&kinds, k)
     idx := len(kinds) - 1
     kind_by_name[k.name] = idx
     return idx, true
+}
+
+// ---------------------------------------------------------------------------
+// Effect Blueprints （效果蓝图）: a JSON tree {"do":[<node>...]} compiled at
+// eat-time into timed primitive actions. Each node is an object with exactly
+// one key. Action primitives: speed/growth/score/shake/confuse/flash/burst/
+// spawn_food/shield/reverse/score_mult. Flow nodes (compiler-handled):
+// delay/repeat/chance/use.
+//
+// DISCIPLINE: primitive run() procs NEVER call raylib — they only mutate game
+// data (die() defers its sound via death_squawk), keeping headless tests live.
+// ---------------------------------------------------------------------------
+
+BP_MAX_ACTIONS :: 32   // total action emissions per compile
+BP_MAX_DEPTH   :: 4    // macro (use) expansion depth
+BP_MAX_DELAY   :: 30.0 // seconds per delay node
+BP_MAX_REPEAT  :: 5    // repeat unroll factor
+
+PrimArgs :: struct {
+    f1, f2: f32,      // mult/secs, shake strength, ...
+    i1:     int,      // growth/score/burst/spawn counts
+    s1:     string,   // kind name (owned clone; the queue frees it), "" otherwise
+    col:    rl.Color, // flash color (alpha fixed 90)
+}
+
+Primitive :: struct {
+    name:     string,
+    run:      proc(args: PrimArgs),                      // NEVER calls raylib
+    describe: proc(args: PrimArgs, buf: []u8) -> string, // one-line Chinese summary
+}
+
+ScheduledAction :: struct {
+    at:   f32, // absolute play_clock time once enqueued
+    prim: ^Primitive,
+    args: PrimArgs,
+}
+
+primitives : map[string]Primitive
+macros     : map[string]string   // 自创新原语: name -> owned {"do":[...]} JSON text
+
+play_clock       : f32 = 0  // accumulates dt only while state == .PLAYING
+sched_queue      : [dynamic]ScheduledAction
+shield_timer     : f32 = 0  // > 0: 无敌 — 撞墙停一拍不死，咬到身体穿身而过
+score_mult       : f32 = 1
+score_mult_timer : f32 = 0
+death_squawk     := false   // die() 的音效请求，主循环播放
+creator_byline   : string   // share v2 "by" 落款（env SNAKE_CREATOR；Run 2 编辑器会写它）
+
+register_primitive :: proc(p: Primitive) {
+    primitives[p.name] = p
+}
+
+// --- shared eat-effect helpers (classic fx path AND blueprint primitives) ---
+
+// score gains respect score_mult; losses always apply raw
+add_score :: proc(n: int) {
+    d := n
+    if d > 0 && score_mult > 1 {
+        d = int(math.round(f32(d) * score_mult))
+    }
+    score = max(0, score + d)
+}
+
+// returns true when the tail-blast killed the snake
+apply_growth_fx :: proc(n: int) -> bool {
+    if n > 0 {
+        pending_growth += n
+    } else if n < 0 {
+        // 炸掉尾巴，太短就炸死了
+        if len(snake) - 2 < -n {
+            die()
+            return true
+        }
+        for _ in 0..<-n do _ = pop(&snake)
+    }
+    return false
+}
+
+// 掉头反转：头尾互换，方向取 新头−新次节（轴单位向量），清空转向队列
+reverse_snake :: proc() {
+    n := len(snake)
+    if n < 2 do return
+    for i in 0..<n / 2 {
+        snake[i], snake[n - 1 - i] = snake[n - 1 - i], snake[i]
+    }
+    // prev_snake mirrors the same reversal so interpolation stays consistent
+    m := len(prev_snake)
+    for i in 0..<m / 2 {
+        prev_snake[i], prev_snake[m - 1 - i] = prev_snake[m - 1 - i], prev_snake[i]
+    }
+    nd := IV3{snake[0].x - snake[1].x, snake[0].y - snake[1].y, snake[0].z - snake[1].z}
+    if nd == (IV3{0, 0, 0}) do nd = neg_i(dir) // 护盾重叠等异常布局的兜底
+    dir = nd
+    prev_dir = dir // keep the first-person camera from swinging 180°
+    clear(&dir_queue)
+}
+
+// --- the 11 registered action primitives (data-only, no raylib) ---
+
+prim_run_speed :: proc(a: PrimArgs) {
+    if a.f2 > 0 {
+        fx_speed_timer = a.f2
+        fx_speed_mult = a.f1
+    }
+}
+prim_run_growth :: proc(a: PrimArgs) {
+    _ = apply_growth_fx(a.i1)
+}
+prim_run_score :: proc(a: PrimArgs) {
+    add_score(a.i1)
+}
+prim_run_shake :: proc(a: PrimArgs) {
+    shake_time = max(shake_time, a.f1)
+}
+prim_run_confuse :: proc(a: PrimArgs) {
+    confuse_timer = max(confuse_timer, a.f1)
+}
+prim_run_flash :: proc(a: PrimArgs) {
+    tint_timer = 0.7
+    tint_color = a.col
+}
+prim_run_burst :: proc(a: PrimArgs) {
+    if len(snake) == 0 do return
+    for _ in 0..<a.i1 do burst_col(cell_to_world(snake[0]), {255, 220, 120, 255}, 24)
+}
+prim_run_spawn_food :: proc(a: PrimArgs) {
+    if a.s1 == "" || len(snake) == 0 do return
+    idx := kind_index(a.s1) // 未知名称：现场生成一个本地配方
+    for _ in 0..<a.i1 do spawn_kind(idx)
+}
+prim_run_shield :: proc(a: PrimArgs) {
+    shield_timer = max(shield_timer, a.f1)
+}
+prim_run_reverse :: proc(a: PrimArgs) {
+    reverse_snake()
+}
+prim_run_score_mult :: proc(a: PrimArgs) {
+    if a.f2 > 0 {
+        score_mult = a.f1
+        score_mult_timer = a.f2
+    }
+}
+
+// --- describe(): one-line Chinese summaries for the editor UI (Run 2) ---
+
+fmt_secs :: proc(t: f32) -> string { // "3秒" / "3.5秒" (temp allocator)
+    if t == math.floor(t) do return fmt.tprintf("%d秒", int(t))
+    return fmt.tprintf("%.1f秒", t)
+}
+
+describe_speed :: proc(a: PrimArgs, buf: []u8) -> string {
+    if abs(a.f1 - 1) < 0.05 do return fmt.bprintf(buf, "速度不变")
+    return fmt.bprintf(buf, "%s ×%.2f 持续%s", a.f1 < 1 ? "加速" : "减速", a.f1, fmt_secs(a.f2))
+}
+describe_growth :: proc(a: PrimArgs, buf: []u8) -> string {
+    if a.i1 > 0 do return fmt.bprintf(buf, "长%d节", a.i1)
+    if a.i1 < 0 do return fmt.bprintf(buf, "炸掉%d节尾巴", -a.i1)
+    return fmt.bprintf(buf, "长度不变")
+}
+describe_score :: proc(a: PrimArgs, buf: []u8) -> string {
+    if a.i1 >= 0 do return fmt.bprintf(buf, "分数+%d", a.i1)
+    return fmt.bprintf(buf, "分数%d", a.i1)
+}
+describe_shake :: proc(a: PrimArgs, buf: []u8) -> string {
+    return fmt.bprintf(buf, "震屏 %.1f", a.f1)
+}
+describe_confuse :: proc(a: PrimArgs, buf: []u8) -> string {
+    return fmt.bprintf(buf, "眩晕 %s", fmt_secs(a.f1))
+}
+describe_flash :: proc(a: PrimArgs, buf: []u8) -> string {
+    return fmt.bprintf(buf, "全屏闪光（%d,%d,%d）", a.col.r, a.col.g, a.col.b)
+}
+describe_burst :: proc(a: PrimArgs, buf: []u8) -> string {
+    return fmt.bprintf(buf, "粒子烟花 ×%d", a.i1)
+}
+describe_spawn_food :: proc(a: PrimArgs, buf: []u8) -> string {
+    return fmt.bprintf(buf, "下%d个蛋（%s）", a.i1, a.s1)
+}
+describe_shield :: proc(a: PrimArgs, buf: []u8) -> string {
+    return fmt.bprintf(buf, "无敌护盾 %s", fmt_secs(a.f1))
+}
+describe_reverse :: proc(a: PrimArgs, buf: []u8) -> string {
+    return fmt.bprintf(buf, "掉头反转")
+}
+describe_score_mult :: proc(a: PrimArgs, buf: []u8) -> string {
+    return fmt.bprintf(buf, "得分 ×%.1f 持续%s", a.f1, fmt_secs(a.f2))
+}
+
+init_primitives :: proc() {
+    register_primitive({"speed",      prim_run_speed,      describe_speed})
+    register_primitive({"growth",     prim_run_growth,     describe_growth})
+    register_primitive({"score",      prim_run_score,      describe_score})
+    register_primitive({"shake",      prim_run_shake,      describe_shake})
+    register_primitive({"confuse",    prim_run_confuse,    describe_confuse})
+    register_primitive({"flash",      prim_run_flash,      describe_flash})
+    register_primitive({"burst",      prim_run_burst,      describe_burst})
+    register_primitive({"spawn_food", prim_run_spawn_food, describe_spawn_food})
+    register_primitive({"shield",     prim_run_shield,     describe_shield})
+    register_primitive({"reverse",    prim_run_reverse,    describe_reverse})
+    register_primitive({"score_mult", prim_run_score_mult, describe_score_mult})
+}
+
+// --- generic JSON tree helpers ---
+
+jnumv :: proc(v: json.Value, def: f64) -> f64 {
+    #partial switch x in v {
+    case json.Integer: return f64(x)
+    case json.Float:   return x
+    case json.Boolean: return x ? 1 : 0
+    }
+    return def
+}
+
+jnum :: proc(obj: json.Object, key: string, def: f64) -> f64 {
+    v, ok := obj[key]
+    if !ok do return def
+    return jnumv(v, def)
+}
+
+jstr :: proc(obj: json.Object, key: string) -> (string, bool) {
+    v, ok := obj[key]
+    if !ok do return "", false
+    s, sok := v.(json.String)
+    if !sok do return "", false
+    return s, true
+}
+
+jstr_or :: proc(obj: json.Object, key: string, def: string) -> string {
+    s, ok := jstr(obj, key)
+    return ok ? s : def
+}
+
+write_json_string :: proc(sb: ^strings.Builder, s: string) {
+    esc, err := json.marshal(s, allocator = context.temp_allocator)
+    if err != nil {
+        strings.write_string(sb, `""`)
+        return
+    }
+    strings.write_string(sb, string(esc))
+}
+
+// compact re-serializer for parsed subtrees (json.marshal pads floats to 16
+// decimals, which would bloat share codes); object key order is normalized
+// away — comparisons should use blueprint_summary, not string equality
+jwrite :: proc(sb: ^strings.Builder, v: json.Value) {
+    switch x in v {
+    case json.Null:    strings.write_string(sb, "null")
+    case json.Boolean: strings.write_string(sb, x ? "true" : "false")
+    case json.Integer: fmt.sbprintf(sb, "%d", x)
+    case json.Float:   fmt.sbprintf(sb, "%g", x)
+    case json.String:  write_json_string(sb, x)
+    case json.Array:
+        strings.write_string(sb, "[")
+        for e, i in x {
+            if i > 0 do strings.write_string(sb, ",")
+            jwrite(sb, e)
+        }
+        strings.write_string(sb, "]")
+    case json.Object:
+        strings.write_string(sb, "{")
+        first := true
+        for k, e in x {
+            if !first do strings.write_string(sb, ",")
+            first = false
+            write_json_string(sb, k)
+            strings.write_string(sb, ":")
+            jwrite(sb, e)
+        }
+        strings.write_string(sb, "}")
+    }
+}
+
+// --- compiler: blueprint JSON tree -> []ScheduledAction (relative times) ---
+
+Bp_Ctx :: struct {
+    actions: [dynamic]ScheduledAction,
+    extra:   ^map[string]string, // bundled macros available during validation
+    depth:   int,                // current macro expansion depth
+    failed:  bool,
+}
+
+// single-key node destructuring; every blueprint node has exactly one key
+bp_node_kv :: proc(node: json.Value) -> (string, json.Value, bool) {
+    obj, ok := node.(json.Object)
+    if !ok || len(obj) != 1 do return "", nil, false
+    for k, v in obj do return k, v, true
+    return "", nil, false
+}
+
+macro_lookup :: proc(name: string, extra: ^map[string]string) -> (string, bool) {
+    if src, ok := macros[name]; ok do return src, true // local macros win
+    if extra != nil {
+        if src, ok := extra^[name]; ok do return src, true
+    }
+    return "", false
+}
+
+// per-primitive argument extraction + clamping (ranges mirror clamp_recipe).
+// Adding a primitive = one register_primitive call + one case here.
+bp_parse_args :: proc(prim_name: string, val: json.Value) -> (PrimArgs, bool) {
+    o, ok := val.(json.Object)
+    if !ok do return {}, false
+    args: PrimArgs
+    switch prim_name {
+    case "speed":
+        args.f1 = clamp(f32(jnum(o, "mult", 1)), 0.45, 2.0)
+        args.f2 = clamp(f32(jnum(o, "secs", 0)), 0, 8)
+    case "growth":
+        args.i1 = clamp(int(jnum(o, "n", 0)), -6, 6)
+    case "score":
+        args.i1 = clamp(int(jnum(o, "n", 0)), -50, 100)
+    case "shake":
+        args.f1 = clamp(f32(jnum(o, "s", 0)), 0, 1)
+    case "confuse":
+        args.f1 = clamp(f32(jnum(o, "secs", 0)), 0, 6)
+    case "flash":
+        args.col = {u8(clamp(int(jnum(o, "r", 255)), 0, 255)),
+                    u8(clamp(int(jnum(o, "g", 255)), 0, 255)),
+                    u8(clamp(int(jnum(o, "b", 255)), 0, 255)), 90}
+    case "burst":
+        args.i1 = clamp(int(jnum(o, "n", 1)), 1, 4)
+    case "spawn_food":
+        kind, sok := jstr(o, "kind")
+        if !sok || kind == "" do return {}, false
+        args.s1 = strings.clone(kind) // owned; the queue frees it after the run
+        args.i1 = clamp(int(jnum(o, "count", 1)), 1, 4)
+    case "shield":
+        args.f1 = clamp(f32(jnum(o, "secs", 0)), 0, 10)
+    case "reverse":
+        // no args
+    case "score_mult":
+        args.f1 = clamp(f32(jnum(o, "mult", 1)), 1, 4)
+        args.f2 = clamp(f32(jnum(o, "secs", 0)), 0, 15)
+    case:
+        return {}, false
+    }
+    return args, true
+}
+
+bp_walk_list :: proc(list: json.Array, t: ^f32, ctx: ^Bp_Ctx) {
+    for node in list {
+        if ctx.failed do return
+        bp_walk_node(node, t, ctx)
+    }
+}
+
+bp_walk_node :: proc(node: json.Value, t: ^f32, ctx: ^Bp_Ctx) {
+    key, val, ok := bp_node_kv(node)
+    if !ok { ctx.failed = true; return }
+    switch key {
+    case "delay": // shifts the schedule time of all FOLLOWING siblings
+        a, aok := val.(json.Object)
+        if !aok { ctx.failed = true; return }
+        secs := f32(jnum(a, "secs", 0))
+        if secs > BP_MAX_DELAY { ctx.failed = true; return }
+        t^ += max(secs, 0)
+    case "repeat": // unroll children n times at compile time
+        a, aok := val.(json.Object)
+        if !aok { ctx.failed = true; return }
+        n := int(jnum(a, "n", 0))
+        if n < 1 || n > BP_MAX_REPEAT { ctx.failed = true; return }
+        dv, dok := a["do"]
+        arr, arrok := dv.(json.Array)
+        if !dok || !arrok { ctx.failed = true; return }
+        for _ in 0..<n {
+            bp_walk_list(arr, t, ctx)
+            if ctx.failed do return
+        }
+    case "chance": // roll once at compile (eat) time
+        a, aok := val.(json.Object)
+        if !aok { ctx.failed = true; return }
+        p := clamp(f32(jnum(a, "p", 0)), 0, 1)
+        dv, dok := a["do"]
+        arr, arrok := dv.(json.Array)
+        if !dok || !arrok { ctx.failed = true; return }
+        if rand.float32() < p do bp_walk_list(arr, t, ctx)
+    case "use": // inline a user macro's blueprint tree
+        a, aok := val.(json.Object)
+        if !aok { ctx.failed = true; return }
+        name, sok := jstr(a, "name")
+        if !sok || name == "" { ctx.failed = true; return }
+        if ctx.depth >= BP_MAX_DEPTH { ctx.failed = true; return } // cycles die here
+        src, found := macro_lookup(name, ctx.extra)
+        if !found { ctx.failed = true; return }
+        sub, perr := json.parse(transmute([]u8)src, .JSON, true, context.allocator)
+        if perr != nil { ctx.failed = true; return }
+        defer json.destroy_value(sub, context.allocator)
+        sk, sv, sok2 := bp_node_kv(sub)
+        sarr, saok := sv.(json.Array)
+        if !sok2 || sk != "do" || !saok { ctx.failed = true; return }
+        ctx.depth += 1
+        bp_walk_list(sarr, t, ctx)
+        ctx.depth -= 1
+    case: // action primitives live in the registry
+        if _, pok := primitives[key]; !pok { ctx.failed = true; return } // unknown node
+        args, aok := bp_parse_args(key, val)
+        if !aok { ctx.failed = true; return }
+        if len(ctx.actions) >= BP_MAX_ACTIONS { ctx.failed = true; return }
+        append(&ctx.actions, ScheduledAction{at = t^, prim = &primitives[key], args = args})
+    }
+}
+
+// bp_compile: blueprint JSON -> scheduled actions (times relative to now).
+// Any structural violation or unknown node key fails the whole compile;
+// the caller then falls back to the kind's classic fx fields.
+bp_compile :: proc(json_text: string, extra: ^map[string]string = nil) -> ([dynamic]ScheduledAction, bool) {
+    root, err := json.parse(transmute([]u8)json_text, .JSON, true, context.allocator)
+    if err != nil do return nil, false
+    defer json.destroy_value(root, context.allocator)
+    key, val, ok := bp_node_kv(root)
+    arr, aok := val.(json.Array)
+    if !ok || key != "do" || !aok do return nil, false
+    ctx := Bp_Ctx{extra = extra}
+    ctx.actions = make([dynamic]ScheduledAction, 0, 8)
+    t := f32(0)
+    bp_walk_list(arr, &t, &ctx)
+    if ctx.failed {
+        bp_free_actions(&ctx.actions)
+        return nil, false
+    }
+    return ctx.actions, true
+}
+
+bp_free_actions :: proc(actions: ^[dynamic]ScheduledAction) {
+    for a in actions^ {
+        if a.args.s1 != "" do delete(a.args.s1)
+    }
+    delete(actions^)
+    actions^ = nil
+}
+
+// --- runtime scheduler (play_clock-relative queue) ---
+
+clear_sched_queue :: proc() {
+    for a in sched_queue {
+        if a.args.s1 != "" do delete(a.args.s1)
+    }
+    clear(&sched_queue)
+}
+
+enqueue_actions :: proc(actions: []ScheduledAction) {
+    for a in actions {
+        act := a
+        act.at += play_clock
+        append(&sched_queue, act)
+    }
+}
+
+// pop and run everything due; earliest first, queue order breaks ties
+run_scheduled :: proc() {
+    for {
+        idx := -1
+        for a, i in sched_queue {
+            if a.at <= play_clock && (idx < 0 || a.at < sched_queue[idx].at) {
+                idx = i
+            }
+        }
+        if idx < 0 do break
+        a := sched_queue[idx]
+        ordered_remove(&sched_queue, idx) // out of the queue BEFORE running
+        a.prim.run(a.args)
+        if a.args.s1 != "" do delete(a.args.s1)
+        if state != .PLAYING do break // an action may have killed the snake
+    }
+}
+
+// --- user macros （自创新原语 v0): name -> blueprint tree, persisted ---
+
+MACROS_FILE :: "macros.json"
+
+macro_define :: proc(name: string, blueprint_json: string) -> bool {
+    if name == "" do return false
+    // validate by test-compiling (depth guard catches cycles at use time)
+    actions, ok := bp_compile(blueprint_json)
+    if !ok do return false
+    bp_free_actions(&actions)
+    if old, has := macros[name]; has {
+        delete(old) // existing key pointer is kept on update
+        macros[name] = strings.clone(blueprint_json)
+    } else {
+        macros[strings.clone(name)] = strings.clone(blueprint_json)
+    }
+    save_macros()
+    return true
+}
+
+macro_delete :: proc(name: string) -> bool {
+    if _, ok := macros[name]; !ok do return false
+    k, v := delete_key(&macros, name)
+    delete(k)
+    delete(v)
+    save_macros()
+    return true
+}
+
+save_macros :: proc() {
+    sb := strings.builder_make(context.temp_allocator)
+    strings.write_string(&sb, `{"macros":{`)
+    first := true
+    for name, text in macros {
+        if !first do strings.write_string(&sb, ",")
+        first = false
+        write_json_string(&sb, name)
+        strings.write_string(&sb, ":")
+        strings.write_string(&sb, text)
+    }
+    strings.write_string(&sb, "}}")
+    _ = os.write_entire_file(MACROS_FILE, transmute([]u8)strings.to_string(sb))
+}
+
+load_macros :: proc() {
+    data, err := os.read_entire_file(MACROS_FILE, context.temp_allocator)
+    if err != nil do return
+    root, perr := json.parse(data, .JSON, true, context.temp_allocator)
+    if perr != nil do return
+    obj, ok := root.(json.Object)
+    if !ok do return
+    mv, mok := obj["macros"]
+    mo, mook := mv.(json.Object)
+    if !mok || !mook do return
+    // pass 1: load everything raw (order-independent for cross-references)
+    for name, val in mo {
+        if _, has := macros[name]; has do continue
+        sb := strings.builder_make(context.temp_allocator)
+        jwrite(&sb, val)
+        macros[strings.clone(name)] = strings.clone(strings.to_string(sb))
+    }
+    // pass 2: drop anything that no longer compiles (broken/cyclic leftovers)
+    stale: [dynamic]string
+    for name, text in macros {
+        actions, cok := bp_compile(text)
+        if cok {
+            bp_free_actions(&actions)
+        } else {
+            append(&stale, name)
+        }
+    }
+    for name in stale do _ = macro_delete(name)
+    if len(stale) > 0 {
+        delete(stale)
+        save_macros()
+    }
+}
+
+// every macro name a blueprint (transitively) references — for share export
+collect_macro_bundle :: proc(bp_text: string, allocator := context.temp_allocator) -> map[string]string {
+    out := make(map[string]string, allocator = allocator)
+    visited := make(map[string]bool, allocator = context.temp_allocator)
+    bundle_walk_text(bp_text, &out, &visited, 0, allocator)
+    return out
+}
+
+bundle_walk_text :: proc(text: string, out: ^map[string]string, visited: ^map[string]bool, depth: int, allocator: mem.Allocator) {
+    if depth > BP_MAX_DEPTH + 1 do return
+    root, err := json.parse(transmute([]u8)text, .JSON, true, context.temp_allocator)
+    if err != nil do return
+    bundle_walk_value(root, out, visited, depth, allocator)
+}
+
+bundle_walk_value :: proc(v: json.Value, out: ^map[string]string, visited: ^map[string]bool, depth: int, allocator: mem.Allocator) {
+    #partial switch x in v {
+    case json.Array:
+        for e in x do bundle_walk_value(e, out, visited, depth, allocator)
+    case json.Object:
+        if len(x) == 1 {
+            if uv, ok := x["use"]; ok {
+                if uo, uok := uv.(json.Object); uok {
+                    if name, sok := jstr(uo, "name"); sok && !visited^[name] {
+                        visited^[name] = true
+                        if src, has := macros[name]; has {
+                            out^[strings.clone(name, allocator)] = strings.clone(src, allocator)
+                            bundle_walk_text(src, out, visited, depth + 1, allocator)
+                        }
+                    }
+                }
+            }
+        }
+        for _, e in x do bundle_walk_value(e, out, visited, depth, allocator)
+    }
+}
+
+// --- blueprint_summary: readable Chinese lines for the editor UI (Run 2) ---
+
+// owned strings, caller keeps them
+blueprint_summary :: proc(json_text: string) -> [dynamic]string {
+    lines := make([dynamic]string, 0, 8, context.allocator)
+    root, err := json.parse(transmute([]u8)json_text, .JSON, true, context.temp_allocator)
+    if err != nil do return lines
+    key, val, ok := bp_node_kv(root)
+    arr, aok := val.(json.Array)
+    if !ok || key != "do" || !aok do return lines
+    t := f32(0)
+    prefixes := make([dynamic]string, 0, 4, context.temp_allocator)
+    summary_walk(arr, &t, &prefixes, &lines, 0)
+    return lines
+}
+
+summary_walk :: proc(list: json.Array, t: ^f32, prefixes: ^[dynamic]string, lines: ^[dynamic]string, depth: int) {
+    if depth > BP_MAX_DEPTH do return
+    for node in list {
+        key, val, ok := bp_node_kv(node)
+        if !ok do continue
+        switch key {
+        case "delay":
+            if a, aok := val.(json.Object); aok {
+                t^ += clamp(f32(jnum(a, "secs", 0)), 0, BP_MAX_DELAY)
+            }
+        case "repeat":
+            a, aok := val.(json.Object)
+            if !aok do continue
+            n := clamp(int(jnum(a, "n", 1)), 1, BP_MAX_REPEAT)
+            dv, dok := a["do"]
+            arr, arrok := dv.(json.Array)
+            if !dok || !arrok do continue
+            append(prefixes, fmt.tprintf("重复%d次 › ", n))
+            summary_walk(arr, t, prefixes, lines, depth)
+            _ = pop(prefixes)
+        case "chance":
+            a, aok := val.(json.Object)
+            if !aok do continue
+            p := clamp(f32(jnum(a, "p", 0)), 0, 1)
+            dv, dok := a["do"]
+            arr, arrok := dv.(json.Array)
+            if !dok || !arrok do continue
+            append(prefixes, fmt.tprintf("%d%%概率 › ", int(math.round(p * 100))))
+            summary_walk(arr, t, prefixes, lines, depth)
+            _ = pop(prefixes)
+        case "use":
+            a, aok := val.(json.Object)
+            if !aok do continue
+            name, sok := jstr(a, "name")
+            if !sok do continue
+            src, found := macro_lookup(name, nil)
+            if !found {
+                append(lines, strings.clone(fmt.tprintf("宏「%s」（未定义）", name)))
+                continue
+            }
+            sub, perr := json.parse(transmute([]u8)src, .JSON, true, context.temp_allocator)
+            if perr != nil do continue
+            sk, sv, sok2 := bp_node_kv(sub)
+            sarr, saok := sv.(json.Array)
+            if sok2 && sk == "do" && saok {
+                append(prefixes, fmt.tprintf("宏「%s」 › ", name))
+                summary_walk(sarr, t, prefixes, lines, depth + 1)
+                _ = pop(prefixes)
+            }
+        case:
+            p, pok := primitives[key]
+            if !pok do continue
+            args, aok := bp_parse_args(key, val)
+            if !aok do continue
+            buf: [160]u8
+            desc := p.describe(args, buf[:])
+            if args.s1 != "" do delete(args.s1)
+            sb := strings.builder_make(context.temp_allocator)
+            for px in prefixes^ do strings.write_string(&sb, px)
+            strings.write_string(&sb, t^ <= 0 ? "立刻：" : fmt.tprintf("%s后：", fmt_secs(t^)))
+            strings.write_string(&sb, desc)
+            append(lines, strings.clone(strings.to_string(sb), context.allocator))
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -955,6 +1761,82 @@ import_share_code :: proc(text: string) -> (int, bool) {
 // ---------------------------------------------------------------------------
 
 LLM_SYSTEM_PROMPT :: `你在为一个3D贪吃蛇游戏设计食物。玩家给出食物名称，你只输出一个JSON对象，不要输出任何其他文字。字段：hue(0-359整数,符合该食物直觉颜色的色相), shape(0球1方块2圆锥3宝石,选最像的), rarity(0常见1稀有2传说,日常食物0,稀奇或离谱的1-2), flavor(不超过16字的中文幽默点评), fx对象:{speed_mult(0.45-2.0,小于1=加速,大于1=减速,1=无速度效果), speed_secs(0-8), growth(-6到6整数,正=长身体,负=炸掉尾巴), score(-50到100整数), shake(0-1,爆炸震屏), confuse(0-6,AI眩晕秒数), bursts(1-4,粒子烟花数), tint(全屏闪光颜色[r,g,b]各0-255,无闪光则null)}。要贴合食物真实特性:辣椒加速,冰棍减速,手榴弹炸尾,便便扣分,毒蘑菇眩晕;普通食物给温和正面效果;有害效果(负growth/负score/confuse大于0)必须有合理理由。`
+
+// 创造台 ✨ 描述创意: the model translates a natural-language description into
+// a full food design, blueprint included. Single-line prompts; json.marshal of
+// the request escapes them. The currently defined macro names get baked in
+// between HEAD and TAIL so the model can `use` them.
+LLM_CREATIVE_PROMPT_HEAD :: `你在为一个3D贪吃蛇游戏设计一种创意食物。玩家描述想要的效果，你把它翻译成食物设计，只输出一个JSON对象，不要输出任何其他文字或markdown代码块。格式：{"name":"食物名(不超过8个汉字)","hue":0-359整数(符合直觉的色相),"shape":0-3整数(0球1方块2圆锥3宝石),"rarity":0-2整数(0常见1稀有2传说),"flavor":"不超过16字的中文幽默点评","blueprint":{"do":[节点列表]}}。blueprint的每个节点是只含一个键的对象。动作原语：{"speed":{"mult":0.45到2.0,"secs":0到8}}移速倍率，小于1=加速大于1=减速；{"growth":{"n":-6到6整数}}正=长身体负=炸掉尾巴；{"score":{"n":-50到100整数}}分数；{"shake":{"s":0到1}}震屏；{"confuse":{"secs":0到6}}AI眩晕秒数；{"flash":{"r":0到255,"g":0到255,"b":0到255}}全屏闪光；{"burst":{"n":1到4}}粒子烟花；{"spawn_food":{"kind":"食物名","count":1到4}}在场上生出新食物（下蛋）;{"shield":{"secs":0到10}}无敌金身；{"reverse":{}}蛇头尾掉头反转；{"score_mult":{"mult":1到4,"secs":0到15}}得分倍率。流程节点：{"delay":{"secs":0到30}}让其后的节点延迟执行；{"repeat":{"n":1到5,"do":[节点列表]}}重复；{"chance":{"p":0到1,"do":[节点列表]}}概率触发；{"use":{"name":"原语名"}}引用玩家自创原语。当前已定义的玩家原语：`
+
+LLM_CREATIVE_PROMPT_TAIL :: `。限制：动作节点总数不超过32个，delay单次不超过30秒，repeat不超过5次，use嵌套不超过4层。设计要贴合玩家的描述，有戏剧性和节奏感，善用delay制造"先……然后……"的层次，强度可以大胆但不要完全无解。示例1，玩家说"下蛋"：{"name":"老母鸡","hue":40,"shape":0,"rarity":1,"flavor":"咯咯哒，新鲜出炉","blueprint":{"do":[{"spawn_food":{"kind":"神秘蛋","count":2}},{"score":{"n":10}}]}}。示例2，玩家说"火箭辣椒"：{"name":"火箭辣椒","hue":10,"shape":2,"rarity":2,"flavor":"先上天，再坠毁","blueprint":{"do":[{"speed":{"mult":0.5,"secs":4}},{"delay":{"secs":4}},{"growth":{"n":-2}},{"shake":{"s":0.6}},{"burst":{"n":3}}]}}。`
+
+// built on the main thread (reads the macros map)
+creative_system_prompt :: proc(allocator := context.temp_allocator) -> string {
+    sb := strings.builder_make(allocator)
+    strings.write_string(&sb, LLM_CREATIVE_PROMPT_HEAD)
+    first := true
+    for name in macros {
+        if !first do strings.write_string(&sb, "、")
+        first = false
+        fmt.sbprintf(&sb, "「%s」", name)
+    }
+    if first do strings.write_string(&sb, "无")
+    strings.write_string(&sb, LLM_CREATIVE_PROMPT_TAIL)
+    return strings.to_string(sb)
+}
+
+Creative_Result :: struct {
+    name:      string, // owned clone
+    hue:       int,
+    shape:     int,
+    rarity:    int,
+    flavor:    string, // owned clone, may be ""
+    blueprint: string, // owned clone, compact re-serialized
+}
+
+// pure function (headless-testable): parse the model's creative reply, clamp
+// the scalar fields through the same ranges as clamp_recipe, and test-compile
+// the blueprint with local macros. Any structural problem rejects the design.
+creative_parse :: proc(content: string) -> (Creative_Result, bool) {
+    res: Creative_Result
+    c := strip_json_fences(content)
+    if c == "" do return res, false
+    root, err := json.parse(transmute([]u8)c, .JSON, true, context.temp_allocator)
+    if err != nil do return res, false
+    obj, ok := root.(json.Object)
+    if !ok do return res, false
+    bv, bok := obj["blueprint"]
+    if !bok do return res, false // blueprint 必须存在
+    bp: string
+    #partial switch bvv in bv {
+    case json.Object:
+        sb := strings.builder_make(context.temp_allocator)
+        jwrite(&sb, bv)
+        bp = strings.to_string(sb)
+    case json.String:
+        bp = bvv // 模型偶尔会把蓝图再包一层字符串
+    case:
+        return res, false
+    }
+    acts, cok := bp_compile(bp) // 本地宏也参与校验
+    if !cok do return res, false
+    bp_free_actions(&acts)
+    name := strings.trim_space(jstr_or(obj, "name", ""))
+    res.name = strings.clone(name != "" ? name : "我的食物")
+    res.flavor = strings.clone(jstr_or(obj, "flavor", ""))
+    res.blueprint = strings.clone(bp)
+    res.hue = int(jnum(obj, "hue", 0)) %% 360
+    res.shape = clamp(int(jnum(obj, "shape", 0)), 0, 3)
+    res.rarity = clamp(int(jnum(obj, "rarity", 0)), 0, 2)
+    return res, true
+}
+
+creative_free :: proc(res: ^Creative_Result) {
+    if res.name != "" do delete(res.name)
+    if res.flavor != "" do delete(res.flavor)
+    if res.blueprint != "" do delete(res.blueprint)
+    res^ = {}
+}
 
 LLM_Chat_Message :: struct {
     role:    string,
@@ -971,8 +1853,12 @@ LLM_Resp_Message :: struct { content: string }
 LLM_Resp_Choice  :: struct { message: LLM_Resp_Message }
 LLM_Response     :: struct { choices: []LLM_Resp_Choice }
 
+LLM_Job_Mode :: enum { RECIPE, CREATIVE } // RECIPE = word cast; CREATIVE = 创造台创意描述
+
 LLM_Job :: struct {
-    word: string, // heap clone owned by the worker, freed when done
+    word:   string,      // heap clone owned by the worker, freed when done
+    mode:   LLM_Job_Mode,
+    system: string,      // CREATIVE only: prompt with macro names baked in (main thread built)
 }
 
 // read once at startup: no key = LLM path fully disabled (local hash only)
@@ -989,8 +1875,11 @@ llm_init_config :: proc() {
 llm_start :: proc(word: string, kind_idx: int) {
     job := new(LLM_Job)
     job.word = strings.clone(word)
+    job.mode = .RECIPE
+    job.system = ""
     sync.mutex_lock(&llm_mutex)
     llm_state = .COOKING
+    llm_job_mode = .RECIPE
     sync.mutex_unlock(&llm_mutex)
     llm_kind_idx = kind_idx
     llm_word = strings.clone(word)
@@ -1006,17 +1895,54 @@ llm_start :: proc(word: string, kind_idx: int) {
     }
 }
 
+// 创造台 ✨ 描述创意: a second job class through the same worker infra.
+// Only one job of any kind may be in flight; returns false when busy.
+llm_start_creative :: proc(desc: string) -> bool {
+    if !llm_enabled do return false
+    sync.mutex_lock(&llm_mutex)
+    busy := llm_state == .COOKING
+    sync.mutex_unlock(&llm_mutex)
+    if busy do return false
+    job := new(LLM_Job)
+    job.word = strings.clone(desc)
+    job.mode = .CREATIVE
+    // the system prompt must be built on the main thread: it reads the
+    // macros map, which the worker must never touch
+    job.system = strings.clone(creative_system_prompt(), context.allocator)
+    sync.mutex_lock(&llm_mutex)
+    llm_state = .COOKING
+    llm_job_mode = .CREATIVE
+    sync.mutex_unlock(&llm_mutex)
+    if thread.create_and_start_with_data(job, llm_worker, nil, .Normal, true) == nil {
+        llm_state = .IDLE
+        llm_job_mode = .RECIPE
+        delete(job.word)
+        delete(job.system)
+        free(job)
+        return false
+    }
+    return true
+}
+
 llm_worker :: proc(data: rawptr) {
     // NOTE: runs off the main thread — never call raylib here
     job := cast(^LLM_Job)data
     recipe: Recipe
+    creative: string // raw model output handed to the main thread on success
     ok := false
     defer {
         sync.mutex_lock(&llm_mutex)
-        if ok do llm_recipe = recipe
+        if ok {
+            if job.mode == .CREATIVE {
+                llm_creative_raw = creative
+            } else {
+                llm_recipe = recipe
+            }
+        }
         llm_state = ok ? LLM_State.READY : LLM_State.FAILED
         sync.mutex_unlock(&llm_mutex)
         delete(job.word)
+        if job.system != "" do delete(job.system)
         free(job)
     }
 
@@ -1037,10 +1963,11 @@ llm_worker :: proc(data: rawptr) {
     }
 
     // request body — json.marshal handles all escaping of prompt and word
+    sys_prompt := job.mode == .CREATIVE ? job.system : LLM_SYSTEM_PROMPT
     req := LLM_Chat_Request{
         model = llm_model, temperature = 0.9,
         messages = {
-            {role = "system", content = LLM_SYSTEM_PROMPT},
+            {role = "system", content = sys_prompt},
             {role = "user",   content = job.word},
         },
     }
@@ -1083,6 +2010,12 @@ llm_worker :: proc(data: rawptr) {
     if len(outer.choices) == 0 do return
     content := strip_json_fences(outer.choices[0].message.content)
     if len(content) == 0 do return
+    if job.mode == .CREATIVE {
+        // parsing lives on the main thread (creative_parse is pure + tested)
+        creative = strings.clone(content)
+        ok = true
+        return
+    }
     if json.unmarshal(transmute([]u8)content, &recipe, allocator = context.allocator) != nil do return
     ok = true
 }
@@ -1107,8 +2040,40 @@ llm_poll :: proc() {
     sync.mutex_lock(&llm_mutex)
     st := llm_state
     r := llm_recipe
+    mode := llm_job_mode
+    raw := llm_creative_raw
+    llm_creative_raw = ""
     if st != .COOKING do llm_state = .IDLE
     sync.mutex_unlock(&llm_mutex)
+
+    if mode == .CREATIVE {
+        // 创造台 ✨ 描述创意: parse here on the main thread; if the editor was
+        // closed in the meantime the design is simply discarded
+        llm_job_mode = .RECIPE
+        if raw != "" {
+            defer delete(raw)
+            if st == .READY {
+                res, cok := creative_parse(raw)
+                if !cok {
+                    if editor_open do set_toast("AI 设计无效，请换个说法")
+                } else if editor_open {
+                    editor_apply_creative(&res)
+                    set_toast("AI 设计完成")
+                } else {
+                    creative_free(&res)
+                }
+            }
+        }
+        if st == .FAILED && editor_open {
+            set_toast("AI 设计失败，请重试或手动设计")
+        }
+        if llm_word != "" {
+            delete(llm_word)
+            llm_word = ""
+        }
+        llm_kind_idx = -1
+        return
+    }
 
     idx := llm_kind_idx
     if st == .READY && idx >= 0 && idx < len(kinds) {
@@ -1217,7 +2182,7 @@ self_test :: proc() -> bool {
         "SNAKE3D1.not*valid*base64",
         "SNAKE3D1.aGVsbG8",          // valid base64, not JSON
         "SNAKE3D1.",
-        "SNAKE3D1.eyJ2IjoyfQ",       // {"v":2} wrong version
+        "SNAKE3D1.eyJ2IjoyfQ",       // {"v":2} without name/fx — invalid v2
     }
     for bad in bads {
         if _, ok4 := import_share_code(bad); ok4 {
@@ -1227,6 +2192,416 @@ self_test :: proc() -> bool {
     }
 
     fmt.println("roundtrip+clamp+reject: PASS")
+
+    // ================= Phase 2: blueprint engine + share v2 =================
+    // snapshot macros.json so the self-test never clobbers a real user file
+    orig_macros: []u8
+    orig_macros_exists := false
+    if d, err := os.read_entire_file(MACROS_FILE, context.allocator); err == nil {
+        orig_macros = d
+        orig_macros_exists = true
+    }
+    // same for creator.txt (T13 exercises the nickname persistence)
+    orig_creator: []u8
+    orig_creator_exists := false
+    if d, err := os.read_entire_file(CREATOR_FILE, context.allocator); err == nil {
+        orig_creator = d
+        orig_creator_exists = true
+    }
+
+    // --- T1: v1 share codes still decode (backward compat) ---
+    v1 := Share_Recipe{v = 1, name = "古典苹果", hue = 5, shape = 0, rarity = 0,
+        flavor = "来自v1", fx = {speed_mult = 1, speed_secs = 0, growth = 1,
+        score = 10, shake = 0, confuse = 0, bursts = 1}}
+    v1raw, _ := json.marshal(v1, allocator = context.temp_allocator)
+    v1b64, _ := base64.encode(v1raw, base64.ENC_URL_TABLE, context.temp_allocator)
+    v1code := strings.concatenate({SHARE_PREFIX, strings.trim_right(v1b64, "=")}, context.temp_allocator)
+    v1idx, v1ok := import_share_code(v1code)
+    if !v1ok || kinds[v1idx].name != "古典苹果" || kinds[v1idx].blueprint != "" ||
+       kinds[v1idx].fx_score != 10 || kinds[v1idx].flavor != "来自v1" {
+        fmt.println("SELFTEST FAIL: v1 share code decode")
+        return false
+    }
+    fmt.println("v1 compat: PASS")
+
+    // --- T2: v2 roundtrip with blueprint + macro bundle + byline ---
+    if !macro_define("自测宏", `{"do":[{"growth":{"n":1}}]}`) {
+        fmt.println("SELFTEST FAIL: macro_define 自测宏")
+        return false
+    }
+    bp_src := `{"do":[{"growth":{"n":2}},{"use":{"name":"自测宏"}},{"delay":{"secs":1}},{"spawn_food":{"kind":"神秘蛋","count":2}}]}`
+    append(&kinds, FoodKind{
+        name = strings.clone("蓝图果"), author = "本地", flavor = strings.clone("自作蓝图"),
+        hue = 100, color = hsv_rgb(100, 0.72, 1.0), shape = .GEM, size = 0.3, spin = 2,
+        rarity = 2, fx_growth = 1, fx_score = 10, fx_bursts = 2,
+        blueprint = strings.clone(bp_src), byline = strings.clone("测试员"),
+    })
+    kind_by_name["蓝图果"] = len(kinds) - 1
+    bp_code := export_share_code(len(kinds) - 1, context.allocator)
+    {   // inspect the wire payload itself
+        payload := bp_code[len(SHARE_PREFIX):]
+        padded := payload
+        switch len(payload) % 4 {
+        case 2: padded = strings.concatenate({payload, "=="}, context.temp_allocator)
+        case 3: padded = strings.concatenate({payload, "="}, context.temp_allocator)
+        }
+        raw, derr := base64.decode(padded, base64.DEC_URL_TABLE, allocator = context.temp_allocator)
+        wroot, werr := json.parse(raw, .JSON, true, context.temp_allocator)
+        wire_ok := derr == nil && werr == nil
+        if wire_ok {
+            wobj, wok := wroot.(json.Object)
+            _, has_bp := wobj["blueprint"]
+            mv, has_m := wobj["macros"]
+            mo, mok := mv.(json.Object)
+            _, has_zc := mo["自测宏"]
+            wire_ok = wok && int(jnum(wobj, "v", 0)) == 2 && has_bp && has_m && mok &&
+                      has_zc && jstr_or(wobj, "by", "") == "测试员"
+        }
+        if !wire_ok {
+            fmt.println("SELFTEST FAIL: v2 wire payload missing v/blueprint/macros/by")
+            return false
+        }
+    }
+    bp_idx, bp_ok := import_share_code(bp_code)
+    if !bp_ok {
+        fmt.println("SELFTEST FAIL: v2 import rejected own export")
+        return false
+    }
+    nk := kinds[bp_idx]
+    same_v2 := nk.name == "蓝图果~2" && nk.hue == 100 && nk.shape == .GEM &&
+        nk.rarity == 2 && nk.flavor == "自作蓝图" && nk.fx_growth == 1 &&
+        nk.fx_score == 10 && nk.byline == "测试员" && nk.blueprint != ""
+    if !same_v2 {
+        fmt.println("SELFTEST FAIL: v2 field mismatch:", nk.name, nk.byline, nk.blueprint)
+        return false
+    }
+    // blueprint survived the wire: summary lines must match exactly
+    sum1 := blueprint_summary(bp_src)
+    sum2 := blueprint_summary(nk.blueprint)
+    if len(sum1) == 0 || len(sum1) != len(sum2) {
+        fmt.println("SELFTEST FAIL: v2 blueprint summary length mismatch")
+        return false
+    }
+    for l, li in sum1 {
+        if l != sum2[li] {
+            fmt.println("SELFTEST FAIL: v2 blueprint summary mismatch:", l, "vs", sum2[li])
+            return false
+        }
+    }
+    { // decoded blueprint test-compiles; local 自测宏 was NOT overwritten
+        dacts, dok := bp_compile(nk.blueprint)
+        if !dok {
+            fmt.println("SELFTEST FAIL: v2 decoded blueprint does not compile")
+            return false
+        }
+        bp_free_actions(&dacts)
+        if macros["自测宏"] != `{"do":[{"growth":{"n":1}}]}` {
+            fmt.println("SELFTEST FAIL: bundled macro overwrote a local macro")
+            return false
+        }
+    }
+    fmt.println("v2 roundtrip: PASS")
+
+    // --- T3: compile + schedule with delay ---
+    game_mode = .FEEDING
+    reset_game()
+    state = .PLAYING
+    clear(&foods)
+    start_len := len(snake)
+    acts, cok := bp_compile(`{"do":[{"growth":{"n":2}},{"delay":{"secs":3}},{"growth":{"n":-1}}]}`)
+    if !cok || len(acts) != 2 || acts[0].at != 0 || acts[1].at != 3 {
+        fmt.println("SELFTEST FAIL: delay compile", len(acts), cok)
+        return false
+    }
+    enqueue_actions(acts[:])
+    delete(acts)
+    run_scheduled() // play_clock == 0: +2 pending growth
+    if pending_growth != 2 || len(snake) != start_len {
+        fmt.println("SELFTEST FAIL: schedule t=0")
+        return false
+    }
+    play_clock = 3.0
+    run_scheduled() // t=3: blast 1 tail segment
+    if len(snake) != start_len - 1 || pending_growth != 2 {
+        fmt.println("SELFTEST FAIL: schedule t=3 (net +1 segment expected)")
+        return false
+    }
+    fmt.println("compile+schedule: PASS")
+
+    // --- T4: chance + repeat ---
+    ch0, ch0ok := bp_compile(`{"do":[{"chance":{"p":0,"do":[{"growth":{"n":1}}]}}]}`)
+    if !ch0ok || len(ch0) != 0 {
+        fmt.println("SELFTEST FAIL: chance p=0 emitted", len(ch0))
+        return false
+    }
+    delete(ch0)
+    ch1, ch1ok := bp_compile(`{"do":[{"chance":{"p":1,"do":[{"growth":{"n":1}}]}}]}`)
+    if !ch1ok || len(ch1) != 1 {
+        fmt.println("SELFTEST FAIL: chance p=1 emitted", len(ch1))
+        return false
+    }
+    bp_free_actions(&ch1)
+    rp, rpok := bp_compile(`{"do":[{"repeat":{"n":3,"do":[{"growth":{"n":1}}]}}]}`)
+    if !rpok || len(rp) != 3 {
+        fmt.println("SELFTEST FAIL: repeat n=3 emitted", len(rp))
+        return false
+    }
+    bp_free_actions(&rp)
+    fmt.println("chance/repeat: PASS")
+
+    // --- T5: spawn_food grows the foods array ---
+    clear(&foods)
+    sp, spok := bp_compile(`{"do":[{"spawn_food":{"kind":"神秘蛋","count":2}}]}`)
+    if !spok || len(sp) != 1 {
+        fmt.println("SELFTEST FAIL: spawn_food compile")
+        return false
+    }
+    enqueue_actions(sp[:])
+    delete(sp)
+    run_scheduled()
+    if len(foods) != 2 {
+        fmt.println("SELFTEST FAIL: spawn_food spawned", len(foods))
+        return false
+    }
+    fmt.println("spawn_food: PASS")
+
+    // --- T6: reverse flips snake + dir ---
+    reset_game()
+    state = .PLAYING
+    rv, rvok := bp_compile(`{"do":[{"reverse":{}}]}`)
+    if !rvok || len(rv) != 1 {
+        fmt.println("SELFTEST FAIL: reverse compile")
+        return false
+    }
+    enqueue_actions(rv[:])
+    delete(rv)
+    run_scheduled()
+    if snake[0] != (IV3{5, 6, 6}) || snake[len(snake) - 1] != (IV3{7, 6, 6}) || dir != (IV3{-1, 0, 0}) {
+        fmt.println("SELFTEST FAIL: reverse", snake[0], snake[len(snake) - 1], dir)
+        return false
+    }
+    fmt.println("reverse: PASS")
+
+    // --- T7: score_mult multiplies the scoring path ---
+    reset_game()
+    state = .PLAYING
+    score = 0
+    sm, smok := bp_compile(`{"do":[{"score_mult":{"mult":2,"secs":10}},{"score":{"n":25}}]}`)
+    if !smok || len(sm) != 2 {
+        fmt.println("SELFTEST FAIL: score_mult compile")
+        return false
+    }
+    enqueue_actions(sm[:])
+    delete(sm)
+    run_scheduled()
+    if score != 50 || score_mult != 2 {
+        fmt.println("SELFTEST FAIL: score_mult blueprint path", score, score_mult)
+        return false
+    }
+    add_score(10) // classic fx path goes through the multiplier too
+    if score != 70 {
+        fmt.println("SELFTEST FAIL: score_mult classic path", score)
+        return false
+    }
+    score_mult = 1
+    score_mult_timer = 0
+    fmt.println("score_mult: PASS")
+
+    // --- T8: shield survives lethal collisions ---
+    clear(&snake)
+    clear(&prev_snake)
+    clear(&dir_queue)
+    append(&snake, IV3{6, 11, 6})
+    append(&snake, IV3{6, 10, 6})
+    append(&snake, IV3{6, 9, 6})
+    for s in snake do append(&prev_snake, s)
+    dir = IV3{0, 1, 0}
+    autopilot = false
+    shield_timer = 5
+    step() // would hit the top wall — shield suppresses death, move skipped
+    if state != .PLAYING || snake[0] != (IV3{6, 11, 6}) {
+        fmt.println("SELFTEST FAIL: shield wall hit", state, snake[0])
+        return false
+    }
+    shield_timer = 0
+    step() // unshielded now — must die
+    if state != .GAME_OVER {
+        fmt.println("SELFTEST FAIL: unshielded wall hit did not kill")
+        return false
+    }
+    death_squawk = false // headless: nobody will consume the sound request
+    fmt.println("shield: PASS")
+
+    // --- T9: structural violations fail compilation ---
+    macros[strings.clone("链1")] = strings.clone(`{"do":[{"use":{"name":"链2"}}]}`)
+    macros[strings.clone("链2")] = strings.clone(`{"do":[{"use":{"name":"链3"}}]}`)
+    macros[strings.clone("链3")] = strings.clone(`{"do":[{"use":{"name":"链4"}}]}`)
+    macros[strings.clone("链4")] = strings.clone(`{"do":[{"use":{"name":"链5"}}]}`)
+    macros[strings.clone("链5")] = strings.clone(`{"do":[{"growth":{"n":1}}]}`)
+    if _, dbok := bp_compile(`{"do":[{"use":{"name":"链1"}}]}`); dbok {
+        fmt.println("SELFTEST FAIL: 5-deep use-chain compiled")
+        return false
+    }
+    chain_names := [?]string{"链1", "链2", "链3", "链4", "链5"}
+    for cn in chain_names {
+        ck, cv := delete_key(&macros, cn)
+        delete(ck)
+        delete(cv)
+    }
+    if _, unok := bp_compile(`{"do":[{"teleport":{}}]}`); unok {
+        fmt.println("SELFTEST FAIL: unknown node compiled")
+        return false
+    }
+    if _, ovok := bp_compile(`{"do":[{"repeat":{"n":5,"do":[{"growth":{"n":1}},{"growth":{"n":1}},{"growth":{"n":1}},{"growth":{"n":1}},{"growth":{"n":1}},{"growth":{"n":1}},{"growth":{"n":1}}]}}]}`); ovok {
+        fmt.println("SELFTEST FAIL: 35 emissions compiled (budget 32)")
+        return false
+    }
+    fmt.println("compile failures: PASS")
+
+    // --- T10: macros define/use/persist/cyclic/delete ---
+    if !macro_define("测试烟花", `{"do":[{"burst":{"n":2}}]}`) {
+        fmt.println("SELFTEST FAIL: macro_define 测试烟花")
+        return false
+    }
+    fw, fwok := bp_compile(`{"do":[{"use":{"name":"测试烟花"}}]}`)
+    if !fwok || len(fw) != 1 {
+        fmt.println("SELFTEST FAIL: use-macro compile")
+        return false
+    }
+    {
+        n_part := len(particles)
+        enqueue_actions(fw[:])
+        delete(fw)
+        run_scheduled()
+        if len(particles) <= n_part {
+            fmt.println("SELFTEST FAIL: macro burst emitted no particles")
+            return false
+        }
+    }
+    {   // macros.json persisted with both macros
+        mdata, merr := os.read_entire_file(MACROS_FILE, context.temp_allocator)
+        mroot, mperr := json.parse(mdata, .JSON, true, context.temp_allocator)
+        mobj, mok2 := mroot.(json.Object)
+        mmv, _ := mobj["macros"]
+        mmo, mmok := mmv.(json.Object)
+        _, has_fw := mmo["测试烟花"]
+        _, has_zc := mmo["自测宏"]
+        if merr != nil || mperr != nil || !mok2 || !mmok || !has_fw || !has_zc {
+            fmt.println("SELFTEST FAIL: macros.json persistence")
+            return false
+        }
+    }
+    if macro_define("循环", `{"do":[{"use":{"name":"循环"}}]}`) {
+        fmt.println("SELFTEST FAIL: cyclic macro accepted")
+        return false
+    }
+    if !macro_delete("测试烟花") {
+        fmt.println("SELFTEST FAIL: macro_delete")
+        return false
+    }
+    if _, has := macros["测试烟花"]; has {
+        fmt.println("SELFTEST FAIL: macro still present after delete")
+        return false
+    }
+    fmt.println("macros: PASS")
+
+    // --- T11: blueprint_summary produces readable Chinese lines ---
+    sl := blueprint_summary(`{"do":[{"growth":{"n":2}},{"delay":{"secs":3}},{"spawn_food":{"kind":"神秘蛋","count":2}}]}`)
+    if len(sl) != 2 || !strings.contains(sl[0], "立刻") ||
+       !strings.contains(sl[1], "3秒后") || !strings.contains(sl[1], "神秘蛋") {
+        fmt.println("SELFTEST FAIL: blueprint_summary", sl)
+        return false
+    }
+    sl2 := blueprint_summary(`{"do":[{"chance":{"p":0.5,"do":[{"score":{"n":25}}]}}]}`)
+    if len(sl2) != 1 || !strings.contains(sl2[0], "50%概率") || !strings.contains(sl2[0], "分数+25") {
+        fmt.println("SELFTEST FAIL: blueprint_summary chance", sl2)
+        return false
+    }
+    fmt.println("summary: PASS")
+
+    // --- T12: creative-description response parsing (创造台 ✨ LLM mode) ---
+    {   // canned valid response → fields clamped + blueprint compiles
+        cr, crok := creative_parse(`{"name":"火箭辣椒","hue":10,"shape":2,"rarity":2,"flavor":"先上天，再坠毁","blueprint":{"do":[{"speed":{"mult":0.5,"secs":4}},{"delay":{"secs":4}},{"growth":{"n":-2}},{"shake":{"s":0.6}},{"burst":{"n":3}}]}}`)
+        if !crok || cr.name != "火箭辣椒" || cr.hue != 10 || cr.shape != 2 ||
+           cr.rarity != 2 || cr.flavor != "先上天，再坠毁" || cr.blueprint == "" {
+            fmt.println("SELFTEST FAIL: creative parse valid response", crok, cr.name)
+            return false
+        }
+        cracts, craok := bp_compile(cr.blueprint)
+        if !craok || len(cracts) != 4 || cracts[0].at != 0 || cracts[1].at != 4 {
+            fmt.println("SELFTEST FAIL: creative blueprint schedule", len(cracts), craok)
+            return false
+        }
+        bp_free_actions(&cracts)
+        creative_free(&cr)
+    }
+    {   // out-of-range scalars clamp like clamp_recipe
+        cr2, cr2ok := creative_parse(`{"name":"辣翅","hue":725,"shape":9,"rarity":7,"flavor":"","blueprint":{"do":[{"growth":{"n":1}}]}}`)
+        if !cr2ok || cr2.hue != 5 || cr2.shape != 3 || cr2.rarity != 2 {
+            fmt.println("SELFTEST FAIL: creative clamp", cr2)
+            return false
+        }
+        creative_free(&cr2)
+    }
+    {   // ```json fences are tolerated
+        cr3, cr3ok := creative_parse("```json\n{\"name\":\"蛋\",\"hue\":40,\"shape\":0,\"rarity\":1,\"flavor\":\"\",\"blueprint\":{\"do\":[{\"burst\":{\"n\":1}}]}}\n```")
+        if !cr3ok || cr3.name != "蛋" || cr3.blueprint == "" {
+            fmt.println("SELFTEST FAIL: creative fenced response")
+            return false
+        }
+        creative_free(&cr3)
+    }
+    // blueprint with an unknown node → rejected
+    if _, uok := creative_parse(`{"name":"x","hue":1,"shape":0,"rarity":0,"flavor":"","blueprint":{"do":[{"teleport":{}}]}}`); uok {
+        fmt.println("SELFTEST FAIL: creative accepted unknown node")
+        return false
+    }
+    // response missing blueprint → rejected
+    if _, mok := creative_parse(`{"name":"x","hue":1,"shape":0,"rarity":0,"flavor":""}`); mok {
+        fmt.println("SELFTEST FAIL: creative accepted missing blueprint")
+        return false
+    }
+    fmt.println("creative parse: PASS")
+
+    // restore the user's macros.json exactly as found
+    if orig_macros_exists {
+        _ = os.write_entire_file(MACROS_FILE, orig_macros)
+        delete(orig_macros)
+    } else {
+        _ = os.remove(MACROS_FILE)
+    }
+
+    // --- T13: creator nickname persistence (creator.txt, snapshot-restored) ---
+    if creator_byline != "" { delete(creator_byline); creator_byline = "" }
+    save_creator("测试创作者")
+    if creator_byline != "测试创作者" {
+        fmt.println("SELFTEST FAIL: save_creator byline")
+        return false
+    }
+    cdata, cerr := os.read_entire_file(CREATOR_FILE, context.temp_allocator)
+    if cerr != nil || strings.trim_space(string(cdata)) != "测试创作者" {
+        fmt.println("SELFTEST FAIL: creator.txt write")
+        return false
+    }
+    delete(creator_byline)
+    creator_byline = ""
+    load_creator()
+    if creator_byline != "测试创作者" {
+        fmt.println("SELFTEST FAIL: creator.txt reload")
+        return false
+    }
+    delete(creator_byline)
+    creator_byline = ""
+    // restore creator.txt exactly as found
+    if orig_creator_exists {
+        _ = os.write_entire_file(CREATOR_FILE, orig_creator)
+        delete(orig_creator)
+    } else {
+        _ = os.remove(CREATOR_FILE)
+    }
+    fmt.println("creator: PASS")
+
+    fmt.println("blueprint engine: ALL PASS")
     return true
 }
 
@@ -1257,7 +2632,40 @@ llm_test :: proc() -> bool {
         k.fx_confuse, k.fx_bursts, k.fx_tint)
     ok := k.author == "AI"
     fmt.println("llm roundtrip:", ok ? "PASS" : "FAIL (fell back to local recipe)")
-    return ok
+    if !ok do return false
+
+    // 创造台 ✨ 描述创意: the mock answers the creative prompt with a blueprint
+    if !llm_start_creative("我想要一个会下蛋的食物") {
+        fmt.println("LLMTEST FAIL: creative job did not start")
+        return false
+    }
+    for i := 0; i < 600 && llm_state == .COOKING; i += 1 {
+        time.sleep(50 * time.Millisecond)
+    }
+    if llm_state == .COOKING {
+        fmt.println("LLMTEST FAIL: creative worker timed out")
+        return false
+    }
+    // peek at the raw handoff before llm_poll consumes it (editor is closed
+    // here, so poll parses + discards — exactly the production fallback)
+    sync.mutex_lock(&llm_mutex)
+    craw := strings.clone(llm_creative_raw)
+    sync.mutex_unlock(&llm_mutex)
+    llm_poll()
+    cr, cok := creative_parse(craw)
+    delete(craw)
+    cpass := cok && cr.name != "" && cr.blueprint != ""
+    if cpass {
+        sacts, sok := bp_compile(cr.blueprint)
+        cpass = sok && len(sacts) == 2
+        if sok do bp_free_actions(&sacts)
+    }
+    fmt.println("creative desc: 我想要一个会下蛋的食物")
+    fmt.printf("creative: name=%s hue=%d shape=%d rarity=%d flavor=%s\n",
+        cr.name, cr.hue, cr.shape, cr.rarity, cr.flavor)
+    fmt.println("creative roundtrip:", cpass ? "PASS" : "FAIL")
+    creative_free(&cr)
+    return cpass
 }
 
 // nearest food the snake is willing to eat (not rotting, not immune-refused)
@@ -1295,22 +2703,11 @@ update_food_rot :: proc(dt: f32) {
     }
 }
 
-eat_food :: proc(i: int) {
-    f := foods[i]
-    k := kinds[f.kind]
-    score = max(0, score + k.fx_score)
-    eaten += 1
-    if k.fx_growth > 0 {
-        pending_growth += k.fx_growth
-    } else if k.fx_growth < 0 {
-        // 炸掉尾巴，太短就炸死了
-        if len(snake) - 2 < -k.fx_growth {
-            die()
-            ordered_remove(&foods, i)
-            return
-        }
-        for _ in 0..<-k.fx_growth do _ = pop(&snake)
-    }
+// classic fx fields applied directly — also the fallback for invalid blueprints.
+// returns true when the fx killed the snake (tail-blast on a too-short snake)
+apply_classic_fx :: proc(k: FoodKind, pos: IV3) -> bool {
+    add_score(k.fx_score)
+    if apply_growth_fx(k.fx_growth) do return true
     if k.fx_speed_t > 0 {
         fx_speed_timer = k.fx_speed_t
         fx_speed_mult = k.fx_speed
@@ -1321,13 +2718,45 @@ eat_food :: proc(i: int) {
         tint_color = k.fx_tint
     }
     confuse_timer = max(confuse_timer, k.fx_confuse)
+    for _ in 0..<max(k.fx_bursts, 1) do burst_col(cell_to_world(pos), k.color, 24)
+    return false
+}
+
+eat_food :: proc(i: int) {
+    f := foods[i]
+    k := kinds[f.kind]
+    eaten += 1
+    blueprint_ok := false
+    if k.blueprint != "" {
+        actions, ok := bp_compile(k.blueprint)
+        if ok {
+            enqueue_actions(actions[:]) // blueprint supersedes the classic fx fields
+            delete(actions)
+            blueprint_ok = true
+        }
+    }
+    if blueprint_ok {
+        if k.flavor != "" {
+            set_toast(fmt.tprintf("AI 点评: %s", k.flavor))
+        }
+    } else {
+        if apply_classic_fx(k, f.pos) {
+            ordered_remove(&foods, i)
+            return
+        }
+        if k.blueprint != "" {
+            if k.flavor != "" {
+                set_toast(fmt.tprintf("蓝图无效，使用基础效果 · AI 点评: %s", k.flavor))
+            } else {
+                set_toast("蓝图无效，使用基础效果")
+            }
+        } else if k.flavor != "" {
+            set_toast(fmt.tprintf("AI 点评: %s", k.flavor))
+        }
+    }
     if kind_harmful(k) {
         snake_memory[k.name] += 1 // 蛇会记住这次伤害
     }
-    if k.flavor != "" {
-        set_toast(fmt.tprintf("AI 点评: %s", k.flavor))
-    }
-    for _ in 0..<max(k.fx_bursts, 1) do burst_col(cell_to_world(f.pos), k.color, 24)
     if audio_ok {
         rl.SetSoundPitch(snd_eat, 0.8 + 0.2 * f32(k.rarity) + rand.float32() * 0.1)
         play(snd_eat)
@@ -1436,6 +2865,15 @@ handle_input :: proc() {
             input_len = 0
         }
         if !input_open {
+            if rl.IsKeyPressed(.E) {
+                // 创造台：图鉴打开时克隆选中行（以此为基础改造），否则空白模板
+                rows := dex_visible_rows()
+                if dex_open && rows > 0 {
+                    editor_open_from(min(dex_sel, rows - 1))
+                } else {
+                    editor_open_blank()
+                }
+            }
             if rl.IsKeyPressed(.ONE)   do cast_preset(0)
             if rl.IsKeyPressed(.TWO)   do cast_preset(1)
             if rl.IsKeyPressed(.THREE) do cast_preset(2)
@@ -1546,6 +2984,678 @@ copy_share_code :: proc(idx: int) {
 }
 
 // ---------------------------------------------------------------------------
+// 创造台 (Creator Workshop): manual fx sliders + ✨ AI creative descriptions.
+// Right-side keyboard-driven panel with a live 3D preview sample; the game
+// keeps running while it is open. E opens it in FEEDING mode (with the dex
+// open, E clones the selected kind as the starting point).
+// ---------------------------------------------------------------------------
+
+Edit_Target :: enum { NONE, NAME, FLAVOR, CREATIVE, MACRO_NAME, NICKNAME }
+
+// cursor rows; the fx block is hidden while edit_has_blueprint is set
+Editor_Field :: enum {
+    NAME, HUE, SHAPE, RARITY,
+    FX_SPEED, FX_SPEED_T, FX_GROWTH, FX_SCORE, FX_SHAKE, FX_CONFUSE,
+    FX_BURSTS, FX_TINT,
+    CLEAR_BP, FLAVOR, ACT_CREATIVE, ACT_MACRO, ACT_SAVE, ACT_COPY, ACT_ABORT,
+}
+
+SHAPE_NAMES  := [4]string{"球", "方块", "圆锥", "宝石"}
+RARITY_NAMES := [3]string{"常见", "稀有", "传说"}
+
+editor_row_count :: proc() -> int {
+    return 4 + (edit_has_blueprint ? 1 : 8) + 1 + 5
+}
+
+editor_field_at :: proc(row: int) -> Editor_Field {
+    switch row {
+    case 0: return .NAME
+    case 1: return .HUE
+    case 2: return .SHAPE
+    case 3: return .RARITY
+    }
+    fx_rows := edit_has_blueprint ? 1 : 8
+    if row < 4 + fx_rows {
+        if edit_has_blueprint do return .CLEAR_BP
+        return Editor_Field(int(Editor_Field.FX_SPEED) + (row - 4))
+    }
+    r := row - 4 - fx_rows
+    if r == 0 do return .FLAVOR
+    return Editor_Field(int(Editor_Field.ACT_CREATIVE) + (r - 1))
+}
+
+free_edit_kind :: proc() {
+    if edit_kind.name != "" { delete(edit_kind.name); edit_kind.name = "" }
+    if edit_kind.flavor != "" { delete(edit_kind.flavor); edit_kind.flavor = "" }
+    if edit_blueprint != "" { delete(edit_blueprint); edit_blueprint = "" }
+    edit_has_blueprint = false
+}
+
+// a free cell near the map center for the live preview sample
+editor_pick_showcase :: proc() {
+    c :: GRID_N / 2
+    candidates := [?]IV3{
+        {c, GRID_N - 2, c}, {c, GRID_N - 3, c},
+        {c - 2, GRID_N - 2, c}, {c + 2, GRID_N - 2, c},
+        {c, GRID_N - 2, c - 2}, {c, GRID_N - 2, c + 2},
+        {2, GRID_N - 2, 2},
+    }
+    for cell in candidates {
+        if on_snake(cell) do continue
+        occupied := false
+        for f in foods do if f.pos == cell { occupied = true; break }
+        if !occupied {
+            editor_showcase = cell
+            return
+        }
+    }
+    editor_showcase = candidates[0]
+}
+
+editor_begin :: proc() {
+    editor_open = true
+    editor_sel = 0
+    edit_target = .NONE
+    edit_len = 0
+    edit_rep_timer = 0
+    dex_open = false
+    editor_pick_showcase()
+}
+
+editor_open_blank :: proc() {
+    free_edit_kind()
+    edit_kind = FoodKind{
+        name = strings.clone("我的食物"), author = "自创", flavor = "",
+        hue = 45, color = hsv_rgb(45, 0.72, 1.0), shape = .SPHERE,
+        size = 0.30, spin = 2.0, rarity = 0,
+        fx_speed = 1, fx_speed_t = 0, fx_growth = 1, fx_score = 10,
+        fx_shake = 0, fx_tint = {}, fx_confuse = 0, fx_bursts = 1,
+    }
+    edit_tint_idx = 0
+    editor_base_name = ""
+    editor_begin()
+}
+
+// from the dex: clone the selected kind (blueprint included) as the base
+editor_open_from :: proc(kind_idx: int) {
+    src := kinds[kind_idx]
+    free_edit_kind()
+    edit_kind = src // value copy; owned strings re-cloned below
+    edit_kind.name = strings.clone(src.name)
+    edit_kind.flavor = src.flavor != "" ? strings.clone(src.flavor) : ""
+    edit_kind.byline = "" // 保存时落款为当前创作者
+    edit_kind.author = "自创"
+    edit_kind.blueprint = "" // 编辑器用 edit_blueprint（独立 owned 副本）
+    if src.blueprint != "" {
+        edit_blueprint = strings.clone(src.blueprint)
+        edit_has_blueprint = true
+    }
+    edit_tint_idx = src.fx_tint.a > 0 ? 1 + (rgb_hue(src.fx_tint) / 30) %% 12 : 0
+    editor_base_name = src.name // kinds[] is append-only: the pointer outlives the editor
+    editor_begin()
+}
+
+editor_close :: proc() {
+    editor_open = false
+    edit_target = .NONE
+    pending_save = false
+    free_edit_kind()
+}
+
+// rough hue of a tint color, for mapping fx_tint back onto the cycle index
+rgb_hue :: proc(c: rl.Color) -> int {
+    r := f32(c.r) / 255
+    g := f32(c.g) / 255
+    b := f32(c.b) / 255
+    mx := max(r, max(g, b))
+    mn := min(r, min(g, b))
+    d := mx - mn
+    if d < 1e-5 do return 0
+    h: f32
+    switch mx {
+    case r: h = 60 * math.mod((g - b) / d + 6, 6)
+    case g: h = 60 * ((b - r) / d + 2)
+    case:   h = 60 * ((r - g) / d + 4)
+    }
+    return int(h) %% 360
+}
+
+// first n runes of s (no allocation; the result aliases s)
+utf8_prefix :: proc(s: string, n: int) -> string {
+    count := 0
+    i := 0
+    for i < len(s) {
+        if count == n do break
+        _, size := utf8.decode_rune_in_string(s[i:])
+        if size == 0 do break
+        i += size
+        count += 1
+    }
+    return s[:i]
+}
+
+// 强度值: purely cosmetic power score from the fx fields or the blueprint
+editor_power :: proc() -> int {
+    p: f32 = 0
+    if edit_has_blueprint && edit_blueprint != "" {
+        acts, ok := bp_compile(edit_blueprint)
+        if !ok do return 0
+        defer bp_free_actions(&acts)
+        for a in acts {
+            switch a.prim.name {
+            case "speed":      p += abs(1 - a.args.f1) * 25 + a.args.f2 * 2
+            case "growth":     p += f32(abs(a.args.i1)) * 8
+            case "score":      p += f32(abs(a.args.i1)) * 0.5
+            case "shake":      p += a.args.f1 * 10
+            case "confuse":    p += a.args.f1 * 8
+            case "flash":      p += 4
+            case "burst":      p += f32(a.args.i1) * 3
+            case "spawn_food": p += f32(a.args.i1) * 12
+            case "shield":     p += a.args.f1 * 8
+            case "reverse":    p += 15
+            case "score_mult": p += (a.args.f1 - 1) * 30 + a.args.f2 * 2
+            }
+        }
+    } else {
+        k := edit_kind
+        p = f32(abs(k.fx_growth)) * 8 + f32(abs(k.fx_score)) * 0.5 +
+            f32(abs(k.fx_bursts - 1)) * 3 + k.fx_confuse * 8 + k.fx_shake * 10
+        if k.fx_speed_t > 0 do p += abs(1 - k.fx_speed) * 25 + k.fx_speed_t * 2
+        if k.fx_tint.a > 0 do p += 4
+    }
+    return clamp(int(math.round(p)), 0, 999)
+}
+
+// ←→ held down: first repeat after 0.35 s, then every 0.06 s
+editor_repeat_dir :: proc(dt: f32) -> int {
+    pressed := 0
+    if rl.IsKeyPressed(.LEFT)  do pressed = -1
+    if rl.IsKeyPressed(.RIGHT) do pressed = 1
+    if pressed != 0 {
+        edit_rep_timer = 0.35
+        return pressed
+    }
+    held := 0
+    if rl.IsKeyDown(.LEFT)  do held = -1
+    if rl.IsKeyDown(.RIGHT) do held = 1
+    if held == 0 {
+        edit_rep_timer = 0
+        return 0
+    }
+    edit_rep_timer -= dt
+    if edit_rep_timer <= 0 {
+        edit_rep_timer = 0.06
+        return held
+    }
+    return 0
+}
+
+editor_adjust :: proc(field: Editor_Field, dir: int) {
+    k := &edit_kind
+    #partial switch field {
+    case .HUE:
+        k.hue = (k.hue + dir * 5 + 360) %% 360
+        k.color = hsv_rgb(f32(k.hue), 0.72, 1.0)
+    case .SHAPE:
+        k.shape = FoodShape((int(k.shape) + dir + 4) %% 4)
+    case .RARITY:
+        k.rarity = (k.rarity + dir + 3) %% 3
+    case .FX_SPEED:
+        k.fx_speed = clamp(k.fx_speed + f32(dir) * 0.05, 0.45, 2.0)
+    case .FX_SPEED_T:
+        k.fx_speed_t = clamp(k.fx_speed_t + f32(dir) * 0.5, 0, 8)
+    case .FX_GROWTH:
+        k.fx_growth = clamp(k.fx_growth + dir, -6, 6)
+    case .FX_SCORE:
+        k.fx_score = clamp(k.fx_score + dir * 5, -50, 100)
+    case .FX_SHAKE:
+        k.fx_shake = clamp(k.fx_shake + f32(dir) * 0.1, 0, 1)
+    case .FX_CONFUSE:
+        k.fx_confuse = clamp(k.fx_confuse + f32(dir) * 0.5, 0, 6)
+    case .FX_BURSTS:
+        k.fx_bursts = clamp(k.fx_bursts + dir, 1, 4)
+    case .FX_TINT:
+        edit_tint_idx = (edit_tint_idx + dir + 13) %% 13
+        if edit_tint_idx == 0 {
+            k.fx_tint = {}
+        } else {
+            tc := hsv_rgb(f32((edit_tint_idx - 1) * 30), 0.85, 1.0)
+            k.fx_tint = {tc.r, tc.g, tc.b, 90}
+        }
+    }
+}
+
+editor_begin_edit :: proc(t: Edit_Target) {
+    edit_target = t
+    edit_len = 0
+    src := ""
+    #partial switch t {
+    case .NAME:   src = edit_kind.name
+    case .FLAVOR: src = edit_kind.flavor
+    case:         src = ""
+    }
+    for i := 0; i < len(src) && edit_len < len(edit_buf) - 1; i += 1 {
+        edit_buf[edit_len] = src[i]
+        edit_len += 1
+    }
+}
+
+editor_commit_edit :: proc() {
+    text := string(edit_buf[:edit_len])
+    t := edit_target
+    edit_target = .NONE
+    switch t {
+    case .NAME:
+        trimmed := strings.trim_space(text)
+        if edit_kind.name != "" do delete(edit_kind.name)
+        edit_kind.name = trimmed != "" ? strings.clone(trimmed) : ""
+    case .FLAVOR:
+        trimmed := strings.trim_space(text)
+        if edit_kind.flavor != "" do delete(edit_kind.flavor)
+        edit_kind.flavor = trimmed != "" ? strings.clone(trimmed) : ""
+    case .CREATIVE:
+        editor_submit_creative(strings.trim_space(text))
+    case .MACRO_NAME:
+        editor_submit_macro(strings.trim_space(text))
+    case .NICKNAME:
+        pending_save = false
+        trimmed := strings.trim_space(text)
+        if trimmed != "" do save_creator(utf8_prefix(trimmed, 16))
+        editor_do_save(pending_copy)
+    case .NONE:
+    }
+}
+
+editor_submit_creative :: proc(desc: string) {
+    if desc == "" do return
+    if !llm_enabled {
+        set_toast("未配置 API Key，只能手动设计")
+        return
+    }
+    if llm_is_cooking() || !llm_start_creative(desc) {
+        set_toast("AI 忙，请稍候")
+    }
+}
+
+editor_submit_macro :: proc(name: string) {
+    if name == "" {
+        set_toast("原语名称不能为空")
+        return
+    }
+    if macro_define(name, edit_blueprint) {
+        set_toast(fmt.tprintf("原语已保存: %s，AI 设计时可以引用它", name))
+    } else {
+        set_toast("原语保存失败：蓝图无效")
+    }
+}
+
+// finalize the scratch kind into kinds[], spawn one, and keep the editor open
+editor_save_kind :: proc() -> int {
+    base := strings.trim_space(edit_kind.name)
+    if base == "" do base = "无名料理"
+    name := base
+    suffix := 1
+    for {
+        if _, taken := kind_by_name[name]; !taken do break
+        suffix += 1
+        name = fmt.tprintf("%s~%d", base, suffix)
+    }
+    k := FoodKind{
+        name = strings.clone(name), author = "自创",
+        flavor = edit_kind.flavor != "" ? strings.clone(edit_kind.flavor) : "",
+        hue = edit_kind.hue, color = hsv_rgb(f32(edit_kind.hue), 0.72, 1.0),
+        shape = edit_kind.shape, size = edit_kind.size, spin = edit_kind.spin,
+        rarity = edit_kind.rarity,
+        fx_speed = edit_kind.fx_speed, fx_speed_t = edit_kind.fx_speed_t,
+        fx_growth = edit_kind.fx_growth, fx_score = edit_kind.fx_score,
+        fx_shake = edit_kind.fx_shake, fx_tint = edit_kind.fx_tint,
+        fx_confuse = edit_kind.fx_confuse, fx_bursts = edit_kind.fx_bursts,
+        blueprint = edit_has_blueprint && edit_blueprint != "" ? strings.clone(edit_blueprint) : "",
+        byline = creator_byline != "" ? strings.clone(creator_byline) : "",
+    }
+    append(&kinds, k)
+    idx := len(kinds) - 1
+    kind_by_name[k.name] = idx
+    spawn_kind(idx)
+    last_cast_kind = idx
+    set_toast(fmt.tprintf("已保存并投放: %s", k.name))
+    return idx
+}
+
+editor_request_save :: proc(copy_after: bool) {
+    if creator_byline == "" && !creator_asked {
+        // 首次保存：先问昵称（写 creator.txt；env SNAKE_CREATOR 优先）
+        creator_asked = true
+        pending_save = true
+        pending_copy = copy_after
+        editor_begin_edit(.NICKNAME)
+        return
+    }
+    editor_do_save(copy_after)
+}
+
+editor_do_save :: proc(copy_after: bool) {
+    idx := editor_save_kind()
+    if copy_after do copy_share_code(idx)
+}
+
+editor_activate :: proc(field: Editor_Field) {
+    #partial switch field {
+    case .NAME:
+        editor_begin_edit(.NAME)
+    case .FLAVOR:
+        editor_begin_edit(.FLAVOR)
+    case .CLEAR_BP:
+        if edit_blueprint != "" { delete(edit_blueprint); edit_blueprint = "" }
+        edit_has_blueprint = false
+        set_toast("蓝图已清除，恢复滑杆编辑")
+    case .ACT_CREATIVE:
+        editor_begin_edit(.CREATIVE)
+    case .ACT_MACRO:
+        if !edit_has_blueprint {
+            set_toast("需要先有蓝图才能存为原语")
+        } else {
+            editor_begin_edit(.MACRO_NAME)
+        }
+    case .ACT_SAVE:
+        editor_request_save(false)
+    case .ACT_COPY:
+        editor_request_save(true)
+    case .ACT_ABORT:
+        editor_close()
+    }
+}
+
+// AI 设计完成: fill the scratch kind from the creative result (takes ownership
+// of the result's owned strings)
+editor_apply_creative :: proc(res: ^Creative_Result) {
+    if edit_kind.name != "" do delete(edit_kind.name)
+    edit_kind.name = res.name
+    if edit_kind.flavor != "" do delete(edit_kind.flavor)
+    edit_kind.flavor = res.flavor
+    if edit_blueprint != "" do delete(edit_blueprint)
+    edit_blueprint = res.blueprint
+    edit_has_blueprint = true
+    edit_kind.hue = res.hue
+    edit_kind.color = hsv_rgb(f32(res.hue), 0.72, 1.0)
+    edit_kind.shape = FoodShape(res.shape)
+    edit_kind.rarity = res.rarity
+    res.name = ""
+    res.flavor = ""
+    res.blueprint = ""
+    editor_sel = min(editor_sel, editor_row_count() - 1)
+}
+
+// text-edit sub-state keys: ASCII typing + Cmd+V paste (UTF-8 through, so
+// Chinese works via paste) + rune-aware backspace + Enter/Esc
+editor_text_keys :: proc() {
+    for {
+        c := rl.GetCharPressed()
+        if c == 0 do break
+        if c >= 32 && c < 127 && edit_len < len(edit_buf) - 1 {
+            edit_buf[edit_len] = u8(c)
+            edit_len += 1
+        }
+    }
+    if rl.IsKeyPressed(.V) && (rl.IsKeyDown(.LEFT_SUPER) || rl.IsKeyDown(.RIGHT_SUPER)) {
+        clip := rl.GetClipboardText()
+        if clip != nil {
+            p := transmute([^]u8)clip
+            for i := 0; p[i] != 0 && edit_len < len(edit_buf) - 1; i += 1 {
+                if p[i] >= 32 && p[i] != 127 { // 放行可打印 ASCII 与 UTF-8 多字节
+                    edit_buf[edit_len] = p[i]
+                    edit_len += 1
+                }
+            }
+        }
+    }
+    if rl.IsKeyPressed(.BACKSPACE) && edit_len > 0 {
+        edit_len -= 1
+        for edit_len > 0 && (edit_buf[edit_len] & 0xC0) == 0x80 {
+            edit_len -= 1 // 按码点回退，不删出半个汉字
+        }
+    }
+    if rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.KP_ENTER) {
+        editor_commit_edit()
+        return
+    }
+    if rl.IsKeyPressed(.ESCAPE) {
+        if edit_target == .NICKNAME && pending_save {
+            // 跳过昵称也要完成挂起的保存
+            pending_save = false
+            edit_target = .NONE
+            editor_do_save(pending_copy)
+            return
+        }
+        edit_target = .NONE
+    }
+}
+
+editor_handle_input :: proc(dt: f32) {
+    if edit_target != .NONE {
+        editor_text_keys()
+        return
+    }
+    if rl.IsKeyPressed(.V) {
+        view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
+    }
+    if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
+    if rl.IsKeyPressed(.ESCAPE) {
+        editor_close()
+        return
+    }
+    rows := editor_row_count()
+    if rl.IsKeyPressed(.UP)   do editor_sel = max(0, editor_sel - 1)
+    if rl.IsKeyPressed(.DOWN) do editor_sel = min(rows - 1, editor_sel + 1)
+    if dir := editor_repeat_dir(dt); dir != 0 {
+        editor_adjust(editor_field_at(editor_sel), dir)
+    }
+    if rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.KP_ENTER) {
+        editor_activate(editor_field_at(editor_sel))
+    }
+}
+
+// ---------------------------------------------------------------------------
+// 创造台 rendering
+// ---------------------------------------------------------------------------
+
+draw_editor_row :: proc(x, w: i32, ry: ^i32, row: int) {
+    field := editor_field_at(row)
+    sel := editor_sel == row && edit_target == .NONE
+    k := &edit_kind
+
+    if field == .CLEAR_BP {
+        // read-only blueprint summary block above the 清除蓝图 row
+        draw_text("效果蓝图", x + 20, ry^, 15, {150, 200, 255, 255}, true)
+        ry^ += 22
+        lines := blueprint_summary(edit_blueprint)
+        shown := min(len(lines), 8)
+        for i in 0..<shown {
+            draw_text(fmt.ctprintf("· %s", lines[i]), x + 30, ry^, 13, {175, 185, 205, 230})
+            ry^ += 18
+        }
+        if len(lines) > shown {
+            draw_text(fmt.ctprintf("… 共 %d 条", len(lines)), x + 30, ry^, 13, {140, 150, 170, 220})
+            ry^ += 18
+        }
+        if len(lines) == 0 {
+            draw_text("（蓝图无法解析）", x + 30, ry^, 13, {255, 130, 130, 230})
+            ry^ += 18
+        }
+        for l in lines do delete(l)
+        delete(lines)
+        ry^ += 4
+    }
+
+    if sel do rl.DrawRectangle(x + 8, ry^ - 4, w - 16, 28, {85, 75, 140, 90})
+    label_col := sel ? rl.RAYWHITE : rl.Color{185, 188, 205, 255}
+    value_col := sel ? rl.Color{255, 222, 130, 255} : rl.Color{205, 206, 216, 255}
+
+    label: string
+    value: string
+    vcol := value_col
+    switch field {
+    case .NAME:
+        label = "名称"
+        value = utf8_prefix(k.name != "" ? k.name : "（未命名）", 20)
+    case .HUE:
+        label = "颜色色相"
+        value = fmt.tprintf("%d°", k.hue)
+    case .SHAPE:
+        label = "形状"
+        value = SHAPE_NAMES[int(k.shape)]
+    case .RARITY:
+        label = "稀有度"
+        value = RARITY_NAMES[k.rarity]
+        vcol = RARITY_COLORS[k.rarity]
+    case .FX_SPEED:
+        label = "速度倍率"
+        value = fmt.tprintf("×%.2f", k.fx_speed)
+    case .FX_SPEED_T:
+        label = "速度持续"
+        value = fmt.tprintf("%.1f 秒", k.fx_speed_t)
+    case .FX_GROWTH:
+        label = "生长"
+        value = fmt.tprintf("%+d 节", k.fx_growth)
+    case .FX_SCORE:
+        label = "分数"
+        value = fmt.tprintf("%+d 分", k.fx_score)
+    case .FX_SHAKE:
+        label = "震屏"
+        value = fmt.tprintf("%.1f", k.fx_shake)
+    case .FX_CONFUSE:
+        label = "眩晕"
+        value = fmt.tprintf("%.1f 秒", k.fx_confuse)
+    case .FX_BURSTS:
+        label = "烟花"
+        value = fmt.tprintf("%d 发", k.fx_bursts)
+    case .FX_TINT:
+        label = "闪光"
+        value = edit_tint_idx == 0 ? "无" : fmt.tprintf("色相 %d°", (edit_tint_idx - 1) * 30)
+    case .CLEAR_BP:
+        label = "清除蓝图"
+        value = "恢复滑杆编辑"
+    case .FLAVOR:
+        label = "点评"
+        value = k.flavor != "" ? utf8_prefix(k.flavor, 18) : "（无，Enter 添加）"
+    case .ACT_CREATIVE:
+        label = "★ 描述创意"
+        value = "让 AI 按你的描述设计"
+        vcol = {170, 220, 255, 255}
+    case .ACT_MACRO:
+        label = "存为原语"
+        if edit_has_blueprint {
+            value = "AI 之后可引用它"
+        } else {
+            value = "（需要先有蓝图）"
+            label_col = {110, 112, 128, 255}
+            vcol = {110, 112, 128, 255}
+        }
+    case .ACT_SAVE:
+        label = "保存并投放"
+        value = "进图鉴并生成一个"
+    case .ACT_COPY:
+        label = "复制分享码"
+        value = "先保存再复制"
+    case .ACT_ABORT:
+        label = "放弃 (Esc)"
+        value = "不保存"
+    }
+    draw_text(fmt.ctprintf("%s", label), x + 20, ry^, 16, label_col, sel)
+    if value != "" {
+        draw_text(fmt.ctprintf("%s", value), x + 210, ry^ + 1, 15, vcol, sel)
+    }
+    if field == .HUE {
+        rl.DrawRectangle(x + 280, ry^ + 2, 40, 16, k.color)
+        rl.DrawRectangleLinesEx({f32(x + 280), f32(ry^ + 2), 40, 16}, 1, {255, 255, 255, 120})
+    }
+    if field == .FX_TINT && edit_tint_idx > 0 {
+        rl.DrawRectangle(x + 330, ry^ + 2, 40, 16, k.fx_tint)
+        rl.DrawRectangleLinesEx({f32(x + 330), f32(ry^ + 2), 40, 16}, 1, {255, 255, 255, 120})
+    }
+    ry^ += 30
+}
+
+// drop leading runes until the text fits the width (long pastes stay editable)
+fit_tail :: proc(s: string, width: i32, size: i32) -> string {
+    out := s
+    for len(out) > 0 && measure_text(fmt.ctprintf("%s", out), size, true) > width {
+        _, n := utf8.decode_rune_in_string(out)
+        if n <= 0 do break
+        out = out[n:]
+    }
+    return out
+}
+
+// the inline text-edit overlay (name / flavor / creative / macro / nickname)
+draw_editor_input :: proc(x, y, w, h: i32) {
+    prompt: cstring
+    switch edit_target {
+    case .NAME:       prompt = "名称？"
+    case .FLAVOR:     prompt = "点评一句话（可空）"
+    case .CREATIVE:   prompt = "描述你想要的效果，AI 来设计"
+    case .MACRO_NAME: prompt = "原语名称？"
+    case .NICKNAME:   prompt = "你的创作者昵称？"
+    case .NONE:       prompt = ""
+    }
+    bw: i32 = w - 60
+    bh: i32 = 64
+    bx := x + 30
+    by := y + h - 180
+    rl.DrawRectangle(bx - 6, by - 6, bw + 12, bh + 44, {8, 10, 18, 248})
+    rl.DrawRectangleLinesEx({f32(bx - 6), f32(by - 6), f32(bw + 12), f32(bh + 44)}, 2, {255, 200, 120, 230})
+    draw_text(prompt, bx + 12, by + 6, 15, {200, 190, 160, 255})
+    shown := fit_tail(string(edit_buf[:edit_len]), bw - 40, 22)
+    draw_text(fmt.ctprintf("%s", shown), bx + 12, by + 30, 22, rl.RAYWHITE, true)
+    if time_total * 2 - math.floor(time_total * 2) < 0.55 {
+        tw := measure_text(fmt.ctprintf("%s", shown), 22, true)
+        draw_text("_", bx + 12 + tw + 3, by + 30, 22, rl.RAYWHITE, true)
+    }
+    hint: cstring = "Enter 确认 · Esc 取消 · Cmd+V 粘贴"
+    if edit_target == .NICKNAME do hint = "Enter 确认 · Esc 跳过（下次再设）"
+    draw_text(hint, bx + 12, by + bh + 12, 13, {140, 145, 160, 255})
+}
+
+draw_editor :: proc() {
+    if !editor_open do return
+    w: i32 = 560
+    x := SCREEN_W - w - 16
+    y: i32 = 16
+    h: i32 = SCREEN_H - 32
+    rl.DrawRectangle(x, y, w, h, {12, 14, 24, 238})
+    rl.DrawRectangleLinesEx({f32(x), f32(y), f32(w), f32(h)}, 1, {150, 130, 210, 200})
+
+    // header: title + 强度值 + 1-5 stars
+    power := editor_power()
+    stars := clamp(1 + power / 200, 1, 5)
+    draw_text("创造台", x + 18, y + 12, 26, {255, 214, 130, 255}, true)
+    draw_text(fmt.ctprintf("强度 %d", power), x + 130, y + 20, 17, {200, 205, 220, 255}, true)
+    sx := x + 225
+    for i in 1..=5 {
+        col := i <= stars ? rl.Color{255, 210, 80, 255} : rl.Color{90, 92, 110, 255}
+        draw_text("★", sx, y + 18, 20, col, true)
+        sx += 22
+    }
+    if editor_base_name != "" {
+        draw_text(fmt.ctprintf("以此为基础改造: %s", editor_base_name), x + 345, y + 22, 14, {150, 155, 175, 255})
+    }
+
+    ry := y + 52
+    rows := editor_row_count()
+    for row in 0..<rows {
+        draw_editor_row(x, w, &ry, row)
+    }
+
+    if llm_is_cooking() && llm_job_mode == .CREATIVE {
+        pulse := 0.6 + 0.4 * math.sin(time_total * 6)
+        draw_text("AI 设计中…", x + 18, y + h - 56, 17, {255, u8(170 + 50 * pulse), 120, 255}, true)
+    }
+    draw_text("↑↓ 选择   ←→ 调整   Enter 编辑/确认   Esc 关闭", x + 18, y + h - 30, 14, {140, 145, 165, 255})
+
+    if edit_target != .NONE do draw_editor_input(x, y, w, h)
+}
+
+// ---------------------------------------------------------------------------
 // Best score persistence
 // ---------------------------------------------------------------------------
 
@@ -1562,6 +3672,28 @@ load_best :: proc() {
 
 save_best :: proc() {
     _ = os.write_entire_file(BEST_FILE, fmt.tprint(best))
+}
+
+// ---------------------------------------------------------------------------
+// Creator nickname: env SNAKE_CREATOR wins; otherwise creator.txt (written on
+// the very first 创造台 save). The byline rides along in v2 share codes.
+// ---------------------------------------------------------------------------
+
+CREATOR_FILE :: "creator.txt"
+
+load_creator :: proc() {
+    if creator_byline != "" do return // env already set it
+    data, err := os.read_entire_file(CREATOR_FILE, context.allocator)
+    if err != nil do return
+    defer delete(data)
+    s := strings.trim_space(string(data))
+    if s != "" do creator_byline = strings.clone(s)
+}
+
+save_creator :: proc(name: string) {
+    if creator_byline != "" do delete(creator_byline)
+    creator_byline = strings.clone(name)
+    _ = os.write_entire_file(CREATOR_FILE, transmute([]u8)creator_byline)
 }
 
 // ---------------------------------------------------------------------------
@@ -1748,43 +3880,55 @@ RARITY_COLORS := [3]rl.Color{
     {255, 210, 70, 255},  // legendary
 }
 
-draw_foods :: proc() {
+// one food of the given kind at a cell (shared by real foods and the 创造台
+// live preview, so rarity glow/spin look exactly the same)
+draw_one_food :: proc(k: FoodKind, pos: IV3, spin: f32, rot: f32) {
     h := half_extent()
+    p := cell_to_world(pos)
+    p.y += math.sin(time_total * 3.2 + spin) * 0.07
+
+    s := k.size
+    dim: f32 = rot > 0 ? 0.45 : 1.0 // 腐烂变暗
+    col := rl.Color{u8(f32(k.color.r) * dim), u8(f32(k.color.g) * dim), u8(f32(k.color.b) * dim), 255}
+
+    rlgl.PushMatrix()
+    rlgl.Translatef(p.x, p.y, p.z)
+    rlgl.Rotatef(spin + time_total * 60 * k.spin * 0.5, 0, 1, 0)
+    switch k.shape {
+    case .SPHERE:
+        rl.DrawSphereEx({0, 0, 0}, s, 12, 10, col)
+    case .CUBE:
+        rl.DrawCubeV({0, 0, 0}, {s * 1.7, s * 1.7, s * 1.7}, col)
+    case .CONE:
+        rl.DrawCylinderEx({0, -s, 0}, {0, s, 0}, s * 0.75, 0.02, 10, col)
+    case .GEM:
+        rl.DrawCylinderEx({0, -s, 0}, {0, 0, 0}, s * 0.7, 0.02, 8, col)
+        rl.DrawCylinderEx({0, 0, 0}, {0, s, 0}, 0.02, s * 0.7, 8, col)
+    }
+    rlgl.PopMatrix()
+
+    // 稀有度光环
+    if k.rarity > 0 && rot <= 0 {
+        rc := RARITY_COLORS[k.rarity]
+        rl.BeginBlendMode(.ADDITIVE)
+        rl.DrawSphereEx(p, s * 1.6 + 0.06 * math.sin(time_total * 4), 10, 8,
+            {rc.r, rc.g, rc.b, k.rarity == 2 ? 26 : 14})
+        rl.EndBlendMode()
+    }
+    // 落地参考线（和苹果的落地光束一个道理）
+    rl.DrawLine3D({p.x, p.y - s - 0.05, p.z}, {p.x, -h, p.z}, {col.r, col.g, col.b, 60})
+}
+
+draw_foods :: proc() {
     for f in foods {
-        k := kinds[f.kind]
-        p := cell_to_world(f.pos)
-        p.y += math.sin(time_total * 3.2 + f.spin) * 0.07
-
-        s := k.size
-        dim: f32 = f.rot > 0 ? 0.45 : 1.0 // 腐烂变暗
-        col := rl.Color{u8(f32(k.color.r) * dim), u8(f32(k.color.g) * dim), u8(f32(k.color.b) * dim), 255}
-
-        rlgl.PushMatrix()
-        rlgl.Translatef(p.x, p.y, p.z)
-        rlgl.Rotatef(f.spin + time_total * 60 * k.spin * 0.5, 0, 1, 0)
-        switch k.shape {
-        case .SPHERE:
-            rl.DrawSphereEx({0, 0, 0}, s, 12, 10, col)
-        case .CUBE:
-            rl.DrawCubeV({0, 0, 0}, {s * 1.7, s * 1.7, s * 1.7}, col)
-        case .CONE:
-            rl.DrawCylinderEx({0, -s, 0}, {0, s, 0}, s * 0.75, 0.02, 10, col)
-        case .GEM:
-            rl.DrawCylinderEx({0, -s, 0}, {0, 0, 0}, s * 0.7, 0.02, 8, col)
-            rl.DrawCylinderEx({0, 0, 0}, {0, s, 0}, 0.02, s * 0.7, 8, col)
-        }
-        rlgl.PopMatrix()
-
-        // 稀有度光环
-        if k.rarity > 0 && f.rot <= 0 {
-            rc := RARITY_COLORS[k.rarity]
-            rl.BeginBlendMode(.ADDITIVE)
-            rl.DrawSphereEx(p, s * 1.6 + 0.06 * math.sin(time_total * 4), 10, 8,
-                {rc.r, rc.g, rc.b, k.rarity == 2 ? 26 : 14})
-            rl.EndBlendMode()
-        }
-        // 落地参考线（和苹果的落地光束一个道理）
-        rl.DrawLine3D({p.x, p.y - s - 0.05, p.z}, {p.x, -h, p.z}, {col.r, col.g, col.b, 60})
+        draw_one_food(kinds[f.kind], f.pos, f.spin, f.rot)
+    }
+    if editor_open {
+        // 创造台实时预览：样品食物在展示格旋转（不进入 foods，不会被吃）
+        draw_one_food(edit_kind, editor_showcase, 0, 0)
+        p := cell_to_world(editor_showcase)
+        blink := 0.5 + 0.5 * math.sin(time_total * 5)
+        rl.DrawCubeWires(p, 0.48, 0.48, 0.48, {255, 240, 180, u8(70 + 60 * blink)})
     }
 }
 
@@ -1809,6 +3953,17 @@ draw_food_labels :: proc() {
         if f.rot > 0 {
             draw_text("腐烂中", x, y + 20, 12, {150, 110, 70, 220})
         }
+    }
+    if editor_open {
+        // 预览样品的小标签
+        p := cell_to_world(editor_showcase)
+        p.y += 0.7
+        sp := rl.GetWorldToScreen(p, cam)
+        w := measure_text("预览", 14, true)
+        x := i32(sp.x) - w / 2
+        y := i32(sp.y)
+        rl.DrawRectangle(x - 6, y - 2, w + 12, 20, {10, 12, 20, 150})
+        draw_text("预览", x, y, 14, {255, 240, 180, 240}, true)
     }
 }
 
@@ -1883,6 +4038,7 @@ draw_dex :: proc() {
         }
         if k.fx_confuse > 0 do tag(buf[:], &n, "眩晕")
         if k.fx_shake > 0.4 do tag(buf[:], &n, "爆炸")
+        if k.blueprint != "" do tag(buf[:], &n, "[蓝图]")
         immune := kind_harmful(k) && snake_memory[k.name] >= 2
         if immune do tag(buf[:], &n, "已免疫")
         buf[n] = 0 // 上一行更长会留下残影，显式截断
@@ -2091,14 +4247,20 @@ CJK_SOURCE :: [?]string{
     "苹果", "辣椒", "冰棍", "手榴弹", "便便", "毒蘑菇", "星星", "神秘蛋",
     "投喂实验室 · 发现 种",
     "暴走 冰冻 眩晕",
-    "投喂 快捷食物 图鉴 视角 皮肤 转 暂停 重开",
+    "投喂 快捷食物 图鉴 视角 皮肤 转 暂停 重开 创造台",
     "食物图鉴 · 已发现 种",
-    "加速 减速 节 分 眩晕 爆炸 已免疫",
+    "加速 减速 节 分 眩晕 爆炸 已免疫 蓝图",
     "腐烂中",
     "投喂什么？",
     "投放 取消",
     "蛇自动觅食，你来发明食物 —",
     "预设 本地 分享 烹饪中 完成 失败 使用 配方 点评 复制 码 粘贴 无效 输入 或 已投喂",
+    // 创造台 (editor) labels, toasts and prompts
+    "预览 强度 以此为基础改造 名称 未命名 颜色 色相 形状 稀有度 常见 稀有 传说 球 方块 圆锥 宝石",
+    "速度倍率 持续 生长 分数 震屏 烟花 闪光 无 清除 恢复滑杆编辑 效果 解析 添加 描述创意 让 按 你 的 设计 存为原语 之后 引用 需要 先有 保存并投放 分享码 先保存再复制 放弃 不保存 选择 调整 确认 关闭 跳过 下次 再设 昵称 一句话 可空 想要 来",
+    "已清除 未配置 只能手动 忙请稍候 不能为空 保存失败 已保存 时可以 请换个说法 请重试或 先有蓝图才能 无名料理 设计中 金身 得分 自创 样品",
+    "速度不变 长 炸掉尾巴 长度不变 全屏 粒子 下个蛋 无敌护盾 掉头反转 立刻 秒后 重复次 概率 宏 未定义 共条 我的食物 火箭辣椒 坠毁 咯哒",
+    "★×°…·「」（），。？： › ←↑→↓ 、",
 }
 
 // top-1400 Han chars by frequency, counted from ~100k chars of real Chinese
@@ -2393,12 +4555,20 @@ draw_hud :: proc() {
             draw_text(fmt.ctprintf("眩晕 %.0fs", confuse_timer), 26, fy, 17, {200, 120, 255, 255}, true)
             fy += 22
         }
+        if shield_timer > 0 {
+            draw_text(fmt.ctprintf("金身 %.1fs", shield_timer), 26, fy, 17, {255, 210, 70, 255}, true)
+            fy += 22
+        }
+        if score_mult_timer > 0 {
+            draw_text(fmt.ctprintf("得分×%.1f %.1fs", score_mult, score_mult_timer), 26, fy, 17, {255, 170, 90, 255}, true)
+            fy += 22
+        }
         if llm_is_cooking() && llm_word != "" {
             pulse := 0.6 + 0.4 * math.sin(time_total * 6)
             draw_text(fmt.ctprintf("AI 烹饪中: %s...", llm_word), 26, fy, 17,
                 {255, u8(180 + 40 * pulse), 110, 255}, true)
         }
-        draw_text("T: 投喂    1-8: 快捷食物    Tab: 图鉴    C: 复制分享码    粘贴分享码投喂    V: 视角    M: 皮肤    IJKL: 转视角    P/Space: 暂停    R: 重开",
+        draw_text("T: 投喂    1-8: 快捷食物    E: 创造台    Tab: 图鉴    C: 复制分享码    V: 视角    M: 皮肤    IJKL: 转视角    P/Space: 暂停    R: 重开",
             26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
         return
     }
@@ -2594,6 +4764,7 @@ draw_frame :: proc(alpha: f32) {
     draw_food_labels()
     draw_dex()
     draw_input_box()
+    draw_editor()
     draw_toast()
     if state == .PLAYING && !started {
         draw_centered("Steer with A / D / W / S to launch the snake", SCREEN_H - 76, 24,
@@ -2621,11 +4792,47 @@ capture :: proc(filename: cstring, alpha: f32) {
     rl.UnloadRenderTexture(rt)
 }
 
+// SNAKE_SHOT only: a canned blueprint kind so the dex capture shows the
+// [蓝图] tag (the 火箭辣椒 creative-prompt example design)
+shot_inject_blueprint_kind :: proc() -> int {
+    bp := `{"do":[{"speed":{"mult":0.5,"secs":4}},{"delay":{"secs":4}},{"growth":{"n":-2}},{"shake":{"s":0.6}},{"burst":{"n":3}}]}`
+    k := FoodKind{
+        name = strings.clone("火箭辣椒"), author = "自创",
+        flavor = strings.clone("先上天，再坠毁"),
+        hue = 10, color = hsv_rgb(10, 0.72, 1.0), shape = .CONE,
+        size = 0.30, spin = 2.0, rarity = 2,
+        fx_growth = 1, fx_score = 10, fx_bursts = 2,
+        blueprint = strings.clone(bp), byline = strings.clone("截图演示"),
+    }
+    append(&kinds, k)
+    idx := len(kinds) - 1
+    kind_by_name[k.name] = idx
+    return idx
+}
+
+// SNAKE_SHOT only: stuff the same canned design into the editor's scratch
+// state so the blueprint-mode panel (summary lines) can be captured
+shot_inject_editor_blueprint :: proc() {
+    delete(edit_kind.name)
+    edit_kind.name = strings.clone("火箭辣椒")
+    if edit_kind.flavor != "" do delete(edit_kind.flavor)
+    edit_kind.flavor = strings.clone("先上天，再坠毁")
+    edit_kind.hue = 10
+    edit_kind.color = hsv_rgb(10, 0.72, 1.0)
+    edit_kind.shape = .CONE
+    edit_kind.rarity = 2
+    if edit_blueprint != "" do delete(edit_blueprint)
+    edit_blueprint = strings.clone(`{"do":[{"speed":{"mult":0.5,"secs":4}},{"delay":{"secs":4}},{"growth":{"n":-2}},{"shake":{"s":0.6}},{"burst":{"n":3}}]}`)
+    edit_has_blueprint = true
+    editor_sel = 4 // 清除蓝图 row, for the highlight
+}
+
 // ---------------------------------------------------------------------------
 // Main
 // ---------------------------------------------------------------------------
 
 main :: proc() {
+    init_primitives() // effect-blueprint registry (needed by self-test too)
     // headless self-test: SNAKE_SELFTEST=1 ./snake3d
     if os.get_env("SNAKE_SELFTEST", context.allocator) == "1" {
         os.exit(self_test() ? 0 : 1)
@@ -2636,7 +4843,14 @@ main :: proc() {
 
     llm_init_config() // FEED_LLM_API_KEY / FEED_LLM_BASE_URL / FEED_LLM_MODEL
 
-    rl.SetConfigFlags({.MSAA_4X_HINT})
+    // DEBUG: offscreen-render verification mode (SNAKE_SHOT=1) — runs with a
+    // hidden window and quits by itself once all captures are taken
+    shot_mode := os.get_env("SNAKE_SHOT", context.allocator) == "1"
+    if shot_mode {
+        rl.SetConfigFlags({.MSAA_4X_HINT, .WINDOW_HIDDEN})
+    } else {
+        rl.SetConfigFlags({.MSAA_4X_HINT})
+    }
     rl.InitWindow(SCREEN_W, SCREEN_H, "3D Snake — true 3D (Odin + raylib)")
     rl.SetTargetFPS(60)
     rl.SetExitKey(.KEY_NULL) // ESC 用于取消输入框，不退出游戏
@@ -2661,18 +4875,24 @@ main :: proc() {
     }
 
     load_best()
+    load_macros() // 自创新原语（macros.json）
+    creator_byline = os.get_env("SNAKE_CREATOR", context.allocator)
+    load_creator() // creator.txt（env SNAKE_CREATOR 优先）
     make_presets()
     reset_game()
 
-    // DEBUG: offscreen-render verification mode (SNAKE_SHOT=1)
-    shot_mode := os.get_env("SNAKE_SHOT", context.allocator) == "1"
     shots := 0
+    shot_bp_idx := -1 // blueprint kind index injected for the dex capture
 
     for !rl.WindowShouldClose() {
         dt := min(rl.GetFrameTime(), 0.05)
         time_total += dt
         toast_t = max(0, toast_t - dt)
         llm_poll()
+        if death_squawk { // die() stays raylib-free; the sound plays here
+            death_squawk = false
+            play(snd_die)
+        }
 
         alpha := clamp(move_timer / move_interval, 0, 1)
 
@@ -2691,8 +4911,12 @@ main :: proc() {
             }
         case .PLAYING:
             handle_text_input()
-            handle_input()
-            if !input_open {
+            if editor_open {
+                editor_handle_input(dt) // 创造台接管键盘；游戏照常运行
+            } else {
+                handle_input()
+            }
+            if !input_open && !editor_open {
                 if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) { state = .PAUSED; break }
                 if rl.IsKeyPressed(.R) { reset_game(); break }
             }
@@ -2706,6 +4930,7 @@ main :: proc() {
             // the snake holds still until the player steers for the first time
             if !started && (len(dir_queue) > 0 || autopilot) do started = true
 
+            play_clock += dt
             if started {
                 eff := move_interval * (fx_speed_timer > 0 ? fx_speed_mult : 1)
                 move_timer += dt
@@ -2718,6 +4943,12 @@ main :: proc() {
             fx_speed_timer = max(0, fx_speed_timer - dt)
             confuse_timer  = max(0, confuse_timer - dt)
             tint_timer     = max(0, tint_timer - dt)
+            shield_timer   = max(0, shield_timer - dt)
+            if score_mult_timer > 0 {
+                score_mult_timer = max(0, score_mult_timer - dt)
+                if score_mult_timer == 0 do score_mult = 1
+            }
+            run_scheduled() // due blueprint actions
             if game_mode == .FEEDING do update_food_rot(dt)
             alpha = clamp(smoothstep(move_timer / move_interval), 0, 1)
             update_particles(dt)
@@ -2730,7 +4961,8 @@ main :: proc() {
             }
             if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
         case .GAME_OVER, .WIN:
-            if rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.R) {
+            // 创造台打开时 Enter/R 属于编辑器（投喂模式 autopilot 会自动重开）
+            if !editor_open && (rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.R)) {
                 reset_game()
                 state = .PLAYING
             }
@@ -2764,10 +4996,14 @@ main :: proc() {
                 cast_preset(6) // 星星
                 cast_word("laser")
                 cast_word("durian")
+                // 蓝图食物：让图鉴出现 [蓝图] 标签（仅截图演示用）
+                shot_bp_idx = shot_inject_blueprint_kind()
+                spawn_kind(shot_bp_idx)
             } else if shots == 1 && time_total > 2.5 {
                 capture("shot_feed.png", alpha)
                 shots = 2
-                dex_open = true // 图鉴展示
+                dex_open = true // 图鉴展示（高亮 [蓝图] 行）
+                dex_sel = min(shot_bp_idx, dex_visible_rows() - 1)
             } else if shots == 2 && time_total > 3.5 {
                 capture("shot_dex.png", alpha)
                 shots = 3
@@ -2775,6 +5011,16 @@ main :: proc() {
             } else if shots == 3 && time_total > 14.0 {
                 capture("shot_late.png", alpha)
                 shots = 4
+            } else if shots == 4 && time_total > 15.0 {
+                editor_open_blank() // 创造台：空白模板 + 实时预览
+                capture("shot_editor.png", alpha)
+                shots = 5
+            } else if shots == 5 && time_total > 15.8 {
+                shot_inject_editor_blueprint() // 创造台：蓝图模式（示例设计）
+                capture("shot_editor_blueprint.png", alpha)
+                shots = 6
+            } else if shots == 6 {
+                break // 截图完成，自动退出
             }
         }
 

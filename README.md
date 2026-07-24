@@ -61,6 +61,35 @@ export FEED_LLM_MODEL=kimi-k2-0905-preview           # 默认值
 - 在投喂框（`T`）里 `Cmd+V` 粘贴别人的 `SNAKE3D1.…` 分享码并回车 —
   解码、校验、数值钳制后作为新食物投放（重名会自动加 `~2` 后缀）
 
+### 创造台（按 `E`）
+
+投喂模式下按 `E` 打开创造台：右侧设计面板 + 立方体里的实时预览样品，
+游戏照常运行。`↑` `↓` 选字段，`←` `→` 调数值（按住连续调整），
+`Enter` 编辑文本或触发按钮，`Esc` 关闭。
+
+- **手动滑杆** — 名称、色相、形状、稀有度，以及速度倍率/持续、生长、
+  分数、震屏、眩晕、烟花、闪光；面板顶部显示纯娱乐向的"强度值"和
+  1–5 颗星
+- **★ 描述创意** — 用自然语言描述想要的效果（比如"火箭辣椒"
+  "会下蛋的母鸡"），AI 会直接产出整套设计：名称、颜色、稀有度、
+  一句点评，外加一份可编排的**效果蓝图**。使用和 AI 配方相同的
+  `FEED_LLM_*` 环境变量；未配置 key 时只能手动设计
+- **效果蓝图** — 蓝图由 11 种原语节点组成：加速、生长、分数、震屏、
+  眩晕、闪光、烟花，以及 **下蛋**（在场上生出新食物）、**金身**
+  （无敌，撞墙咬身都不死）、**掉头反转**（头尾互换）、**得分倍率**；
+  还能用 delay / repeat / chance 编排节奏。存在蓝图时滑杆自动隐藏，
+  图鉴里的效果标签会带上 `[蓝图]` 标记
+- **存为原语** — 把当前蓝图命名保存成自己的"原语"（写入 `macros.json`
+  持久化）。之后 AI 设计时可以直接引用这些原语；导出分享码时会把引用到
+  的原语自动打包，接收方导入即自动注册（不覆盖本地同名原语）
+- **创作者昵称** — 第一次保存时会询问一次昵称并写入 `creator.txt`
+  （环境变量 `SNAKE_CREATOR` 优先），之后导出的分享码都带这个落款
+- 图鉴（`Tab`）里选中一行按 `E`，可以**以此为基础改造**已有食物
+
+| 手动设计 | AI 创意蓝图 |
+| :---: | :---: |
+| ![workshop](docs/workshop.png) | ![workshop blueprint](docs/workshop-blueprint.png) |
+
 ## Features
 
 - **True 3D movement** — six directions (±X, ±Y, ±Z) inside a 12³ cube
@@ -119,10 +148,20 @@ export FEED_LLM_MODEL=kimi-k2-0905-preview           # 默认值
 |---|---|
 | `T` | Open the feed box — type any word, Enter to cast it |
 | `1` – `8` | Cast a preset food instantly |
+| `E` | Open the 创造台 (Creator Workshop); with the dex open, remix the selected kind |
 | `Tab` | Toggle the food dex (discovered kinds & effects) |
 | `↑` / `↓` (in dex) | Select a row |
 | `C` | Copy the share code (last cast, or the selected dex row) |
 | `Cmd+V` (in feed box) | Paste a `SNAKE3D1.` share code to import |
+
+### 创造台 (Creator Workshop) only
+
+| Input | Action |
+|---|---|
+| `↑` / `↓` | Move the field cursor |
+| `←` / `→` | Adjust the value (hold to auto-repeat) |
+| `Enter` | Edit text / trigger the button |
+| `Esc` | Cancel the current input, then close the workshop |
 
 ## Download
 

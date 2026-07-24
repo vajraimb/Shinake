@@ -20,6 +20,19 @@ RECIPE = {
     },
 }
 
+# answer to the 创造台 creative prompt (detected via its system prompt)
+CREATIVE = {
+    "name": "老母鸡",
+    "hue": 40,
+    "shape": 0,
+    "rarity": 1,
+    "flavor": "咯咯哒，新鲜出炉",
+    "blueprint": {"do": [
+        {"spawn_food": {"kind": "神秘蛋", "count": 2}},
+        {"score": {"n": 10}},
+    ]},
+}
+
 class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         n = int(self.headers.get("Content-Length", 0))
@@ -31,8 +44,11 @@ class Handler(BaseHTTPRequestHandler):
         assert req["messages"][1]["role"] == "user"
         print("mock got auth:", self.headers.get("Authorization", "<none>")[:20] + "...")
         print("mock got word:", req["messages"][1]["content"])
+        creative = "创意" in req["messages"][0]["content"]
+        payload = CREATIVE if creative else RECIPE
+        print("mock mode:", "creative" if creative else "recipe")
         resp = {"choices": [{"message": {"content":
-                "```json\n" + json.dumps(RECIPE, ensure_ascii=False) + "\n```"}}]}
+                "```json\n" + json.dumps(payload, ensure_ascii=False) + "\n```"}}]}
         data = json.dumps(resp).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
