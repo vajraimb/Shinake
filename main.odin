@@ -1,11 +1,14 @@
 package snake3d
 
 import rl "vendor:raylib"
+import rlgl "vendor:raylib/rlgl"
 import "core:fmt"
 import "core:math"
 import "core:math/rand"
 import "core:os"
 import "core:strconv"
+import "core:strings"
+import "core:unicode/utf8"
 
 // ---------------------------------------------------------------------------
 // Constants
@@ -41,11 +44,44 @@ GameState :: enum { TITLE, PLAYING, PAUSED, GAME_OVER, WIN }
 
 ViewMode :: enum { FIRST, ORBIT }
 
+GameMode :: enum { CLASSIC, FEEDING }
+
+// ---------------------------------------------------------------------------
+// Feeding Lab: the AI snake eats whatever the player invents
+// ---------------------------------------------------------------------------
+
+FoodShape :: enum { SPHERE, CUBE, CONE, GEM }
+
+FoodKind :: struct {
+    name:       string,   // display name (owned clone)
+    color:      rl.Color,
+    shape:      FoodShape,
+    size:       f32,
+    spin:       f32,
+    rarity:     int,      // 0 common, 1 rare, 2 legendary
+    fx_speed:   f32,      // move-interval multiplier while fx_speed_t > 0
+    fx_speed_t: f32,
+    fx_growth:  int,      // +/- segments (negative = 炸掉尾巴)
+    fx_score:   int,
+    fx_shake:   f32,
+    fx_tint:    rl.Color, // a > 0 → fullscreen flash
+    fx_confuse: f32,      // seconds of AI dizziness
+    fx_bursts:  int,      // particle burst count
+}
+
+Food :: struct {
+    kind: int,      // index into kinds
+    pos:  IV3,
+    rot:  f32,      // > 0: rotting countdown (snake refuses it)
+    spin: f32,      // animation phase
+}
+
 // ---------------------------------------------------------------------------
 // Globals
 // ---------------------------------------------------------------------------
 
 state          := GameState.TITLE
+game_mode      := GameMode.CLASSIC
 autopilot      := false          // B: AI 自动驾驶（BFS 寻路 + 安全模拟）
 restart_timer  : f32 = 0         // autopilot 死亡后的自动重开倒计时
 snake          : [dynamic]IV3   // index 0 = head
@@ -84,8 +120,26 @@ snd_die        : rl.Sound
 snd_win        : rl.Sound
 audio_ok       := false
 
+// --- Feeding Lab state ---
+kinds          : [dynamic]FoodKind
+kind_by_name   : map[string]int
+foods          : [dynamic]Food
+snake_memory   : map[string]int  // 食物名 -> 伤害过蛇的次数（>=2 则免疫）
+ai_target      := IV3{-1, -1, -1}
+ai_has_target  := false
+fx_speed_timer : f32 = 0
+fx_speed_mult  : f32 = 1
+confuse_timer  : f32 = 0
+tint_timer     : f32 = 0
+tint_color     := rl.Color{0, 0, 0, 0}
+input_open     := false
+input_buf      : [24]u8
+input_len      := 0
+dex_open       := false          // Tab: 图鉴面板
+
 font_ui        : rl.Font
 font_bold      : rl.Font
+font_cjk       : rl.Font   // 中文标签专用（Latin 部分仍用 SFNS）
 fonts_ok       := false
 
 // ---------------------------------------------------------------------------
@@ -194,6 +248,7 @@ reset_game :: proc() {
     clear(&prev_snake)
     clear(&dir_queue)
     clear(&particles)
+    clear(&foods)
 
     c :: GRID_N / 2
     append(&snake, IV3{c + 1, c, c})
@@ -212,8 +267,23 @@ reset_game :: proc() {
     move_interval = START_INTERVAL
     move_timer = 0
     shake_time = 0
-    started = false
-    spawn_food()
+    fx_speed_timer = 0
+    fx_speed_mult = 1
+    confuse_timer = 0
+    tint_timer = 0
+    input_open = false
+    input_len = 0
+    ai_has_target = false
+
+    if game_mode == .FEEDING {
+        // 投喂模式：AI 常驻，自己起跑，等玩家投喂
+        autopilot = true
+        started = true
+        spawn_kind(0) // 先放一个苹果开场
+    } else {
+        started = false
+        spawn_food()
+    }
 }
 
 spawn_food :: proc() {
@@ -264,7 +334,18 @@ step :: proc() {
     // autopilot thinks every tick; otherwise apply one queued direction,
     // keeping the up-frame orthonormal
     if autopilot {
-        apply_dir(ai_choose())
+        if game_mode == .FEEDING {
+            select_target()
+            if confuse_timer > 0 && rand.float32() < 0.45 {
+                apply_dir(random_safe_dir()) // 眩晕：晕头转向
+            } else {
+                apply_dir(ai_choose())
+            }
+        } else {
+            ai_target = food
+            ai_has_target = true
+            apply_dir(ai_choose())
+        }
     } else if len(dir_queue) > 0 {
         d := dir_queue[0]
         _ = pop_front(&dir_queue)
@@ -296,7 +377,15 @@ step :: proc() {
 
     inject_at(&snake, 0, nh)
 
-    if nh == food {
+    if game_mode == .FEEDING {
+        // feeding: eat whatever food sits at the head cell
+        for f, i in foods {
+            if f.pos == nh {
+                eat_food(i)
+                break
+            }
+        }
+    } else if nh == food {
         pending_growth += 1
         score += 10
         eaten += 1
@@ -392,8 +481,8 @@ mark_body :: proc(body: []IV3, blocked: ^[CELLS]bool) {
     blocked[idx3(body[0])] = false              // head moves out
 }
 
-// Take the candidate first move, then walk the food distance field to the
-// food while simulating the snake's body; afterwards check the head can
+// Take the candidate first move, then walk the target distance field to the
+// target while simulating the snake's body; afterwards check the head can
 // still reach its own tail (i.e. eating here doesn't trap us).
 safe_to_eat :: proc(first: IV3) -> bool {
     sim := make([dynamic]IV3, len(snake))
@@ -423,7 +512,7 @@ safe_to_eat :: proc(first: IV3) -> bool {
         cur = next
 
         inject_at(&sim, 0, cur)
-        if cur == food do grow += 1
+        if cur == ai_target do grow += 1
         if grow > 0 {
             grow -= 1
         } else {
@@ -431,7 +520,7 @@ safe_to_eat :: proc(first: IV3) -> bool {
         }
 
         steps += 1
-        if cur == food do break
+        if cur == ai_target do break
         if steps > CELLS do return false   // paranoia
     }
 
@@ -448,26 +537,28 @@ safe_to_eat :: proc(first: IV3) -> bool {
 ai_choose :: proc() -> IV3 {
     head := snake[0]
     tip := snake[len(snake) - 1]
-
-    // 1. shortest safe path to the food
-    mark_body(snake[:], &ai_blocked)
-    bfs(food, &ai_dist, &ai_blocked)
+    found := false
     best_dir := dir
     best_d := i32(1 << 30)
-    found := false
-    for off in DIRS6 {
-        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
-        if !in_bounds(n) || ai_blocked[idx3(n)] do continue
-        d := ai_dist[idx3(n)]
-        if d >= 0 && d < best_d && safe_to_eat(off) {
-            best_d = d
-            best_dir = off
-            found = true
-        }
-    }
-    if found do return best_dir
 
-    // 2. no safe food route — chase our own tail to buy time
+    // 1. shortest safe path to the current target (if any)
+    if ai_has_target {
+        mark_body(snake[:], &ai_blocked)
+        bfs(ai_target, &ai_dist, &ai_blocked)
+        for off in DIRS6 {
+            n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
+            if !in_bounds(n) || ai_blocked[idx3(n)] do continue
+            d := ai_dist[idx3(n)]
+            if d >= 0 && d < best_d && safe_to_eat(off) {
+                best_d = d
+                best_dir = off
+                found = true
+            }
+        }
+        if found do return best_dir
+    }
+
+    // 2. no safe route (or nothing edible) — chase our own tail to buy time
     mark_body(snake[:], &ai_blocked)
     bfs(tip, &ai_dist, &ai_blocked)
     best_d = 1 << 30
@@ -489,6 +580,287 @@ ai_choose :: proc() -> IV3 {
         if in_bounds(n) && !ai_blocked[idx3(n)] do return off
     }
     return dir
+}
+
+// ---------------------------------------------------------------------------
+// Feeding Lab: word -> food generator, effects, snake memory
+// ---------------------------------------------------------------------------
+
+// deterministic FNV-1a hash of the word
+word_hash :: proc(s: string) -> u32 {
+    h: u32 = 2166136261
+    for i in 0..<len(s) {
+        h ~= u32(s[i])
+        h *= 16777619
+    }
+    return h
+}
+
+// xorshift step for stable per-word pseudo-random picks
+xnext :: proc(h: ^u32, n: u32) -> u32 {
+    h^ ~= h^ << 13
+    h^ ~= h^ >> 17
+    h^ ~= h^ << 5
+    if n == 0 do return 0
+    return h^ % n
+}
+
+hsv_rgb :: proc(h, s, v: f32) -> rl.Color {
+    i := int(h / 60) % 6
+    f := h / 60 - math.floor(h / 60)
+    p := v * (1 - s)
+    q := v * (1 - f * s)
+    t := v * (1 - (1 - f) * s)
+    r, g, b: f32
+    switch i {
+    case 0: r, g, b = v, t, p
+    case 1: r, g, b = q, v, p
+    case 2: r, g, b = p, v, t
+    case 3: r, g, b = p, q, v
+    case 4: r, g, b = t, p, v
+    case:   r, g, b = v, p, q
+    }
+    return {u8(r * 255), u8(g * 255), u8(b * 255), 255}
+}
+
+// generate a FoodKind deterministically from a word (seed 0 = use word hash)
+gen_kind :: proc(name: string, seed: u32) -> FoodKind {
+    h := seed != 0 ? seed : word_hash(name)
+    k := FoodKind{name = name}
+    hue := f32(xnext(&h, 360))
+    k.color = hsv_rgb(hue, 0.72, 1.0)
+    k.shape = FoodShape(xnext(&h, 4))
+    k.size = 0.26 + 0.05 * f32(xnext(&h, 4))
+    k.spin = 1.2 + 0.8 * f32(xnext(&h, 4))
+    roll := xnext(&h, 100)
+    k.rarity = roll < 68 ? 0 : (roll < 93 ? 1 : 2)
+    n_fx := 1 + k.rarity // common 1, rare 2, legendary 3
+    k.fx_bursts = 1
+    picked: [9]bool
+    for _ in 0..<n_fx {
+        e := int(xnext(&h, 9))
+        if picked[e] do continue
+        picked[e] = true
+        switch e {
+        case 0: // 暴走加速
+            k.fx_speed = 0.5 + 0.05 * f32(xnext(&h, 3))
+            k.fx_speed_t = 3 + f32(xnext(&h, 3))
+        case 1: // 冰冻减速
+            k.fx_speed = 1.7 + 0.1 * f32(xnext(&h, 3))
+            k.fx_speed_t = 3 + f32(xnext(&h, 3))
+        case 2: // 大补
+            k.fx_growth = 2 + int(xnext(&h, 3))
+        case 3: // 炸裂
+            k.fx_growth = -(2 + int(xnext(&h, 3)))
+            k.fx_shake = 0.5
+        case 4: // 高分
+            k.fx_score = 20 + 15 * int(xnext(&h, 4))
+        case 5: // 恶心
+            k.fx_score = -(10 + 10 * int(xnext(&h, 3)))
+            k.fx_tint = {120, 80, 30, 90}
+        case 6: // 眩晕
+            k.fx_confuse = 2 + f32(xnext(&h, 3))
+            k.fx_tint = {150, 60, 200, 70}
+        case 7: // 烟花
+            k.fx_shake = 0.3 + 0.1 * f32(xnext(&h, 4))
+            k.fx_bursts = 3
+            k.fx_score += 10
+        case:   // 平淡的小点心
+            k.fx_growth += 1
+            k.fx_score += 10
+        }
+    }
+    // never generate a total dud
+    if k.fx_growth == 0 && k.fx_score == 0 && k.fx_speed_t == 0 &&
+       k.fx_confuse == 0 && k.fx_shake == 0 {
+        k.fx_growth = 1
+        k.fx_score = 10
+    }
+    return k
+}
+
+kind_harmful :: proc(k: FoodKind) -> bool {
+    return k.fx_growth < 0 || k.fx_score < 0 || k.fx_confuse > 0
+}
+
+make_presets :: proc() {
+    add :: proc(name: string, color: rl.Color, shape: FoodShape, size: f32,
+                rarity: int, speed: f32, speed_t: f32, growth: int, score: int,
+                shake: f32, tint: rl.Color, confuse: f32, bursts: int) {
+        append(&kinds, FoodKind{
+            name = strings.clone(name), color = color, shape = shape, size = size,
+            spin = 2.0, rarity = rarity, fx_speed = speed, fx_speed_t = speed_t,
+            fx_growth = growth, fx_score = score, fx_shake = shake,
+            fx_tint = tint, fx_confuse = confuse, fx_bursts = bursts,
+        })
+        kind_by_name[kinds[len(kinds) - 1].name] = len(kinds) - 1
+    }
+    add("苹果",   {230, 60, 60, 255},   .SPHERE, 0.30, 0, 0, 0, 1, 10, 0, {}, 0, 1)
+    add("辣椒",   {255, 90, 30, 255},   .CONE,   0.30, 1, 0.5, 5, 1, 20, 0, {255, 120, 30, 60}, 0, 2)
+    add("冰棍",   {120, 220, 255, 255}, .CUBE,   0.28, 1, 1.7, 4, 1, 15, 0, {120, 200, 255, 60}, 0, 1)
+    add("手榴弹", {70, 80, 70, 255},    .SPHERE, 0.30, 1, 0, 0, -4, 0, 0.7, {255, 160, 60, 90}, 0, 4)
+    add("便便",   {130, 85, 40, 255},   .GEM,    0.28, 0, 0, 0, -1, -25, 0, {120, 80, 30, 100}, 0, 1)
+    add("毒蘑菇", {170, 70, 220, 255},  .CONE,   0.30, 1, 0, 0, 0, 5, 0, {170, 70, 220, 80}, 4, 2)
+    add("星星",   {255, 220, 80, 255},  .GEM,    0.30, 2, 0, 0, 2, 80, 0, {255, 220, 80, 60}, 0, 4)
+    // "神秘蛋" 由 cast_preset 特判：每次生成随机效果
+}
+
+// index of a kind by name, generating (and registering) it on first use
+kind_index :: proc(word: string) -> int {
+    if idx, ok := kind_by_name[word]; ok do return idx
+    k := gen_kind(strings.clone(word), 0)
+    append(&kinds, k)
+    idx := len(kinds) - 1
+    kind_by_name[k.name] = idx
+    return idx
+}
+
+MYSTERY_NAME :: "神秘蛋"
+
+// spawn a food of the given kind at a random free cell
+spawn_kind :: proc(kind_idx: int) {
+    for _ in 0..<200 {
+        f := IV3{
+            i32(rand.int_max(GRID_N)),
+            i32(rand.int_max(GRID_N)),
+            i32(rand.int_max(GRID_N)),
+        }
+        d := abs(f.x - snake[0].x) + abs(f.y - snake[0].y) + abs(f.z - snake[0].z)
+        if on_snake(f) || d < 4 do continue
+        occupied := false
+        for of in foods do if of.pos == f { occupied = true; break }
+        if occupied do continue
+        append(&foods, Food{kind = kind_idx, pos = f, spin = rand.float32() * 360})
+        return
+    }
+}
+
+cast_word :: proc(word: string) {
+    if len(word) == 0 do return
+    spawn_kind(kind_index(word))
+}
+
+cast_preset :: proc(i: int) {
+    if i < 0 || i >= 8 do return
+    if i == 7 {
+        // 神秘蛋：随机效果，每次都不一样
+        h := u32(rand.int_max(1 << 31)) + 1
+        k := gen_kind(strings.clone(MYSTERY_NAME), h)
+        k.color = hsv_rgb(f32(xnext(&h, 360)), 0.5, 1.0)
+        append(&kinds, k)
+        spawn_kind(len(kinds) - 1)
+        return
+    }
+    spawn_kind(i)
+}
+
+// nearest food the snake is willing to eat (not rotting, not immune-refused)
+select_target :: proc() {
+    ai_has_target = false
+    best_d := i32(1 << 30)
+    for f in foods {
+        k := kinds[f.kind]
+        if f.rot > 0 do continue
+        if kind_harmful(k) && snake_memory[k.name] >= 2 do continue // 已免疫
+        d := abs(f.pos.x - snake[0].x) + abs(f.pos.y - snake[0].y) + abs(f.pos.z - snake[0].z)
+        if d < best_d {
+            best_d = d
+            ai_target = f.pos
+            ai_has_target = true
+        }
+    }
+}
+
+// mark foods the snake now refuses as rotting; remove fully rotten ones
+update_food_rot :: proc(dt: f32) {
+    for i := len(foods) - 1; i >= 0; i -= 1 {
+        f := &foods[i]
+        k := kinds[f.kind]
+        if f.rot == 0 && kind_harmful(k) && snake_memory[k.name] >= 2 {
+            f.rot = 10 // 蛇不肯吃，开始腐烂
+        }
+        if f.rot > 0 {
+            f.rot -= dt
+            if f.rot <= 0 {
+                burst_col(cell_to_world(f.pos), {120, 90, 50, 255}, 10)
+                ordered_remove(&foods, i)
+            }
+        }
+    }
+}
+
+eat_food :: proc(i: int) {
+    f := foods[i]
+    k := kinds[f.kind]
+    score = max(0, score + k.fx_score)
+    eaten += 1
+    if k.fx_growth > 0 {
+        pending_growth += k.fx_growth
+    } else if k.fx_growth < 0 {
+        // 炸掉尾巴，太短就炸死了
+        if len(snake) - 2 < -k.fx_growth {
+            die()
+            ordered_remove(&foods, i)
+            return
+        }
+        for _ in 0..<-k.fx_growth do _ = pop(&snake)
+    }
+    if k.fx_speed_t > 0 {
+        fx_speed_timer = k.fx_speed_t
+        fx_speed_mult = k.fx_speed
+    }
+    shake_time = max(shake_time, k.fx_shake)
+    if k.fx_tint.a > 0 {
+        tint_timer = 0.7
+        tint_color = k.fx_tint
+    }
+    confuse_timer = max(confuse_timer, k.fx_confuse)
+    if kind_harmful(k) {
+        snake_memory[k.name] += 1 // 蛇会记住这次伤害
+    }
+    for _ in 0..<max(k.fx_bursts, 1) do burst_col(cell_to_world(f.pos), k.color, 24)
+    if audio_ok {
+        rl.SetSoundPitch(snd_eat, 0.8 + 0.2 * f32(k.rarity) + rand.float32() * 0.1)
+        play(snd_eat)
+    }
+    ordered_remove(&foods, i)
+}
+
+// confusion move: any direction that doesn't immediately kill us
+random_safe_dir :: proc() -> IV3 {
+    head := snake[0]
+    dirs := DIRS6
+    start := rand.int_max(6)
+    for j in 0..<6 {
+        off := dirs[(start + j) % 6]
+        if off.x == -dir.x && off.y == -dir.y && off.z == -dir.z do continue
+        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
+        if !in_bounds(n) do continue
+        hit := false
+        for s in snake[:len(snake) - 1] do if s == n { hit = true; break }
+        if !hit do return off
+    }
+    return dir
+}
+
+burst_col :: proc(p: rl.Vector3, col: rl.Color, n: int) {
+    for _ in 0..<n {
+        a := rand.float32() * TAU
+        b := rand.float32() * TAU
+        sp := 2 + rand.float32() * 5
+        v := rl.Vector3{
+            math.cos(a) * math.sin(b) * sp,
+            math.cos(b) * sp,
+            math.sin(a) * math.sin(b) * sp,
+        }
+        life := 0.5 + rand.float32() * 0.4
+        jitter := 0.75 + rand.float32() * 0.45
+        append(&particles, Particle{
+            pos = p, vel = v, life = life, max_life = life,
+            color = {u8(f32(col.r) * jitter), u8(f32(col.g) * jitter), u8(f32(col.b) * jitter), 255},
+            size = 0.08 + rand.float32() * 0.1,
+        })
+    }
 }
 
 burst :: proc(p: rl.Vector3) {
@@ -540,14 +912,34 @@ handle_input :: proc() {
     if rl.IsKeyPressed(.V) {
         view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
     }
+    // M: modern / classic snake skin
+    if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
+
+    if game_mode == .FEEDING {
+        // 投喂模式：蛇永远是 AI 操控，玩家只管投喂
+        if rl.IsKeyPressed(.TAB) do dex_open = !dex_open
+        if rl.IsKeyPressed(.T) {
+            input_open = true
+            input_len = 0
+        }
+        if !input_open {
+            if rl.IsKeyPressed(.ONE)   do cast_preset(0)
+            if rl.IsKeyPressed(.TWO)   do cast_preset(1)
+            if rl.IsKeyPressed(.THREE) do cast_preset(2)
+            if rl.IsKeyPressed(.FOUR)  do cast_preset(3)
+            if rl.IsKeyPressed(.FIVE)  do cast_preset(4)
+            if rl.IsKeyPressed(.SIX)   do cast_preset(5)
+            if rl.IsKeyPressed(.SEVEN) do cast_preset(6)
+            if rl.IsKeyPressed(.EIGHT) do cast_preset(7)
+        }
+        return
+    }
 
     // B: toggle AI autopilot
     if rl.IsKeyPressed(.B) {
         autopilot = !autopilot
         if autopilot do clear(&dir_queue) // AI 接管前清空玩家排队的方向
     }
-    // M: modern / classic snake skin
-    if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
     if autopilot do return // AI 操控时忽略方向键
 
     go_left  := rl.IsKeyPressed(.A) || rl.IsKeyPressed(.LEFT)
@@ -568,6 +960,31 @@ handle_input :: proc() {
         if go_right do queue_dir(snap_axis(r))
         if go_up    do queue_dir(snap_axis(u))
         if go_down  do queue_dir(snap_axis({-u.x, -u.y, -u.z}))
+    }
+}
+
+// free-text food input (feeding mode): type a word, Enter to cast it
+handle_text_input :: proc() {
+    if !input_open do return
+    for {
+        c := rl.GetCharPressed()
+        if c == 0 do break
+        if c >= 32 && c < 127 && input_len < len(input_buf) - 1 {
+            input_buf[input_len] = u8(c)
+            input_len += 1
+        }
+    }
+    if rl.IsKeyPressed(.BACKSPACE) && input_len > 0 do input_len -= 1
+    if rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.KP_ENTER) {
+        if input_len > 0 {
+            cast_word(string(input_buf[:input_len]))
+        }
+        input_open = false
+        input_len = 0
+    }
+    if rl.IsKeyPressed(.ESCAPE) {
+        input_open = false
+        input_len = 0
     }
 }
 
@@ -726,10 +1143,18 @@ draw_path_hint :: proc() {
 }
 
 // Dashed tether line from the head straight to the food (3D direction cue)
+// where the snake is currently headed: the classic apple, or the AI's pick
+nav_target :: proc() -> (IV3, bool) {
+    if game_mode == .FEEDING do return ai_target, ai_has_target
+    return food, true
+}
+
 draw_tether :: proc() {
     if state != .PLAYING && state != .PAUSED do return
+    t, ok := nav_target()
+    if !ok do return
     a := cell_to_world(snake[0])
-    b := cell_to_world(food)
+    b := cell_to_world(t)
     SEG :: 24
     col := rl.Color{255, 90, 90, 75}
     for i in 0..<SEG {
@@ -754,6 +1179,159 @@ draw_food :: proc() {
     h := half_extent()
     rl.DrawLine3D({p.x, p.y - 0.4, p.z}, {p.x, -h, p.z}, rl.Color{255, 80, 80, 90})
     rl.DrawCubeV({p.x, -h + 0.02, p.z}, {0.3, 0.04, 0.3}, rl.Color{255, 80, 80, 70})
+}
+
+// ---------------------------------------------------------------------------
+// Feeding Lab rendering
+// ---------------------------------------------------------------------------
+
+RARITY_COLORS := [3]rl.Color{
+    {190, 195, 210, 255}, // common
+    {90, 200, 255, 255},  // rare
+    {255, 210, 70, 255},  // legendary
+}
+
+draw_foods :: proc() {
+    h := half_extent()
+    for f in foods {
+        k := kinds[f.kind]
+        p := cell_to_world(f.pos)
+        p.y += math.sin(time_total * 3.2 + f.spin) * 0.07
+
+        s := k.size
+        dim: f32 = f.rot > 0 ? 0.45 : 1.0 // 腐烂变暗
+        col := rl.Color{u8(f32(k.color.r) * dim), u8(f32(k.color.g) * dim), u8(f32(k.color.b) * dim), 255}
+
+        rlgl.PushMatrix()
+        rlgl.Translatef(p.x, p.y, p.z)
+        rlgl.Rotatef(f.spin + time_total * 60 * k.spin * 0.5, 0, 1, 0)
+        switch k.shape {
+        case .SPHERE:
+            rl.DrawSphereEx({0, 0, 0}, s, 12, 10, col)
+        case .CUBE:
+            rl.DrawCubeV({0, 0, 0}, {s * 1.7, s * 1.7, s * 1.7}, col)
+        case .CONE:
+            rl.DrawCylinderEx({0, -s, 0}, {0, s, 0}, s * 0.75, 0.02, 10, col)
+        case .GEM:
+            rl.DrawCylinderEx({0, -s, 0}, {0, 0, 0}, s * 0.7, 0.02, 8, col)
+            rl.DrawCylinderEx({0, 0, 0}, {0, s, 0}, 0.02, s * 0.7, 8, col)
+        }
+        rlgl.PopMatrix()
+
+        // 稀有度光环
+        if k.rarity > 0 && f.rot <= 0 {
+            rc := RARITY_COLORS[k.rarity]
+            rl.BeginBlendMode(.ADDITIVE)
+            rl.DrawSphereEx(p, s * 1.6 + 0.06 * math.sin(time_total * 4), 10, 8,
+                {rc.r, rc.g, rc.b, k.rarity == 2 ? 26 : 14})
+            rl.EndBlendMode()
+        }
+        // 落地参考线（和苹果的落地光束一个道理）
+        rl.DrawLine3D({p.x, p.y - s - 0.05, p.z}, {p.x, -h, p.z}, {col.r, col.g, col.b, 60})
+    }
+}
+
+// 2D labels floating above each food (call after EndMode3D)
+draw_food_labels :: proc() {
+    if game_mode != .FEEDING || state == .TITLE do return
+    for f in foods {
+        k := kinds[f.kind]
+        p := cell_to_world(f.pos)
+        p.y += 0.7
+        sp := rl.GetWorldToScreen(p, cam)
+        rc := RARITY_COLORS[k.rarity]
+        w := measure_text(fmt.ctprintf("%s", k.name), 17, true)
+        x := i32(sp.x) - w / 2
+        y := i32(sp.y)
+        // 底板
+        rl.DrawRectangle(x - 7, y - 3, w + 14, 24, {10, 12, 20, 170})
+        rl.DrawRectangleLinesEx({f32(x - 7), f32(y - 3), f32(w + 14), 24}, 1,
+            {rc.r, rc.g, rc.b, 120})
+        name_col := f.rot > 0 ? rl.Color{140, 120, 90, 255} : rc
+        draw_text(fmt.ctprintf("%s", k.name), x, y, 17, name_col, true)
+        if f.rot > 0 {
+            draw_text("腐烂中", x, y + 20, 12, {150, 110, 70, 220})
+        }
+    }
+}
+
+// fullscreen effect flash
+draw_tint :: proc() {
+    if tint_timer <= 0 do return
+    c := tint_color
+    c.a = u8(f32(c.a) * clamp(tint_timer / 0.7, 0, 1))
+    rl.DrawRectangle(0, 0, SCREEN_W, SCREEN_H, c)
+}
+
+// 图鉴: all food kinds discovered so far
+draw_dex :: proc() {
+    if !dex_open do return
+    w: i32 = 340
+    x := SCREEN_W - w - 20
+    y: i32 = 170
+    rows := min(len(kinds), 22)
+    h := i32(60 + rows * 26)
+    rl.DrawRectangle(x, y, w, h, {12, 14, 24, 225})
+    rl.DrawRectangleLinesEx({f32(x), f32(y), f32(w), f32(h)}, 1, {120, 128, 150, 180})
+    draw_text(fmt.ctprintf("食物图鉴 · 已发现 %d 种", len(kinds)), x + 16, y + 12, 20,
+        rl.RAYWHITE, true)
+
+    buf: [192]u8
+    for i in 0..<rows {
+        k := kinds[i]
+        ry := y + 44 + i32(i) * 26
+        rl.DrawCircle(x + 24, ry + 8, 5, k.color)
+        // effect tags（中文标签 + ASCII 数值，各自用 bprintf 写入 buf 避免重叠）
+        n := 0
+        tag :: proc(buf: []u8, n: ^int, s: string) {
+            if n^ > 0 do n^ += copy(buf[n^:], " ")
+            n^ += copy(buf[n^:], s)
+        }
+        if k.fx_speed_t > 0 && k.fx_speed < 1 do tag(buf[:], &n, "加速")
+        if k.fx_speed_t > 0 && k.fx_speed > 1 do tag(buf[:], &n, "减速")
+        if k.fx_growth != 0 {
+            w := fmt.bprintf(buf[n:], "%+d节", k.fx_growth)
+            n += len(w)
+        }
+        if k.fx_score != 0 {
+            if n > 0 do n += copy(buf[n:], " ")
+            w := fmt.bprintf(buf[n:], "%+d分", k.fx_score)
+            n += len(w)
+        }
+        if k.fx_confuse > 0 do tag(buf[:], &n, "眩晕")
+        if k.fx_shake > 0.4 do tag(buf[:], &n, "爆炸")
+        immune := kind_harmful(k) && snake_memory[k.name] >= 2
+        if immune do tag(buf[:], &n, "已免疫")
+        buf[n] = 0 // 上一行更长会留下残影，显式截断
+        stars := k.rarity == 2 ? "***" : (k.rarity == 1 ? "**" : "*")
+        rc := RARITY_COLORS[k.rarity]
+        draw_text(fmt.ctprintf("%s", k.name), x + 40, ry, 18, rc, true)
+        draw_text(fmt.ctprintf("%s  %s", stars, cstring(raw_data(buf[:]))),
+            x + 130, ry + 2, 14, {170, 175, 190, 255})
+    }
+    if len(kinds) > rows {
+        draw_text(fmt.ctprintf("... and %d more", len(kinds) - rows), x + 40, y + 44 + i32(rows) * 26, 14,
+            {120, 125, 140, 255})
+    }
+}
+
+draw_input_box :: proc() {
+    if !input_open do return
+    w: i32 = 560
+    h: i32 = 64
+    x := (SCREEN_W - w) / 2
+    y := SCREEN_H - h - 90
+    rl.DrawRectangle(0, 0, SCREEN_W, SCREEN_H, {0, 0, 0, 60})
+    rl.DrawRectangle(x, y, w, h, {16, 20, 32, 240})
+    rl.DrawRectangleLinesEx({f32(x), f32(y), f32(w), f32(h)}, 2, {255, 200, 120, 220})
+    draw_text("投喂什么？", x + 18, y + 10, 15, {200, 190, 160, 255})
+    typed := string(input_buf[:input_len])
+    draw_text(fmt.ctprintf("%s", typed), x + 18, y + 30, 24, rl.RAYWHITE, true)
+    if time_total * 2 - math.floor(time_total * 2) < 0.55 {
+        w := measure_text(fmt.ctprintf("%s", typed), 24, true)
+        draw_text("_", x + 18 + w + 3, y + 30, 24, rl.RAYWHITE, true)
+    }
+    draw_text("Enter 投放 · Esc 取消", x + w - 190, y + 12, 13, {140, 145, 160, 255})
 }
 
 draw_snake :: proc(alpha: f32, hide_head: bool) {
@@ -906,10 +1484,65 @@ draw_particles :: proc() {
     }
 }
 
+// ---------------------------------------------------------------------------
+// CJK-capable UI font (Feeding Lab labels / dex / prompts)
+// ---------------------------------------------------------------------------
+
+cjk_ok := false
+
+// every Chinese literal used in the UI — scanned to build the glyph set
+CJK_SOURCE :: [?]string{
+    "苹果", "辣椒", "冰棍", "手榴弹", "便便", "毒蘑菇", "星星", "神秘蛋",
+    "投喂实验室 · 发现 种",
+    "暴走 冰冻 眩晕",
+    "投喂 快捷食物 图鉴 视角 皮肤 转 暂停 重开",
+    "食物图鉴 · 已发现 种",
+    "加速 减速 节 分 眩晕 爆炸 已免疫",
+    "腐烂中",
+    "投喂什么？",
+    "投放 取消",
+    "蛇自动觅食，你来发明食物 —",
+}
+
+load_cjk_font :: proc() {
+    runes: [dynamic]rune
+    defer delete(runes)
+    for c in 32..=126 do append(&runes, rune(c))
+    for s in CJK_SOURCE {
+        i := 0
+        for i < len(s) {
+            r, size := utf8.decode_rune_in_string(s[i:])
+            if r != utf8.RUNE_ERROR && r > 126 {
+                dup := false
+                for e in runes do if e == r { dup = true; break }
+                if !dup do append(&runes, r)
+            }
+            i += size
+        }
+    }
+    // 注意：raylib 无法解析 .ttc（会静默回退成内置默认字体），必须用纯 .ttf
+    f := rl.LoadFontEx("/System/Library/Fonts/Supplemental/Arial Unicode.ttf",
+        64, raw_data(runes), i32(len(runes)))
+    if rl.IsFontValid(f) && f.baseSize == 64 {
+        font_cjk = f
+        cjk_ok = true
+        rl.SetTextureFilter(font_cjk.texture, .BILINEAR)
+    }
+}
+
+has_cjk :: proc(t: cstring) -> bool {
+    p := transmute([^]u8)t
+    for i := 0; p[i] != 0; i += 1 {
+        if p[i] > 126 do return true
+    }
+    return false
+}
+
 // Font-based text helpers (crisp modern type, falls back to the default font)
 draw_text :: proc(text: cstring, x, y: i32, size: i32, color: rl.Color, bold := false) {
     if fonts_ok {
         f := bold ? font_bold : font_ui
+        if cjk_ok && has_cjk(text) do f = font_cjk // 中文走专用字体
         rl.DrawTextEx(f, text, {f32(x), f32(y)}, f32(size), 1, color)
     } else {
         rl.DrawText(text, x, y, size, color)
@@ -919,6 +1552,7 @@ draw_text :: proc(text: cstring, x, y: i32, size: i32, color: rl.Color, bold := 
 measure_text :: proc(text: cstring, size: i32, bold := false) -> i32 {
     if fonts_ok {
         f := bold ? font_bold : font_ui
+        if cjk_ok && has_cjk(text) do f = font_cjk
         return i32(rl.MeasureTextEx(f, text, f32(size), 1).x)
     }
     return rl.MeasureText(text, size)
@@ -1016,7 +1650,9 @@ draw_guidance :: proc() {
     if view_mode == .FIRST do return   // first-person has beacon + path line
 
     hp := cell_to_world(snake[0])
-    fp := cell_to_world(food)
+    t, ok := nav_target()
+    if !ok do return
+    fp := cell_to_world(t)
 
     // skip when the food is behind the camera (edge indicator handles that)
     fwd := norm_v3(cam.target - cam.position)
@@ -1075,9 +1711,12 @@ draw_food_indicator :: proc() {
         rl.DrawCircleLines(cx, cy, 5, rl.Color{255, 255, 255, 90})
     }
 
-    sp := rl.GetWorldToScreen(cell_to_world(food), cam)
+    sp_t, has_t := nav_target()
+    if !has_t do return
+    tp := cell_to_world(sp_t)
+    sp := rl.GetWorldToScreen(tp, cam)
     fwd := norm_v3(cam.target - cam.position)
-    to_food := cell_to_world(food) - cam.position
+    to_food := tp - cam.position
     behind := to_food.x*fwd.x + to_food.y*fwd.y + to_food.z*fwd.z < 0
 
     margin :: 70.0
@@ -1113,6 +1752,30 @@ draw_hud :: proc() {
     draw_text(fmt.ctprintf("SPEED  x%d", speed), 26, 120, 21, rl.SKYBLUE)
     draw_text(fmt.ctprintf("HEAD   (%d, %d, %d)", snake[0].x, snake[0].y, snake[0].z),
         26, 150, 18, rl.Color{150, 160, 180, 255})
+
+    if game_mode == .FEEDING {
+        draw_text(fmt.ctprintf("FOODS   %d in the cube", len(foods)), 26, 176, 18,
+            rl.Color{255, 190, 120, 255})
+        draw_text(fmt.ctprintf("投喂实验室 · 发现 %d 种", len(kinds)), 26, 204, 19,
+            rl.Color{255, 200, 140, 255}, true)
+        // 异常状态指示
+        fy: i32 = 234
+        if fx_speed_timer > 0 && fx_speed_mult < 1 {
+            draw_text(fmt.ctprintf("暴走 %.0fs", fx_speed_timer), 26, fy, 17, {255, 120, 60, 255}, true)
+            fy += 22
+        }
+        if fx_speed_timer > 0 && fx_speed_mult > 1 {
+            draw_text(fmt.ctprintf("冰冻 %.0fs", fx_speed_timer), 26, fy, 17, {120, 210, 255, 255}, true)
+            fy += 22
+        }
+        if confuse_timer > 0 {
+            draw_text(fmt.ctprintf("眩晕 %.0fs", confuse_timer), 26, fy, 17, {200, 120, 255, 255}, true)
+        }
+        draw_text("T: 投喂    1-8: 快捷食物    Tab: 图鉴    V: 视角    M: 皮肤    IJKL: 转视角    P/Space: 暂停    R: 重开",
+            26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
+        return
+    }
+
     fd := abs(food.x - snake[0].x) + abs(food.y - snake[0].y) + abs(food.z - snake[0].z)
     draw_text(fmt.ctprintf("FOOD    %d cells away", fd), 26, 176, 18, rl.Color{255, 140, 140, 255})
     if autopilot {
@@ -1144,9 +1807,11 @@ draw_title :: proc() {
         SCREEN_H/2 + 86, 18, rl.Color{150, 155, 170, 255})
     draw_centered("flying straight leads. Mini-map and axis compass share the edge colors.",
         SCREEN_H/2 + 110, 18, rl.Color{150, 155, 170, 255})
-    draw_centered("Press SPACE to start", SCREEN_H/2 + 144, 32, rl.RAYWHITE, true)
+    draw_centered("SPACE: classic mode", SCREEN_H/2 + 152, 30, rl.RAYWHITE, true)
+    draw_centered("F: 投喂实验室 — AI 蛇自动觅食，你来发明食物 (type any word, T to feed)",
+        SCREEN_H/2 + 196, 22, rl.Color{255, 200, 140, 255}, true)
     if best > 0 {
-        draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 190, 21, rl.GOLD)
+        draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 240, 21, rl.GOLD)
     }
 }
 
@@ -1260,7 +1925,11 @@ draw_frame :: proc(alpha: f32) {
     rl.BeginMode3D(cam)
     draw_boundaries()
     draw_tether()
-    draw_food()
+    if game_mode == .FEEDING {
+        draw_foods()
+    } else {
+        draw_food()
+    }
     first_person := view_mode == .FIRST && state != .TITLE
     if modern_skin {
         draw_snake_modern(alpha, first_person)
@@ -1271,11 +1940,15 @@ draw_frame :: proc(alpha: f32) {
     draw_particles()
     rl.EndMode3D()
 
+    draw_tint()
     draw_hud()
     draw_minimap()
     draw_compass()
     draw_food_indicator()
     draw_guidance()
+    draw_food_labels()
+    draw_dex()
+    draw_input_box()
     if state == .PLAYING && !started {
         draw_centered("Steer with A / D / W / S to launch the snake", SCREEN_H - 76, 24,
             rl.Color{u8(200 + 55 * math.sin(time_total * 4)), 220, 120, 255}, true)
@@ -1310,6 +1983,7 @@ main :: proc() {
     rl.SetConfigFlags({.MSAA_4X_HINT})
     rl.InitWindow(SCREEN_W, SCREEN_H, "3D Snake — true 3D (Odin + raylib)")
     rl.SetTargetFPS(60)
+    rl.SetExitKey(.KEY_NULL) // ESC 用于取消输入框，不退出游戏
 
     // modern system fonts, loaded at a large base size for crisp rendering
     font_ui = rl.LoadFontEx("/System/Library/Fonts/SFNS.ttf", 64, nil, 0)
@@ -1319,6 +1993,8 @@ main :: proc() {
         rl.SetTextureFilter(font_ui.texture, .BILINEAR)
         rl.SetTextureFilter(font_bold.texture, .BILINEAR)
     }
+    // CJK-capable UI font for the Feeding Lab (labels, dex, input box)
+    load_cjk_font()
 
     rl.InitAudioDevice()
     audio_ok = rl.IsAudioDeviceReady()
@@ -1329,6 +2005,7 @@ main :: proc() {
     }
 
     load_best()
+    make_presets()
     reset_game()
 
     // DEBUG: offscreen-render verification mode (SNAKE_SHOT=1)
@@ -1344,28 +2021,46 @@ main :: proc() {
         switch state {
         case .TITLE:
             if rl.IsKeyPressed(.SPACE) || rl.IsKeyPressed(.ENTER) {
+                game_mode = .CLASSIC
+                autopilot = false
+                reset_game()
+                state = .PLAYING
+            }
+            if rl.IsKeyPressed(.F) {
+                game_mode = .FEEDING
                 reset_game()
                 state = .PLAYING
             }
         case .PLAYING:
+            handle_text_input()
             handle_input()
-            if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) { state = .PAUSED; break }
-            if rl.IsKeyPressed(.R) { reset_game(); break }
+            if !input_open {
+                if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) { state = .PAUSED; break }
+                if rl.IsKeyPressed(.R) { reset_game(); break }
+            }
 
             // manual speed control (auto-acceleration on food still applies)
-            if rl.IsKeyPressed(.MINUS) do move_interval = min(0.50, move_interval + 0.02)
-            if rl.IsKeyPressed(.EQUAL) do move_interval = max(MIN_INTERVAL, move_interval - 0.02)
+            if game_mode == .CLASSIC {
+                if rl.IsKeyPressed(.MINUS) do move_interval = min(0.50, move_interval + 0.02)
+                if rl.IsKeyPressed(.EQUAL) do move_interval = max(MIN_INTERVAL, move_interval - 0.02)
+            }
 
             // the snake holds still until the player steers for the first time
             if !started && (len(dir_queue) > 0 || autopilot) do started = true
 
             if started {
+                eff := move_interval * (fx_speed_timer > 0 ? fx_speed_mult : 1)
                 move_timer += dt
-                for move_timer >= move_interval && state == .PLAYING {
-                    move_timer -= move_interval
+                for move_timer >= eff && state == .PLAYING {
+                    move_timer -= eff
                     step()
                 }
             }
+            // food-effect timers
+            fx_speed_timer = max(0, fx_speed_timer - dt)
+            confuse_timer  = max(0, confuse_timer - dt)
+            tint_timer     = max(0, tint_timer - dt)
+            if game_mode == .FEEDING do update_food_rot(dt)
             alpha = clamp(smoothstep(move_timer / move_interval), 0, 1)
             update_particles(dt)
         case .PAUSED:
@@ -1402,15 +2097,26 @@ main :: proc() {
             if shots == 0 && time_total > 0.4 {
                 capture("shot_title.png", alpha)
                 shots = 1
+                // 进入投喂模式并投放多种食物
+                game_mode = .FEEDING
+                reset_game()
                 state = .PLAYING
-                started = true
-                autopilot = true // DEBUG: 让 AI 自动驾驶演示
-            } else if shots == 1 && time_total > 8.0 {
-                capture("shot_play.png", alpha)
+                cast_preset(1) // 辣椒
+                cast_preset(3) // 手榴弹
+                cast_preset(6) // 星星
+                cast_word("laser")
+                cast_word("durian")
+            } else if shots == 1 && time_total > 2.5 {
+                capture("shot_feed.png", alpha)
                 shots = 2
-            } else if shots == 2 && time_total > 20.0 {
-                capture("shot_late.png", alpha)
+                dex_open = true // 图鉴展示
+            } else if shots == 2 && time_total > 3.5 {
+                capture("shot_dex.png", alpha)
                 shots = 3
+                dex_open = false
+            } else if shots == 3 && time_total > 14.0 {
+                capture("shot_late.png", alpha)
+                shots = 4
             }
         }
 
@@ -1420,6 +2126,7 @@ main :: proc() {
     if fonts_ok {
         rl.UnloadFont(font_ui)
         rl.UnloadFont(font_bold)
+        if cjk_ok do rl.UnloadFont(font_cjk)
     }
     if audio_ok {
         rl.UnloadSound(snd_eat)

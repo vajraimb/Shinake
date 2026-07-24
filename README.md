@@ -9,6 +9,25 @@ no gravity, no floor, pure 3D piloting.
 *The built-in AI (press `B`) piloting a 90+ segment snake — BFS pathfinding
 with survival lookahead, shown in the modern tube skin.*
 
+## Feeding Lab (投喂实验室)
+
+Press `F` on the title screen: the roles flip — **the AI flies the snake, you
+invent the food**. Type any word (`T`) and the game deterministically
+generates a food from it: color, shape, spin, rarity, and 1–3 effects
+(speed burst, freeze, growth, body chop, score bonus/penalty, dizziness,
+explosion…). The AI places it in the cube and hunts it down.
+
+![feeding lab](docs/feeding.png)
+
+- **8 preset foods** on keys `1`–`8`: 苹果, 辣椒 (speed rage), 冰棍 (slow-mo),
+  手榴弹 (blows off tail segments), 便便 (score penalty), 毒蘑菇 (dizziness),
+  星星 (legendary bonus), 神秘蛋 (random effects every time)
+- **Free-form foods** — every word becomes a unique, repeatable recipe;
+  rare and legendary rolls get extra effects and a glowing aura
+- **The snake learns** — hurt it twice with the same food name and it
+  refuses to eat that food ever again (it rots away). Keep inventing!
+- **Food dex** (`Tab`) — every kind you've discovered, with its effect tags
+
 ## Features
 
 - **True 3D movement** — six directions (±X, ±Y, ±Z) inside a 12³ cube
@@ -60,6 +79,14 @@ with survival lookahead, shown in the modern tube skin.*
 | `P` or `Space` | Pause / resume |
 | `R` | Restart |
 | `Space` / `Enter` | Start / play again |
+
+### Feeding Lab only
+
+| Input | Action |
+|---|---|
+| `T` | Open the feed box — type any word, Enter to cast it |
+| `1` – `8` | Cast a preset food instantly |
+| `Tab` | Toggle the food dex (discovered kinds & effects) |
 
 ## Download
 
