@@ -79,6 +79,7 @@ FoodKind :: struct {
     blueprint:  string,   // 效果蓝图 JSON {"do":[...]} (owned clone, "" = none; supersedes classic fx)
     byline:     string,   // share v2 创作者落款 (owned clone, "" = none)
     retired:    bool,     // 作品库已删除: hidden from dex/quick-cast; kinds[] never reorders (live foods hold indices)
+    harm_cache: i8,       // 拒食学习缓存: 0 未评估 / 1 有害 / 2 安全 (lazy, never serialized)
 }
 
 Food :: struct {
@@ -137,6 +138,7 @@ kinds          : [dynamic]FoodKind
 kind_by_name   : map[string]int
 foods          : [dynamic]Food
 snake_memory   : map[string]int  // 食物名 -> 伤害过蛇的次数（>=2 则免疫）
+immune_toasted : map[string]bool // 本局已弹过"免疫"提示的食物名（reset_game 清空）
 ai_target      := IV3{-1, -1, -1}
 ai_has_target  := false
 fx_speed_timer : f32 = 0
@@ -331,6 +333,7 @@ reset_game :: proc() {
     input_open = false
     input_len = 0
     ai_has_target = false
+    clear(&immune_toasted)
 
     if game_mode == .FEEDING {
         // 投喂模式：AI 常驻，自己起跑，等玩家投喂
@@ -739,8 +742,43 @@ gen_kind :: proc(name: string, seed: u32) -> FoodKind {
     return k
 }
 
-kind_harmful :: proc(k: FoodKind) -> bool {
-    return k.fx_growth < 0 || k.fx_score < 0 || k.fx_confuse > 0
+// 净收益：生长×2 + 分数/10 − 眩晕×1.5。带副作用但大补的食物不会被拒食。
+kind_net_value :: proc(k: FoodKind) -> f32 {
+    return 2.0 * f32(k.fx_growth) + f32(k.fx_score) / 10.0 - 1.5 * k.fx_confuse
+}
+
+// 蓝图食物的有害评估：把蓝图编译成 ScheduledAction 后按同一权重求和
+// （growth → 2.0×n，score → n/10.0，confuse → −1.5×secs，其余节点 0）。
+// chance 节点在编译时已经掷过骰子 —— 本次编译结果就是这一掷的结论
+// （一次性不确定性，随后被 harm_cache 冻结）。编译失败 → 蓝图按中性处理。
+bp_harm_value :: proc(json_text: string) -> (f32, bool) {
+    actions, ok := bp_compile(json_text)
+    if !ok do return 0, false
+    defer bp_free_actions(&actions)
+    total := f32(0)
+    for a in actions {
+        switch a.prim.name {
+        case "growth":  total += 2.0 * f32(a.args.i1)
+        case "score":   total += f32(a.args.i1) / 10.0
+        case "confuse": total -= 1.5 * a.args.f1
+        }
+    }
+    return total, true
+}
+
+// 有害 ⇔ 净收益 < 0。结果懒缓存进 FoodKind.harm_cache（0 未知/1 有害/2 安全），
+// 覆盖所有注册路径（预设/生成/创意/导入/作品库），无需各处改动。
+kind_harmful :: proc(k: ^FoodKind) -> bool {
+    if k.harm_cache == 0 {
+        net := kind_net_value(k^)
+        if k.blueprint != "" {
+            if bp_net, ok := bp_harm_value(k.blueprint); ok {
+                net += bp_net
+            }
+        }
+        k.harm_cache = net < 0 ? 1 : 2
+    }
+    return k.harm_cache == 1
 }
 
 make_presets :: proc() {
@@ -2976,6 +3014,145 @@ self_test :: proc() -> bool {
     }
     fmt.println("creations: ALL PASS")
 
+    // ================= Phase 4: 拒食学习（净收益判定 + 免疫提示） =================
+
+    // --- T18: net-value classification of classic fx (生长×2 + 分数/10 − 眩晕×1.5) ---
+    {
+        apple    := FoodKind{fx_growth = 1, fx_score = 10}       // 苹果
+        chili    := FoodKind{fx_growth = 1, fx_score = 20}       // 辣椒
+        popsicle := FoodKind{fx_growth = 1, fx_score = 15}       // 冰棍
+        grenade  := FoodKind{fx_growth = -4}                     // 手榴弹
+        poop     := FoodKind{fx_growth = -1, fx_score = -25}     // 便便
+        shroom   := FoodKind{fx_score = 5, fx_confuse = 4}       // 毒蘑菇
+        star     := FoodKind{fx_growth = 2, fx_score = 80}       // 星星
+        // 用户的 "liulian"：大补但有副作用 —— 旧逻辑会因 confuse>0 判有害
+        liulian  := FoodKind{fx_growth = 6, fx_score = 30, fx_confuse = 2,
+                             fx_speed = 2.0, fx_speed_t = 2, fx_shake = 1.0, fx_bursts = 4}
+        fmt.printf("net values: 苹果=%.1f 辣椒=%.1f 冰棍=%.1f 手榴弹=%.1f 便便=%.1f 毒蘑菇=%.1f 星星=%.1f liulian=%.1f\n",
+            kind_net_value(apple), kind_net_value(chili), kind_net_value(popsicle),
+            kind_net_value(grenade), kind_net_value(poop), kind_net_value(shroom),
+            kind_net_value(star), kind_net_value(liulian))
+        if kind_net_value(grenade) != -8 || kind_net_value(poop) != -4.5 ||
+           kind_net_value(shroom) != -5.5 || kind_net_value(apple) != 3 ||
+           kind_net_value(star) != 12 || kind_net_value(liulian) != 12 {
+            fmt.println("SELFTEST FAIL: net-value weights")
+            return false
+        }
+        if !kind_harmful(&grenade) || !kind_harmful(&poop) || !kind_harmful(&shroom) {
+            fmt.println("SELFTEST FAIL: 手榴弹/便便/毒蘑菇 must stay harmful")
+            return false
+        }
+        if kind_harmful(&apple) || kind_harmful(&star) || kind_harmful(&liulian) {
+            fmt.println("SELFTEST FAIL: 苹果/星星/liulian must be safe")
+            return false
+        }
+    }
+    fmt.println("net classification: PASS")
+
+    // --- T19: blueprint harm evaluation (compiled actions) + lazy cache ---
+    {
+        bad_bp := FoodKind{blueprint = `{"do":[{"growth":{"n":-3}}]}`}
+        if !kind_harmful(&bad_bp) || bad_bp.harm_cache != 1 {
+            fmt.println("SELFTEST FAIL: tail-blast blueprint must be harmful")
+            return false
+        }
+        good_bp := FoodKind{blueprint = `{"do":[{"spawn_food":{"kind":"苹果","count":1}},{"score":{"n":10}}]}`}
+        if kind_harmful(&good_bp) || good_bp.harm_cache != 2 {
+            fmt.println("SELFTEST FAIL: egg+score blueprint must be safe")
+            return false
+        }
+        // second calls must be cache hits (harm_cache != 0, no recompile, same verdict)
+        if !kind_harmful(&bad_bp) || kind_harmful(&good_bp) {
+            fmt.println("SELFTEST FAIL: cached harm verdicts changed")
+            return false
+        }
+        // fx 与蓝图按同一权重相加：+2 (fx 生长) − 6 (蓝图炸尾) = −4 → 有害
+        mixed := FoodKind{fx_growth = 1, blueprint = `{"do":[{"growth":{"n":-3}}]}`}
+        if !kind_harmful(&mixed) {
+            fmt.println("SELFTEST FAIL: fx+blueprint net values must add up")
+            return false
+        }
+        // 编译失败 → 蓝图按中性处理，只看 fx
+        broken := FoodKind{fx_growth = 1, fx_score = 10, blueprint = `{oops`}
+        if kind_harmful(&broken) || broken.harm_cache != 2 {
+            fmt.println("SELFTEST FAIL: invalid blueprint must be fx-only neutral")
+            return false
+        }
+    }
+    fmt.println("blueprint harm: PASS")
+
+    // --- T20: immune-toast dedupe (每种食物每局只弹一次) ---
+    game_mode = .FEEDING
+    reset_game() // 清空 immune_toasted
+    state = .PLAYING
+    if !toast_immune_once("自测毒果") {
+        fmt.println("SELFTEST FAIL: first immune toast suppressed")
+        return false
+    }
+    if toast_immune_once("自测毒果") {
+        fmt.println("SELFTEST FAIL: immune toast repeated for the same name")
+        return false
+    }
+    {   // 同名两个食物同时开始腐烂 —— 仍然只弹一次
+        hk := FoodKind{name = strings.clone("自测毒果2"), author = "本地",
+                       hue = 280, color = hsv_rgb(280, 0.72, 1.0), shape = .CONE,
+                       size = 0.3, spin = 2, fx_growth = -2, fx_bursts = 1}
+        append(&kinds, hk)
+        kind_by_name[hk.name] = len(kinds) - 1
+        snake_memory["自测毒果2"] = 2
+        clear(&foods)
+        append(&foods, Food{kind = kind_by_name[hk.name], pos = IV3{9, 6, 6}})
+        append(&foods, Food{kind = kind_by_name[hk.name], pos = IV3{3, 3, 3}})
+        update_food_rot(0)
+        both_rot := foods[0].rot == 10 && foods[1].rot == 10
+        update_food_rot(0) // rot 已标记：f.rot==0 的守卫必须挡住重复提示
+        if !both_rot || len(immune_toasted) != 2 || !strings.contains(toast, "自测毒果2") {
+            fmt.println("SELFTEST FAIL: rot-marking toast dedupe", len(immune_toasted), toast)
+            return false
+        }
+        if toast_immune_once("自测毒果2") {
+            fmt.println("SELFTEST FAIL: toast repeated after rot marking")
+            return false
+        }
+    }
+    fmt.println("immune toast: PASS")
+
+    // --- T21: liulian regression —— 大补但带眩晕的食物不再被拒食/免疫 ---
+    {
+        lk := FoodKind{name = strings.clone("榴莲回归"), author = "AI",
+                       hue = 40, color = hsv_rgb(40, 0.72, 1.0), shape = .SPHERE,
+                       size = 0.3, spin = 2, rarity = 1,
+                       fx_speed = 2.0, fx_speed_t = 2, fx_growth = 6, fx_score = 30,
+                       fx_shake = 1.0, fx_confuse = 2.0, fx_bursts = 4}
+        append(&kinds, lk)
+        lidx := len(kinds) - 1
+        kind_by_name[lk.name] = lidx
+        if kind_harmful(&kinds[lidx]) {
+            fmt.println("SELFTEST FAIL: liulian classified harmful (the reported bug)")
+            return false
+        }
+        reset_game()
+        state = .PLAYING
+        clear(&foods)
+        append(&foods, Food{kind = lidx, pos = IV3{9, 6, 6}})
+        select_target()
+        if !ai_has_target || ai_target != (IV3{9, 6, 6}) {
+            fmt.println("SELFTEST FAIL: liulian not targeted", ai_has_target, ai_target)
+            return false
+        }
+        // 旧 bug 的触发条件：记忆满 2 次 —— 净收益为正的食物永远不学坏
+        snake_memory["榴莲回归"] = 2
+        select_target()
+        if !ai_has_target || ai_target != (IV3{9, 6, 6}) || willing_food_count() != 1 {
+            fmt.println("SELFTEST FAIL: liulian refused at memory 2 (old bug)")
+            return false
+        }
+        _, _ = delete_key(&snake_memory, "榴莲回归")
+    }
+    fmt.println("liulian regression: PASS")
+
+    fmt.println("harm learning: ALL PASS")
+
     fmt.println("blueprint engine: ALL PASS")
     return true
 }
@@ -3048,7 +3225,7 @@ select_target :: proc() {
     ai_has_target = false
     best_d := i32(1 << 30)
     for f in foods {
-        k := kinds[f.kind]
+        k := &kinds[f.kind]
         if f.rot > 0 do continue
         if kind_harmful(k) && snake_memory[k.name] >= 2 do continue // 已免疫
         d := abs(f.pos.x - snake[0].x) + abs(f.pos.y - snake[0].y) + abs(f.pos.z - snake[0].z)
@@ -3060,13 +3237,35 @@ select_target :: proc() {
     }
 }
 
+// 场上蛇还愿意吃的食物数量（未腐烂 + 未免疫）—— 用于"没东西吃"提示
+willing_food_count :: proc() -> int {
+    n := 0
+    for f in foods {
+        if f.rot > 0 do continue
+        k := &kinds[f.kind]
+        if kind_harmful(k) && snake_memory[k.name] >= 2 do continue
+        n += 1
+    }
+    return n
+}
+
+// 免疫提示去重：每种食物每局只在蛇开始拒食的那一刻弹一次。
+// 返回 true 表示这次真的弹了（供自测断言）。
+toast_immune_once :: proc(name: string) -> bool {
+    if immune_toasted[name] do return false
+    immune_toasted[name] = true
+    set_toast(fmt.tprintf("蛇吃够了 %s 的亏，免疫了！", name))
+    return true
+}
+
 // mark foods the snake now refuses as rotting; remove fully rotten ones
 update_food_rot :: proc(dt: f32) {
     for i := len(foods) - 1; i >= 0; i -= 1 {
         f := &foods[i]
-        k := kinds[f.kind]
+        k := &kinds[f.kind]
         if f.rot == 0 && kind_harmful(k) && snake_memory[k.name] >= 2 {
             f.rot = 10 // 蛇不肯吃，开始腐烂
+            toast_immune_once(k.name) // 每种食物每局只解释一次
         }
         if f.rot > 0 {
             f.rot -= dt
@@ -3099,7 +3298,7 @@ apply_classic_fx :: proc(k: FoodKind, pos: IV3) -> bool {
 
 eat_food :: proc(i: int) {
     f := foods[i]
-    k := kinds[f.kind]
+    k := &kinds[f.kind]
     eaten += 1
     blueprint_ok := false
     if k.blueprint != "" {
@@ -3115,7 +3314,7 @@ eat_food :: proc(i: int) {
             set_toast(fmt.tprintf("AI 点评: %s", k.flavor))
         }
     } else {
-        if apply_classic_fx(k, f.pos) {
+        if apply_classic_fx(k^, f.pos) {
             ordered_remove(&foods, i)
             return
         }
@@ -4454,7 +4653,7 @@ draw_dex :: proc() {
         if k.fx_confuse > 0 do tag(buf[:], &n, "眩晕")
         if k.fx_shake > 0.4 do tag(buf[:], &n, "爆炸")
         if k.blueprint != "" do tag(buf[:], &n, "[蓝图]")
-        immune := kind_harmful(k) && snake_memory[k.name] >= 2
+        immune := kind_harmful(&kinds[vis[i]]) && snake_memory[k.name] >= 2
         if immune do tag(buf[:], &n, "已免疫")
         buf[n] = 0 // 上一行更长会留下残影，显式截断
         stars := k.rarity == 2 ? "***" : (k.rarity == 1 ? "**" : "*")
@@ -4957,6 +5156,13 @@ draw_hud :: proc() {
             rl.Color{255, 190, 120, 255})
         draw_text(fmt.ctprintf("投喂实验室 · 发现 %d 种", len(kinds)), 26, 204, 19,
             rl.Color{255, 200, 140, 255}, true)
+        // 断粮提示：AI 找不到目标且场上真的没有任何愿意吃的食物
+        // （ai_has_target 只在移动 tick 更新，willing_food_count 当场重算，
+        //   食物只是离得远时不显示）
+        if state == .PLAYING && !ai_has_target && willing_food_count() == 0 {
+            draw_centered("蛇没东西吃了 — 按 T 投喂，或按 E 创造新食物", SCREEN_H / 3, 20,
+                rl.Color{255, 190, 90, 220}, true)
+        }
         // 异常状态指示
         fy: i32 = 234
         if fx_speed_timer > 0 && fx_speed_mult < 1 {

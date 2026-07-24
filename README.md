@@ -29,6 +29,8 @@ the tail off → poop & poison mushroom (the snake will remember these).*
   rare and legendary rolls get extra effects and a glowing aura
 - **The snake learns** — hurt it twice with the same food name and it
   refuses to eat that food ever again (it rots away). Keep inventing!
+- 蛇的"学习"按净收益判断（生长×2 + 分数/10 − 眩晕×1.5）——带副作用但大补的
+  食物不会被拒食；连续吃亏两次才免疫，免疫时会弹提示
 - **Food dex** (`Tab`) — every kind you've discovered, with its effect tags
 
 ### AI 配方（可选）
