@@ -4,6 +4,7 @@
 > 说一句话，造一道菜，看它吃出什么事儿。
 
 [![Release](https://img.shields.io/github/v/release/vajraimb/Shinake?color=brightgreen)](../../releases)
+[![License](https://img.shields.io/github/license/vajraimb/Shinake)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black)](/)
 [![Built with](https://img.shields.io/badge/built%20with-Odin%20%2B%20raylib-blue)](https://odin-lang.org/)
 [![Stars](https://img.shields.io/github/stars/vajraimb/Shinake?style=social)](../../stargazers)
@@ -28,6 +29,9 @@
 
 - 🔄 **角色互换** — 这次不是你开蛇。AI 负责飞，你负责发明黑暗料理：
   每个词都变成颜色、形状、稀有度、效果俱全的独特配方
+- 🕹️ **原味硬核挑战** — 传统玩法完整保留：标题界面直接回车，亲自驾驶
+  六向贪食蛇在 12³ 立方体里求生。说来简单，试试就知道有多硬核——
+  撑不住了随时按 `B` 让 AI 救场
 - 🗣️ **一句话造物** — 在创造台说"火箭辣椒""会下蛋的母鸡"，AI 连名字、
   颜色到"先暴走 4 秒再爆炸炸尾"的剧本都给你写好
 - 🧬 **11 种效果原语自由编排** — 下蛋、金身、掉头反转、得分倍率……

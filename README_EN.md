@@ -4,6 +4,7 @@
 > Say one word, invent a dish, watch what it does to the snake.
 
 [![Release](https://img.shields.io/github/v/release/vajraimb/Shinake?color=brightgreen)](../../releases)
+[![License](https://img.shields.io/github/license/vajraimb/Shinake)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-macOS%20Apple%20Silicon-black)](/)
 [![Built with](https://img.shields.io/badge/built%20with-Odin%20%2B%20raylib-blue)](https://odin-lang.org/)
 [![Stars](https://img.shields.io/github/stars/vajraimb/Shinake?style=social)](../../stargazers)
@@ -32,6 +33,10 @@ Workshop**, or `B` to watch the AI play by itself.
 - 🔄 **Roles reversed** — you're not driving this time. The AI flies;
   you invent the food. Every word becomes a unique recipe with color,
   shape, rarity, and effects
+- 🕹️ **The original hardcore challenge** — classic mode is fully intact:
+  hit Enter on the title screen and pilot the six-way snake yourself.
+  Sounds easy — it really isn't. Press `B` anytime to let the AI take
+  over (or show you how it's done)
 - 🗣️ **Create with one sentence** — tell the workshop "rocket chili" or
   "a hen that lays eggs", and the AI drafts the whole package: name,
   color, and a scripted "rage for 4s, then explode and chop the tail"
