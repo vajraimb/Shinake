@@ -5489,7 +5489,7 @@ main :: proc() {
     } else {
         rl.SetConfigFlags({.MSAA_4X_HINT})
     }
-    rl.InitWindow(SCREEN_W, SCREEN_H, "3D Snake — true 3D (Odin + raylib)")
+    rl.InitWindow(SCREEN_W, SCREEN_H, "Shinake — true 3D snake (Odin + raylib)")
     rl.SetTargetFPS(60)
     rl.SetExitKey(.KEY_NULL) // ESC 用于取消输入框，不退出游戏
 

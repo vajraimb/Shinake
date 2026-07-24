@@ -1,4 +1,7 @@
 # build artifacts
+shinake
+shinake_dbg
+shinake-*.zip
 snake3d
 snake3d_dbg
 snake3d-*.zip
