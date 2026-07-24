@@ -4,7 +4,7 @@ A single-player, true-3D snake game written in **Odin** with **raylib**.
 The snake flies through a 12×12×12 cubic lattice in **six directions** —
 no gravity, no floor, pure 3D piloting.
 
-![AI autopilot demo](docs/autopilot.gif)
+![AI autopilot demo](docs/autopilot.webp)
 
 *The built-in AI (press `B`) piloting a 90+ segment snake — BFS pathfinding
 with survival lookahead, shown in the modern tube skin.*
@@ -17,7 +17,7 @@ generates a food from it: color, shape, spin, rarity, and 1–3 effects
 (speed burst, freeze, growth, body chop, score bonus/penalty, dizziness,
 explosion…). The AI places it in the cube and hunts it down.
 
-![feeding lab demo](docs/feeding.gif)
+![feeding lab demo](docs/feeding.webp)
 
 *A scripted tasting menu: apple + star → chili speed rage → grenade blows
 the tail off → poop & poison mushroom (the snake will remember these).*
