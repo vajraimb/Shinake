@@ -84,6 +84,11 @@ export FEED_LLM_MODEL=kimi-k2-0905-preview           # 默认值
   的原语自动打包，接收方导入即自动注册（不覆盖本地同名原语）
 - **创作者昵称** — 第一次保存时会询问一次昵称并写入 `creator.txt`
   （环境变量 `SNAKE_CREATOR` 优先），之后导出的分享码都带这个落款
+- **作品库** — 每次「保存并投放」都会把作品存进 `creations.json`（上限
+  64 个），下次启动自动载回图鉴；图鉴里选中自创作品按 `X` 从作品库删除
+  （场上已投放的不受影响），按 `Enter` 直接再投喂一份
+- **⇧1-8 快捷投喂** — 不看图鉴也能快速复投：`⇧1` 是最近保存的作品，
+  `⇧2` 次之，以此类推；HUD 底部会列出当前各键对应的作品名
 - 图鉴（`Tab`）里选中一行按 `E`，可以**以此为基础改造**已有食物
 
 | 手动设计 | AI 创意蓝图 |
@@ -148,9 +153,12 @@ export FEED_LLM_MODEL=kimi-k2-0905-preview           # 默认值
 |---|---|
 | `T` | Open the feed box — type any word, Enter to cast it |
 | `1` – `8` | Cast a preset food instantly |
+| `⇧1` – `⇧8` | 快捷投喂作品库里的自创作品（最近保存的在前） |
 | `E` | Open the 创造台 (Creator Workshop); with the dex open, remix the selected kind |
 | `Tab` | Toggle the food dex (discovered kinds & effects) |
 | `↑` / `↓` (in dex) | Select a row |
+| `Enter` (in dex) | 投喂选中的食物（图鉴保持打开） |
+| `X` (in dex) | 从作品库删除选中的自创作品 |
 | `C` | Copy the share code (last cast, or the selected dex row) |
 | `Cmd+V` (in feed box) | Paste a `SNAKE3D1.` share code to import |
 

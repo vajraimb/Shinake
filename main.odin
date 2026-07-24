@@ -78,6 +78,7 @@ FoodKind :: struct {
     fx_bursts:  int,      // particle burst count
     blueprint:  string,   // 效果蓝图 JSON {"do":[...]} (owned clone, "" = none; supersedes classic fx)
     byline:     string,   // share v2 创作者落款 (owned clone, "" = none)
+    retired:    bool,     // 作品库已删除: hidden from dex/quick-cast; kinds[] never reorders (live foods hold indices)
 }
 
 Food :: struct {
@@ -828,6 +829,15 @@ cast_preset :: proc(i: int) {
     last_cast_kind = i
 }
 
+// 数字键分发：普通 = 预设 1-8；⇧ = 作品库快捷投放（仅当图鉴关闭时）
+feed_digit :: proc(i: int, shift: bool) {
+    if shift {
+        if !dex_open do cast_creation(i)
+    } else {
+        cast_preset(i)
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Recipes: shared clamping, share codes (SNAKE3D1.*) and LLM generation
 // ---------------------------------------------------------------------------
@@ -921,13 +931,14 @@ set_toast :: proc(s: string) {
 // optional "by":"creator"}. v1 payloads ({"v":1,...}) still import unchanged.
 // ---------------------------------------------------------------------------
 
-export_share_code :: proc(idx: int, allocator := context.temp_allocator) -> string {
-    k := kinds[idx]
-    sb := strings.builder_make(context.temp_allocator)
-    strings.write_string(&sb, `{"v":2,"name":`)
-    write_json_string(&sb, k.name)
-    fmt.sbprintf(&sb, `,"hue":%d,"shape":%d,"rarity":%d,"flavor":`, k.hue, int(k.shape), k.rarity)
-    write_json_string(&sb, k.flavor)
+// the v2 recipe JSON object shared by share codes and creations.json.
+// bundle_macros: share codes embed every macro the blueprint references so
+// codes are self-contained; creations.json relies on the local macros.json.
+write_recipe_v2 :: proc(sb: ^strings.Builder, k: FoodKind, bundle_macros: bool) {
+    strings.write_string(sb, `{"v":2,"name":`)
+    write_json_string(sb, k.name)
+    fmt.sbprintf(sb, `,"hue":%d,"shape":%d,"rarity":%d,"flavor":`, k.hue, int(k.shape), k.rarity)
+    write_json_string(sb, k.flavor)
     tint: Maybe([3]int)
     if k.fx_tint.a > 0 {
         tint = [3]int{int(k.fx_tint.r), int(k.fx_tint.g), int(k.fx_tint.b)}
@@ -938,33 +949,40 @@ export_share_code :: proc(idx: int, allocator := context.temp_allocator) -> stri
         confuse = k.fx_confuse, bursts = k.fx_bursts, tint = tint,
     }
     fxj, merr := json.marshal(fx, allocator = context.temp_allocator)
-    if merr != nil do return ""
-    strings.write_string(&sb, `,"fx":`)
-    strings.write_string(&sb, string(fxj))
+    if merr == nil {
+        strings.write_string(sb, `,"fx":`)
+        strings.write_string(sb, string(fxj))
+    }
     if k.blueprint != "" {
-        strings.write_string(&sb, `,"blueprint":`)
-        strings.write_string(&sb, k.blueprint)
-        // bundle every macro the blueprint references so codes are self-contained
-        bundle := collect_macro_bundle(k.blueprint)
-        if len(bundle) > 0 {
-            strings.write_string(&sb, `,"macros":{`)
-            first := true
-            for mname, mtext in bundle {
-                if !first do strings.write_string(&sb, ",")
-                first = false
-                write_json_string(&sb, mname)
-                strings.write_string(&sb, ":")
-                strings.write_string(&sb, mtext)
+        strings.write_string(sb, `,"blueprint":`)
+        strings.write_string(sb, k.blueprint)
+        if bundle_macros {
+            bundle := collect_macro_bundle(k.blueprint)
+            if len(bundle) > 0 {
+                strings.write_string(sb, `,"macros":{`)
+                first := true
+                for mname, mtext in bundle {
+                    if !first do strings.write_string(sb, ",")
+                    first = false
+                    write_json_string(sb, mname)
+                    strings.write_string(sb, ":")
+                    strings.write_string(sb, mtext)
+                }
+                strings.write_string(sb, "}")
             }
-            strings.write_string(&sb, "}")
         }
     }
     byline := k.byline != "" ? k.byline : creator_byline
     if byline != "" {
-        strings.write_string(&sb, `,"by":`)
-        write_json_string(&sb, byline)
+        strings.write_string(sb, `,"by":`)
+        write_json_string(sb, byline)
     }
-    strings.write_string(&sb, "}")
+    strings.write_string(sb, "}")
+}
+
+export_share_code :: proc(idx: int, allocator := context.temp_allocator) -> string {
+    sb := strings.builder_make(context.temp_allocator)
+    write_recipe_v2(&sb, kinds[idx], true)
     raw := strings.to_string(sb)
     b64, berr := base64.encode(transmute([]u8)raw, base64.ENC_URL_TABLE, allocator)
     if berr != nil do return ""
@@ -1011,13 +1029,26 @@ import_share_v1 :: proc(data: []u8) -> (int, bool) {
     return register_shared_kind(sr.name, r, "", "")
 }
 
-import_share_v2 :: proc(obj: json.Object) -> (int, bool) {
-    name := jstr_or(obj, "name", "")
-    if name == "" do return -1, false
+// a parsed v2 recipe object (share code payload / creations.json entry).
+// name/byline alias the temp-allocated JSON tree; r.flavor is an OWNED clone;
+// bp_text/bundled are compact re-serializations in temp_allocator.
+V2_Parsed :: struct {
+    name:    string,
+    r:       Recipe,
+    bp_text: string,              // "" = no blueprint (NOT yet test-compiled)
+    byline:  string,
+    bundled: map[string]string,   // optional "macros" field
+}
+
+// shared v2 recipe-object parser (share codes AND creations.json entries)
+parse_recipe_v2 :: proc(obj: json.Object) -> (V2_Parsed, bool) {
+    p: V2_Parsed
+    p.name = jstr_or(obj, "name", "")
+    if p.name == "" do return p, false
     fxv, fok := obj["fx"]
     fx, fxok := fxv.(json.Object)
-    if !fok || !fxok do return -1, false
-    r := Recipe{
+    if !fok || !fxok do return p, false
+    p.r = Recipe{
         hue = int(jnum(obj, "hue", 0)), shape = int(jnum(obj, "shape", 0)),
         rarity = int(jnum(obj, "rarity", 0)), flavor = strings.clone(jstr_or(obj, "flavor", "")),
         fx = {
@@ -1032,39 +1063,49 @@ import_share_v2 :: proc(obj: json.Object) -> (int, bool) {
     }
     if tv, tok := fx["tint"]; tok {
         if arr, aok := tv.(json.Array); aok && len(arr) == 3 {
-            r.fx.tint = [3]int{int(jnumv(arr[0], 0)), int(jnumv(arr[1], 0)), int(jnumv(arr[2], 0))}
+            p.r.fx.tint = [3]int{int(jnumv(arr[0], 0)), int(jnumv(arr[1], 0)), int(jnumv(arr[2], 0))}
         }
     }
 
     // bundled macros (re-serialized compactly for local storage)
-    bundled := make(map[string]string, allocator = context.temp_allocator)
+    p.bundled = make(map[string]string, allocator = context.temp_allocator)
     if mv, mok := obj["macros"]; mok {
         mo, mook := mv.(json.Object)
-        if !mook do return -1, false
+        if !mook do return p, false
         for mname, mval in mo {
             msb := strings.builder_make(context.temp_allocator)
             jwrite(&msb, mval)
-            bundled[strings.clone(mname, context.temp_allocator)] =
+            p.bundled[strings.clone(mname, context.temp_allocator)] =
                 strings.clone(strings.to_string(msb), context.temp_allocator)
         }
     }
 
-    // optional blueprint: must test-compile with bundled + local macros available
-    bp_text := ""
+    // optional blueprint, re-serialized compactly (caller test-compiles it)
     if bv, bok := obj["blueprint"]; bok {
         bsb := strings.builder_make(context.temp_allocator)
         jwrite(&bsb, bv)
-        bp_text = strings.to_string(bsb)
-        actions, cok := bp_compile(bp_text, &bundled)
+        p.bp_text = strings.to_string(bsb)
+    }
+
+    clamp_recipe(&p.r)
+    p.byline = jstr_or(obj, "by", "")
+    return p, true
+}
+
+import_share_v2 :: proc(obj: json.Object) -> (int, bool) {
+    p, ok := parse_recipe_v2(obj)
+    if !ok do return -1, false
+
+    // optional blueprint: must test-compile with bundled + local macros available
+    if p.bp_text != "" {
+        actions, cok := bp_compile(p.bp_text, &p.bundled)
         if !cok do return -1, false   // 蓝图无效 → 整码拒绝（分享码无效）
         bp_free_actions(&actions)
     }
 
-    clamp_recipe(&r)
-
     // register bundled macros locally — never overwrite same-named local macros
     changed := false
-    for mname, mtext in bundled {
+    for mname, mtext in p.bundled {
         if _, taken := macros[mname]; !taken {
             macros[strings.clone(mname)] = strings.clone(mtext)
             changed = true
@@ -1072,11 +1113,11 @@ import_share_v2 :: proc(obj: json.Object) -> (int, bool) {
     }
     if changed do save_macros()
 
-    return register_shared_kind(name, r, bp_text, jstr_or(obj, "by", ""))
+    return register_shared_kind(p.name, p.r, p.bp_text, p.byline)
 }
 
 // shared tail of both import versions: unique-name suffixing + kind registration
-register_shared_kind :: proc(base_name: string, r: Recipe, bp_text: string, byline: string) -> (int, bool) {
+register_shared_kind :: proc(base_name: string, r: Recipe, bp_text: string, byline: string, author := "分享") -> (int, bool) {
     name := base_name
     suffix := 1
     for {
@@ -1085,13 +1126,131 @@ register_shared_kind :: proc(base_name: string, r: Recipe, bp_text: string, byli
         name = fmt.tprintf("%s~%d", base_name, suffix)
     }
     k := gen_kind(strings.clone(name), 0) // base gives persistent name + size/spin
-    apply_recipe_to_kind(&k, r, "分享")
+    apply_recipe_to_kind(&k, r, author)
     if bp_text != "" do k.blueprint = strings.clone(bp_text)
     if byline != "" do k.byline = strings.clone(byline)
     append(&kinds, k)
     idx := len(kinds) - 1
     kind_by_name[k.name] = idx
     return idx, true
+}
+
+// ---------------------------------------------------------------------------
+// 作品库 (creations.json): the local library of 自创 works. Every 保存并投放
+// upserts the creation here; startup loads it back into the dex. Entries are
+// the same v2 recipe objects used by share codes (macros NOT bundled — the
+// local macros.json owns them). Retired kinds (dex X) are dropped on rewrite.
+// ---------------------------------------------------------------------------
+
+CREATIONS_FILE :: "creations.json"
+CREATIONS_MAX  :: 64
+
+// number of library creations currently in memory (自创 and not retired)
+creations_count :: proc() -> int {
+    n := 0
+    for k in kinds do if k.author == "自创" && !k.retired { n += 1 }
+    return n
+}
+
+// nth newest non-retired 自创 creation (0 = newest), -1 when absent
+creation_at :: proc(n: int) -> int {
+    seen := 0
+    for i := len(kinds) - 1; i >= 0; i -= 1 {
+        if kinds[i].author != "自创" || kinds[i].retired do continue
+        if seen == n do return i
+        seen += 1
+    }
+    return -1
+}
+
+// ⇧1..⇧8: cast the nth newest creation from the library
+cast_creation :: proc(n: int) {
+    idx := creation_at(n)
+    if idx < 0 do return
+    spawn_kind(idx)
+    last_cast_kind = idx
+    set_toast(fmt.tprintf("已投喂: %s", kinds[idx].name))
+}
+
+// rewrite the whole library file from memory (capped at CREATIONS_MAX entries)
+save_creations :: proc() {
+    sb := strings.builder_make(context.temp_allocator)
+    strings.write_string(&sb, `{"creations":[`)
+    first := true
+    written := 0
+    for k in kinds {
+        if k.author != "自创" || k.retired do continue
+        if written >= CREATIONS_MAX do break
+        if !first do strings.write_string(&sb, ",")
+        first = false
+        write_recipe_v2(&sb, k, false)
+        written += 1
+    }
+    strings.write_string(&sb, "]}")
+    _ = os.write_entire_file(CREATIONS_FILE, transmute([]u8)strings.to_string(sb))
+}
+
+// after a new 自创 kind entered kinds[]: refresh the library file unless full
+// (the in-session kind is kept either way; false = 作品库已满)
+creation_persist :: proc() -> bool {
+    if creations_count() > CREATIONS_MAX do return false
+    save_creations()
+    return true
+}
+
+// startup (after load_macros + make_presets): re-register the library into
+// the dex. Invalid entries are skipped silently (stdout log), never crash;
+// nothing is spawned and last_cast_kind is untouched.
+load_creations :: proc() {
+    data, err := os.read_entire_file(CREATIONS_FILE, context.temp_allocator)
+    if err != nil do return
+    root, perr := json.parse(data, .JSON, true, context.temp_allocator)
+    if perr != nil do return
+    obj, ok := root.(json.Object)
+    if !ok do return
+    cv, cok := obj["creations"]
+    arr, aok := cv.(json.Array)
+    if !cok || !aok do return
+    loaded := 0
+    for entry in arr {
+        if loaded >= CREATIONS_MAX do break
+        eo, eok := entry.(json.Object)
+        if !eok {
+            fmt.println("creations.json: skipped a non-object entry")
+            continue
+        }
+        p, pok := parse_recipe_v2(eo)
+        if !pok {
+            fmt.println("creations.json: skipped an invalid entry")
+            continue
+        }
+        // blueprint: structural check that tolerates `use` of macros deleted
+        // since saving (eat-time strict-compiles and falls back to the classic
+        // fx with the 蓝图无效 toast); bundled macros are ignored — macros.json owns them
+        if p.bp_text != "" && !bp_validate_lenient(p.bp_text) {
+            fmt.println("creations.json: skipped entry with invalid blueprint:", p.name)
+            continue
+        }
+        if _, rok := register_shared_kind(p.name, p.r, p.bp_text, p.byline, "自创"); !rok {
+            fmt.println("creations.json: skipped entry:", p.name)
+            continue
+        }
+        loaded += 1
+    }
+}
+
+// dex X: retire a 自创 kind — hidden from the dex & quick-cast list and removed
+// from the library file. kinds[] itself never moves (live foods hold indices).
+dex_retire_kind :: proc(idx: int) {
+    if idx < 0 || idx >= len(kinds) do return
+    if kinds[idx].author != "自创" {
+        set_toast("只能删除自创作品")
+        return
+    }
+    if kinds[idx].retired do return
+    kinds[idx].retired = true
+    save_creations()
+    set_toast(fmt.tprintf("已从作品库删除: %s", kinds[idx].name))
 }
 
 // ---------------------------------------------------------------------------
@@ -1371,6 +1530,7 @@ Bp_Ctx :: struct {
     extra:   ^map[string]string, // bundled macros available during validation
     depth:   int,                // current macro expansion depth
     failed:  bool,
+    allow_missing_use: bool,     // creations.json load: `use` of a deleted macro is skipped, not fatal
 }
 
 // single-key node destructuring; every blueprint node has exactly one key
@@ -1475,7 +1635,11 @@ bp_walk_node :: proc(node: json.Value, t: ^f32, ctx: ^Bp_Ctx) {
         if !sok || name == "" { ctx.failed = true; return }
         if ctx.depth >= BP_MAX_DEPTH { ctx.failed = true; return } // cycles die here
         src, found := macro_lookup(name, ctx.extra)
-        if !found { ctx.failed = true; return }
+        if !found {
+            if ctx.allow_missing_use do return // 作品库加载：容忍已被删除的原语引用
+            ctx.failed = true
+            return
+        }
         sub, perr := json.parse(transmute([]u8)src, .JSON, true, context.allocator)
         if perr != nil { ctx.failed = true; return }
         defer json.destroy_value(sub, context.allocator)
@@ -1498,13 +1662,17 @@ bp_walk_node :: proc(node: json.Value, t: ^f32, ctx: ^Bp_Ctx) {
 // Any structural violation or unknown node key fails the whole compile;
 // the caller then falls back to the kind's classic fx fields.
 bp_compile :: proc(json_text: string, extra: ^map[string]string = nil) -> ([dynamic]ScheduledAction, bool) {
+    return bp_compile_flags(json_text, extra, false)
+}
+
+bp_compile_flags :: proc(json_text: string, extra: ^map[string]string, allow_missing_use: bool) -> ([dynamic]ScheduledAction, bool) {
     root, err := json.parse(transmute([]u8)json_text, .JSON, true, context.allocator)
     if err != nil do return nil, false
     defer json.destroy_value(root, context.allocator)
     key, val, ok := bp_node_kv(root)
     arr, aok := val.(json.Array)
     if !ok || key != "do" || !aok do return nil, false
-    ctx := Bp_Ctx{extra = extra}
+    ctx := Bp_Ctx{extra = extra, allow_missing_use = allow_missing_use}
     ctx.actions = make([dynamic]ScheduledAction, 0, 8)
     t := f32(0)
     bp_walk_list(arr, &t, &ctx)
@@ -1513,6 +1681,15 @@ bp_compile :: proc(json_text: string, extra: ^map[string]string = nil) -> ([dyna
         return nil, false
     }
     return ctx.actions, true
+}
+
+// creations.json load: structural validation that skips `use` nodes whose
+// macro no longer exists (eat-time strict compile falls back with 蓝图无效)
+bp_validate_lenient :: proc(json_text: string) -> bool {
+    actions, ok := bp_compile_flags(json_text, nil, true)
+    if !ok do return false
+    bp_free_actions(&actions)
+    return true
 }
 
 bp_free_actions :: proc(actions: ^[dynamic]ScheduledAction) {
@@ -2090,6 +2267,40 @@ llm_poll :: proc() {
     llm_kind_idx = -1
 }
 
+// --- self-test helpers: inspect creations.json without touching memory ---
+
+// how many entries creations.json currently holds (-1 = unreadable/invalid)
+creations_file_count :: proc() -> int {
+    data, err := os.read_entire_file(CREATIONS_FILE, context.temp_allocator)
+    if err != nil do return -1
+    root, perr := json.parse(data, .JSON, true, context.temp_allocator)
+    if perr != nil do return -1
+    obj, ok := root.(json.Object)
+    if !ok do return -1
+    cv, cok := obj["creations"]
+    arr, aok := cv.(json.Array)
+    if !cok || !aok do return -1
+    return len(arr)
+}
+
+// does creations.json contain an entry with this name?
+creations_file_has :: proc(name: string) -> bool {
+    data, err := os.read_entire_file(CREATIONS_FILE, context.temp_allocator)
+    if err != nil do return false
+    root, perr := json.parse(data, .JSON, true, context.temp_allocator)
+    if perr != nil do return false
+    obj, ok := root.(json.Object)
+    if !ok do return false
+    cv, cok := obj["creations"]
+    arr, aok := cv.(json.Array)
+    if !cok || !aok do return false
+    for e in arr {
+        eo, eok := e.(json.Object)
+        if eok && jstr_or(eo, "name", "") == name do return true
+    }
+    return false
+}
+
 // SNAKE_SELFTEST=1: headless share-code roundtrip (runs before raylib init)
 self_test :: proc() -> bool {
     orig := FoodKind{
@@ -2601,6 +2812,170 @@ self_test :: proc() -> bool {
     }
     fmt.println("creator: PASS")
 
+    // ================= Phase 3: 作品库 (creations.json) =================
+    // snapshot creations.json so the suite never clobbers a real user file
+    orig_creations: []u8
+    orig_creations_exists := false
+    if d, err := os.read_entire_file(CREATIONS_FILE, context.allocator); err == nil {
+        orig_creations = d
+        orig_creations_exists = true
+    }
+    // clean slate for the library tests (the process exits after the suite, so
+    // in-memory kinds/foods are not restored — the files always are)
+    clear(&kinds)
+    clear(&kind_by_name)
+    clear(&foods)
+
+    // --- T14: save → load roundtrip (one creation with blueprint + byline) ---
+    creator_byline = strings.clone("测试创作者")
+    free_edit_kind()
+    edit_kind = FoodKind{
+        name = strings.clone("测试白菜"), author = "自创", flavor = strings.clone("清甜爽口"),
+        hue = 90, color = hsv_rgb(90, 0.72, 1.0), shape = .SPHERE, size = 0.3, spin = 2,
+        rarity = 0, fx_speed = 1, fx_growth = 1, fx_score = 10, fx_bursts = 1,
+    }
+    edit_has_blueprint = false
+    editor_save_kind()
+    free_edit_kind()
+    edit_kind = FoodKind{
+        name = strings.clone("测试闪电莓"), author = "自创", flavor = "",
+        hue = 280, color = hsv_rgb(280, 0.72, 1.0), shape = .GEM, size = 0.3, spin = 2,
+        rarity = 2, fx_speed = 1, fx_growth = 1, fx_score = 10, fx_bursts = 2,
+    }
+    edit_blueprint = strings.clone(`{"do":[{"growth":{"n":2}},{"delay":{"secs":1}},{"score":{"n":20}}]}`)
+    edit_has_blueprint = true
+    editor_save_kind()
+    free_edit_kind()
+    delete(creator_byline)
+    creator_byline = ""
+    if creations_count() != 2 {
+        fmt.println("SELFTEST FAIL: creations count after saves:", creations_count())
+        return false
+    }
+    // wipe the in-memory registry, then reload purely from the file
+    clear(&kinds)
+    clear(&kind_by_name)
+    clear(&foods)
+    load_creations()
+    idx_a, has_a := kind_by_name["测试白菜"]
+    idx_b, has_b := kind_by_name["测试闪电莓"]
+    if !has_a || !has_b || len(kinds) != 2 {
+        fmt.println("SELFTEST FAIL: creations reload", len(kinds), has_a, has_b)
+        return false
+    }
+    ka14, kb14 := kinds[idx_a], kinds[idx_b]
+    if ka14.author != "自创" || kb14.author != "自创" ||
+       ka14.byline != "测试创作者" || ka14.flavor != "清甜爽口" ||
+       ka14.fx_score != 10 || ka14.hue != 90 {
+        fmt.println("SELFTEST FAIL: creations roundtrip fields", ka14.author, ka14.byline)
+        return false
+    }
+    if kb14.byline != "测试创作者" || kb14.blueprint == "" {
+        fmt.println("SELFTEST FAIL: creations blueprint/byline lost:", kb14.byline)
+        return false
+    }
+    acts14, ok14 := bp_compile(kb14.blueprint)
+    if !ok14 || len(acts14) != 2 || acts14[0].at != 0 || acts14[1].at != 1 {
+        fmt.println("SELFTEST FAIL: reloaded blueprint does not compile", ok14, len(acts14))
+        return false
+    }
+    bp_free_actions(&acts14)
+    fmt.println("creations roundtrip: PASS")
+
+    // --- T15: 64-entry cap — a 65th save is refused (file keeps 64) ---
+    for i in 0..<62 {
+        nk := gen_kind(strings.clone(fmt.tprintf("占位%d", i)), 0)
+        nk.author = "自创"
+        append(&kinds, nk)
+        kind_by_name[nk.name] = len(kinds) - 1
+    }
+    if creations_count() != CREATIONS_MAX {
+        fmt.println("SELFTEST FAIL: expected 64 creations:", creations_count())
+        return false
+    }
+    save_creations()
+    if creations_file_count() != CREATIONS_MAX {
+        fmt.println("SELFTEST FAIL: creations file should hold 64:", creations_file_count())
+        return false
+    }
+    over := gen_kind(strings.clone("溢出"), 0)
+    over.author = "自创"
+    append(&kinds, over)
+    kind_by_name[over.name] = len(kinds) - 1
+    if creation_persist() {
+        fmt.println("SELFTEST FAIL: 65th creation save was not refused")
+        return false
+    }
+    if creations_file_count() != CREATIONS_MAX || creations_file_has("溢出") {
+        fmt.println("SELFTEST FAIL: refused save still touched the file")
+        return false
+    }
+    fmt.println("creations cap: PASS")
+
+    // --- T16: quick-list order — newest first, retired skipped ---
+    na := gen_kind(strings.clone("新甲"), 0)
+    na.author = "自创"
+    append(&kinds, na)
+    kind_by_name[na.name] = len(kinds) - 1
+    nb := gen_kind(strings.clone("新乙"), 0)
+    nb.author = "自创"
+    append(&kinds, nb)
+    kind_by_name[nb.name] = len(kinds) - 1
+    if creation_at(0) != kind_by_name["新乙"] || creation_at(1) != kind_by_name["新甲"] {
+        fmt.println("SELFTEST FAIL: quick list order", creation_at(0), creation_at(1))
+        return false
+    }
+    kinds[kind_by_name["新乙"]].retired = true
+    if creation_at(0) != kind_by_name["新甲"] {
+        fmt.println("SELFTEST FAIL: retired kind not skipped")
+        return false
+    }
+    fmt.println("quick list: PASS")
+
+    // --- T17: retire — removed from file & quick list, kinds[] untouched ---
+    n0 := len(kinds)
+    victim := kind_by_name["占位0"]
+    cnt0 := creations_count()
+    dex_retire_kind(victim)
+    if len(kinds) != n0 || creations_count() != cnt0 - 1 {
+        fmt.println("SELFTEST FAIL: retire moved kinds[] or miscounted", len(kinds), creations_count())
+        return false
+    }
+    if !kinds[victim].retired {
+        fmt.println("SELFTEST FAIL: retire flag not set")
+        return false
+    }
+    for i in 0..<8 {
+        if creation_at(i) == victim {
+            fmt.println("SELFTEST FAIL: retired kind still in quick list")
+            return false
+        }
+    }
+    if creations_file_has("占位0") || creations_file_count() != CREATIONS_MAX {
+        fmt.println("SELFTEST FAIL: retired kind still in file:", creations_file_count())
+        return false
+    }
+    // X on a non-自创 row must be refused
+    pk := gen_kind(strings.clone("预设替身"), 0)
+    pk.author = "预设"
+    append(&kinds, pk)
+    kind_by_name[pk.name] = len(kinds) - 1
+    dex_retire_kind(kind_by_name["预设替身"])
+    if kinds[kind_by_name["预设替身"]].retired {
+        fmt.println("SELFTEST FAIL: non-自创 kind was retired")
+        return false
+    }
+    fmt.println("retire: PASS")
+
+    // restore creations.json exactly as found
+    if orig_creations_exists {
+        _ = os.write_entire_file(CREATIONS_FILE, orig_creations)
+        delete(orig_creations)
+    } else {
+        _ = os.remove(CREATIONS_FILE)
+    }
+    fmt.println("creations: ALL PASS")
+
     fmt.println("blueprint engine: ALL PASS")
     return true
 }
@@ -2869,25 +3244,40 @@ handle_input :: proc() {
                 // 创造台：图鉴打开时克隆选中行（以此为基础改造），否则空白模板
                 rows := dex_visible_rows()
                 if dex_open && rows > 0 {
-                    editor_open_from(min(dex_sel, rows - 1))
+                    editor_open_from(dex_kind_at(min(dex_sel, rows - 1)))
                 } else {
                     editor_open_blank()
                 }
             }
-            if rl.IsKeyPressed(.ONE)   do cast_preset(0)
-            if rl.IsKeyPressed(.TWO)   do cast_preset(1)
-            if rl.IsKeyPressed(.THREE) do cast_preset(2)
-            if rl.IsKeyPressed(.FOUR)  do cast_preset(3)
-            if rl.IsKeyPressed(.FIVE)  do cast_preset(4)
-            if rl.IsKeyPressed(.SIX)   do cast_preset(5)
-            if rl.IsKeyPressed(.SEVEN) do cast_preset(6)
-            if rl.IsKeyPressed(.EIGHT) do cast_preset(7)
+            // 1-8 预设；⇧1-8 作品库快捷投放（新的在前；图鉴打开时 ⇧ 无效）
+            shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
+            if rl.IsKeyPressed(.ONE)   do feed_digit(0, shift)
+            if rl.IsKeyPressed(.TWO)   do feed_digit(1, shift)
+            if rl.IsKeyPressed(.THREE) do feed_digit(2, shift)
+            if rl.IsKeyPressed(.FOUR)  do feed_digit(3, shift)
+            if rl.IsKeyPressed(.FIVE)  do feed_digit(4, shift)
+            if rl.IsKeyPressed(.SIX)   do feed_digit(5, shift)
+            if rl.IsKeyPressed(.SEVEN) do feed_digit(6, shift)
+            if rl.IsKeyPressed(.EIGHT) do feed_digit(7, shift)
             if dex_open {
                 rows := dex_visible_rows()
                 if rl.IsKeyPressed(.UP)   do dex_sel = max(0, dex_sel - 1)
                 if rl.IsKeyPressed(.DOWN) && rows > 0 do dex_sel = min(rows - 1, dex_sel + 1)
                 if rl.IsKeyPressed(.C) && rows > 0 {
-                    copy_share_code(min(dex_sel, rows - 1))
+                    copy_share_code(dex_kind_at(min(dex_sel, rows - 1)))
+                }
+                if (rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.KP_ENTER)) && rows > 0 {
+                    // Enter: 立即投喂选中的食物（图鉴保持打开）
+                    idx := dex_kind_at(min(dex_sel, rows - 1))
+                    if idx >= 0 {
+                        spawn_kind(idx)
+                        last_cast_kind = idx
+                        set_toast(fmt.tprintf("已投喂: %s", kinds[idx].name))
+                    }
+                }
+                if rl.IsKeyPressed(.X) && rows > 0 {
+                    // X: 从作品库删除选中的自创作品
+                    dex_retire_kind(dex_kind_at(min(dex_sel, rows - 1)))
                 }
             } else if rl.IsKeyPressed(.C) && last_cast_kind >= 0 && last_cast_kind < len(kinds) {
                 copy_share_code(last_cast_kind)
@@ -3318,7 +3708,11 @@ editor_save_kind :: proc() -> int {
     kind_by_name[k.name] = idx
     spawn_kind(idx)
     last_cast_kind = idx
-    set_toast(fmt.tprintf("已保存并投放: %s", k.name))
+    if creation_persist() {
+        set_toast(fmt.tprintf("已保存并投放: %s", k.name))
+    } else {
+        set_toast("作品库已满(64)，请在图鉴按 X 删除一些")
+    }
     return idx
 }
 
@@ -3983,38 +4377,59 @@ dex_row_h :: proc(k: FoodKind) -> i32 {
 }
 
 // how many kinds fit the panel with the current (variable) row heights
+// (retired 作品库 kinds are hidden from the dex)
 dex_visible_rows :: proc() -> int {
-    budget := SCREEN_H - 170 - 40 - 60 // panel top, bottom margin, header
+    budget := SCREEN_H - 170 - 40 - 60 - 26 // panel top, bottom margin, header, footer
     rows := 0
     used := 0
-    for rows < len(kinds) {
-        used += int(dex_row_h(kinds[rows]))
+    for k in kinds {
+        if k.retired do continue
+        used += int(dex_row_h(k))
         if used > budget do break
         rows += 1
     }
     return rows
 }
 
-// 图鉴: all food kinds discovered so far (↑/↓ select, C copies the share code)
+// kinds index of the nth non-retired kind (dex row -> kinds index), -1 if absent
+dex_kind_at :: proc(row: int) -> int {
+    n := 0
+    for k, i in kinds {
+        if k.retired do continue
+        if n == row do return i
+        n += 1
+    }
+    return -1
+}
+
+// all non-retired kinds indices, in dex order (temp allocator)
+dex_visible_list :: proc() -> []int {
+    list := make([dynamic]int, 0, len(kinds), context.temp_allocator)
+    for k, i in kinds do if !k.retired { append(&list, i) }
+    return list[:]
+}
+
+// 图鉴: all food kinds discovered so far (↑/↓ select, Enter 投喂, X 删除自创, C copies the share code)
 draw_dex :: proc() {
     if !dex_open do return
     w: i32 = 360
     x := SCREEN_W - w - 20
     y: i32 = 170
+    vis := dex_visible_list()
     rows := dex_visible_rows()
     total := 0
-    for i in 0..<rows do total += int(dex_row_h(kinds[i]))
-    h := i32(60 + total)
+    for i in 0..<rows do total += int(dex_row_h(kinds[vis[i]]))
+    h := i32(60 + total + 26) // header + rows + footer hints
     rl.DrawRectangle(x, y, w, h, {12, 14, 24, 225})
     rl.DrawRectangleLinesEx({f32(x), f32(y), f32(w), f32(h)}, 1, {120, 128, 150, 180})
-    draw_text(fmt.ctprintf("食物图鉴 · 已发现 %d 种", len(kinds)), x + 16, y + 12, 20,
+    draw_text(fmt.ctprintf("食物图鉴 · 已发现 %d 种", len(vis)), x + 16, y + 12, 20,
         rl.RAYWHITE, true)
 
     buf: [192]u8
     sel := min(dex_sel, rows - 1)
     ry := y + 44
     for i in 0..<rows {
-        k := kinds[i]
+        k := kinds[vis[i]]
         if i == sel {
             rl.DrawRectangle(x + 6, ry - 4, w - 12, dex_row_h(k), {70, 90, 130, 70})
         }
@@ -4056,10 +4471,11 @@ draw_dex :: proc() {
         }
         ry += dex_row_h(k)
     }
-    if len(kinds) > rows {
-        draw_text(fmt.ctprintf("... and %d more", len(kinds) - rows), x + 40, ry, 14,
+    if len(vis) > rows {
+        draw_text(fmt.ctprintf("... and %d more", len(vis) - rows), x + 40, ry, 14,
             {120, 125, 140, 255})
     }
+    draw_text("Enter 投喂 · X 删除 · C 复制", x + 16, y + h - 24, 13, {140, 145, 160, 255})
 }
 
 draw_input_box :: proc() {
@@ -4260,7 +4676,7 @@ CJK_SOURCE :: [?]string{
     "速度倍率 持续 生长 分数 震屏 烟花 闪光 无 清除 恢复滑杆编辑 效果 解析 添加 描述创意 让 按 你 的 设计 存为原语 之后 引用 需要 先有 保存并投放 分享码 先保存再复制 放弃 不保存 选择 调整 确认 关闭 跳过 下次 再设 昵称 一句话 可空 想要 来",
     "已清除 未配置 只能手动 忙请稍候 不能为空 保存失败 已保存 时可以 请换个说法 请重试或 先有蓝图才能 无名料理 设计中 金身 得分 自创 样品",
     "速度不变 长 炸掉尾巴 长度不变 全屏 粒子 下个蛋 无敌护盾 掉头反转 立刻 秒后 重复次 概率 宏 未定义 共条 我的食物 火箭辣椒 坠毁 咯哒",
-    "★×°…·「」（），。？： › ←↑→↓ 、",
+    "★×°…·「」（），。？： › ←↑→↓ 、 ⇧ 删",
 }
 
 // top-1400 Han chars by frequency, counted from ~100k chars of real Chinese
@@ -4567,6 +4983,22 @@ draw_hud :: proc() {
             pulse := 0.6 + 0.4 * math.sin(time_total * 6)
             draw_text(fmt.ctprintf("AI 烹饪中: %s...", llm_word), 26, fy, 17,
                 {255, u8(180 + 40 * pulse), 110, 255}, true)
+        }
+        // 作品库快捷投放提示（⇧1-8，新作品优先，名字截断到 6 字）
+        {
+            sb := strings.builder_make(context.temp_allocator)
+            strings.write_string(&sb, "⇧1-8 自创: ")
+            n := 0
+            for i in 0..<8 {
+                idx := creation_at(i)
+                if idx < 0 do break
+                if i > 0 do strings.write_string(&sb, " ")
+                strings.write_string(&sb, utf8_prefix(kinds[idx].name, 6))
+                n += 1
+            }
+            if n == 0 do strings.write_string(&sb, "(按 E 创造)")
+            draw_text(fmt.ctprintf("%s", strings.to_string(sb)), 26, SCREEN_H - 58, 14,
+                rl.Color{125, 130, 145, 220})
         }
         draw_text("T: 投喂    1-8: 快捷食物    E: 创造台    Tab: 图鉴    C: 复制分享码    V: 视角    M: 皮肤    IJKL: 转视角    P/Space: 暂停    R: 重开",
             26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
@@ -4879,6 +5311,7 @@ main :: proc() {
     creator_byline = os.get_env("SNAKE_CREATOR", context.allocator)
     load_creator() // creator.txt（env SNAKE_CREATOR 优先）
     make_presets()
+    load_creations() // 作品库（creations.json）— 预设之后注册，不投放不碰 last_cast
     reset_game()
 
     shots := 0

@@ -5,6 +5,7 @@ snake3d-*.zip
 
 # runtime data
 best.txt
+creations.json
 
 # debug captures
 dbg*.png
