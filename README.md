@@ -17,7 +17,10 @@ generates a food from it: color, shape, spin, rarity, and 1–3 effects
 (speed burst, freeze, growth, body chop, score bonus/penalty, dizziness,
 explosion…). The AI places it in the cube and hunts it down.
 
-![feeding lab](docs/feeding.png)
+![feeding lab demo](docs/feeding.gif)
+
+*A scripted tasting menu: apple + star → chili speed rage → grenade blows
+the tail off → poop & poison mushroom (the snake will remember these).*
 
 - **8 preset foods** on keys `1`–`8`: 苹果, 辣椒 (speed rage), 冰棍 (slow-mo),
   手榴弹 (blows off tail segments), 便便 (score penalty), 毒蘑菇 (dizziness),
