@@ -71,8 +71,9 @@ autopilot threads the maze while the tri-view minimap tracks every wall.*
 
 ![Battle-report card](docs/report.png)
 
-*Auto-generated on classic death, or press `G` anytime in the Feeding Lab:
-an 800×450 card saved next to the binary, `C` copies the text version.*
+*Auto-generated on death in both manual classic and the Feeding Lab — and
+press `G` anytime mid-feeding too: an 800×450 card saved next to the binary,
+`C` copies the text version.*
 
 | Workshop · manual design | Workshop · AI blueprint |
 | :---: | :---: |
@@ -175,13 +176,14 @@ title screen; any key exits.
 | `V` | First-person / orbit camera |
 | `IJKL` / mouse drag | Rotate / orbit the cube, `U`/`O`/wheel zoom |
 | `-` / `=` | Slow down / speed up |
-| `P` / `Space` | Pause · `R` restart |
+| `P` / `Space` | Pause (`Q` back to title while paused) · `R` restart |
+| Game-over screen | `Enter` play again · `Esc` back to title (feeding deaths stop here too, report card included) |
 | `H` | Tutorial (restart anytime, title or in-game) |
 | `N` | Cycle obstacle map (title screen, 5 built-ins) |
 
 Feeding Lab: `T` feed box · `1-8` presets · `⇧1-8` quick-cast creations ·
 `E` workshop · `Tab` dex (`↑↓` select, `Enter` cast, `X` delete creation,
-`C` copy share code, `E` remix) · `G` battle-report card (auto on classic
+`C` copy share code, `E` remix) · `G` battle-report card (auto-generated on
 death; `C` copies the text report) · `Cmd+V` paste a share code
 
 Workshop: `↑↓` fields · `←→` adjust · `Enter` edit/confirm · `Esc` close
@@ -199,9 +201,9 @@ odin build . -out:shinake -o:speed
 ```
 
 Single file `main.odin`, no other dependencies. Headless self-tests:
-`SNAKE_SELFTEST=1 ./shinake` (37 checks: share codes, blueprint engine,
+`SNAKE_SELFTEST=1 ./shinake` (39 checks: share codes, blueprint engine,
 library, picky-eater regression, tutorial + attract state machines,
-battle report, obstacle maps), `SNAKE_LLMTEST=1` (LLM path, with `mock_llm.py`),
+battle report, obstacle maps, game-over flow), `SNAKE_LLMTEST=1` (LLM path, with `mock_llm.py`),
 `SNAKE_SHOT=1` (offscreen captures), `SNAKE_RECORD=<dir>` (demo-reel
 frames), `SNAKE_REPORT=1` (sample battle-report card).
 </details>

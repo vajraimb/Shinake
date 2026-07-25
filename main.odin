@@ -536,6 +536,24 @@ die :: proc() {
     clear_sched_queue()  // 死亡即清空蓝图计划动作
 }
 
+// 死亡后是否自动重开：仅 attract 演示 或 经典模式自动驾驶（观赏场景）
+gameover_auto_restart :: proc() -> bool {
+    return attract_active || (game_mode == .CLASSIC && autopilot)
+}
+
+// 死亡后是否生成战报卡：投喂（非演示）或 经典手动
+gameover_wants_report :: proc() -> bool {
+    if attract_active do return false
+    return game_mode == .FEEDING || (game_mode == .CLASSIC && !autopilot)
+}
+
+// 回标题：保留当前地图选择与 game_mode，重置闲置计时
+back_to_title :: proc() {
+    state = .TITLE
+    title_idle_t = 0
+    reset_game()
+}
+
 // ---------------------------------------------------------------------------
 // Autopilot (B): BFS pathfinding to the food with a survival simulation,
 // tail-chasing as fallback — the classic snake-AI strategy
@@ -3955,6 +3973,55 @@ self_test :: proc() -> bool {
     }
     fmt.println("map persistence: PASS")
 
+    // --- T33: gameover_auto_restart / gameover_wants_report 判定矩阵 ---
+    {
+        // 投喂（非演示）：停屏 + 出战报
+        attract_active = false
+        game_mode = .FEEDING
+        autopilot = true
+        m33 := !gameover_auto_restart() && gameover_wants_report()
+        // 经典手动：停屏 + 出战报
+        game_mode = .CLASSIC
+        autopilot = false
+        m33 = m33 && !gameover_auto_restart() && gameover_wants_report()
+        // 经典自动驾驶（观赏）：自动重开 + 不出战报
+        game_mode = .CLASSIC
+        autopilot = true
+        m33 = m33 && gameover_auto_restart() && !gameover_wants_report()
+        if !m33 {
+            fmt.println("SELFTEST FAIL: gameover decision matrix (non-attract)")
+            return false
+        }
+        // attract 演示（投喂 + autopilot）：自动重开 + 不出战报
+        attract_begin()
+        m33 = attract_active && gameover_auto_restart() && !gameover_wants_report()
+        attract_exit() // 还原 attract_active / 地图 / state，不污染后续测试
+        if !m33 || attract_active {
+            fmt.println("SELFTEST FAIL: gameover decision matrix (attract)")
+            return false
+        }
+        fmt.println("gameover decision matrix: PASS")
+    }
+
+    // --- T34: back_to_title — 停到标题、地图不换、战局清零 ---
+    {
+        map_apply(.PILLARS)
+        game_mode = .CLASSIC
+        autopilot = false
+        reset_game()
+        score = 42
+        title_idle_t = 12.3
+        state = .GAME_OVER
+        back_to_title()
+        if state != .TITLE || map_id != .PILLARS || score != 0 ||
+           len(snake) != 3 || title_idle_t != 0 {
+            fmt.println("SELFTEST FAIL: back_to_title", state, map_id, score,
+                len(snake), title_idle_t)
+            return false
+        }
+        fmt.println("back_to_title: PASS")
+    }
+
     // restore the map state + game shell exactly as found
     current_map = st_map
     map_id = st_id
@@ -6476,8 +6543,8 @@ draw_title :: proc() {
 
 draw_game_over :: proc() {
     rl.DrawRectangle(0, 0, SCREEN_W, SCREEN_H, rl.Color{20, 0, 0, 150})
-    // 经典阵亡且战报卡已生成：卡片式布局
-    if game_mode == .CLASSIC && report_tex.id != 0 {
+    // 战报卡已生成（经典手动 / 投喂阵亡）：卡片式布局
+    if report_tex.id != 0 {
         draw_centered("GAME OVER", 40, 60, rl.RED, true)
         scale: f32 = 560.0 / REPORT_W
         w: f32 = 560
@@ -6490,7 +6557,7 @@ draw_game_over :: proc() {
         hint: cstring = "C 复制文字战报"
         if report_file != "" do hint = fmt.ctprintf("战报已保存 %s · C 复制文字战报", report_file)
         draw_centered(hint, y + 56, 22, rl.Color{200, 205, 220, 255})
-        draw_centered("Press ENTER to play again", y + 94, 24, rl.LIGHTGRAY)
+        draw_centered("Enter 再来一局 · Esc 回标题", y + 94, 24, rl.LIGHTGRAY)
         return
     }
     draw_centered("GAME OVER", SCREEN_H/2 - 120, 76, rl.RED, true)
@@ -6500,20 +6567,20 @@ draw_game_over :: proc() {
     } else {
         draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 16, 23, rl.GOLD)
     }
-    draw_centered("Press ENTER to play again", SCREEN_H/2 + 68, 25, rl.LIGHTGRAY)
+    draw_centered("Enter 再来一局 · Esc 回标题", SCREEN_H/2 + 68, 25, rl.LIGHTGRAY)
 }
 
 draw_win :: proc() {
     rl.DrawRectangle(0, 0, SCREEN_W, SCREEN_H, rl.Color{0, 20, 0, 150})
     draw_centered("YOU WIN!", SCREEN_H/2 - 120, 76, rl.LIME, true)
     draw_centered(fmt.ctprintf("Final score: %d", score), SCREEN_H/2 - 28, 34, rl.RAYWHITE)
-    draw_centered("Press ENTER to play again", SCREEN_H/2 + 30, 25, rl.LIGHTGRAY)
+    draw_centered("Enter 再来一局 · Esc 回标题", SCREEN_H/2 + 30, 25, rl.LIGHTGRAY)
 }
 
 draw_paused :: proc() {
     rl.DrawRectangle(0, 0, SCREEN_W, SCREEN_H, rl.Color{0, 0, 0, 110})
     draw_centered("PAUSED", SCREEN_H/2 - 46, 64, rl.RAYWHITE, true)
-    draw_centered("Drag to orbit and inspect - P or SPACE to resume", SCREEN_H/2 + 32, 23, rl.LIGHTGRAY)
+    draw_centered("拖动旋转视角 · P/Space 继续 · Q 回标题", SCREEN_H/2 + 32, 23, rl.LIGHTGRAY)
 }
 
 // ---------------------------------------------------------------------------
@@ -6674,8 +6741,8 @@ record_capture :: proc(rt: rl.RenderTexture2D, filename: cstring, alpha: f32) {
 
 // ---------------------------------------------------------------------------
 // 战报图 (battle report card): 800x450 PNG 战绩卡 + 可复制的文字战报
-// 经典模式阵亡自动生成一次（autopilot 自动重开时不刷文件）；
-// 投喂模式随时按 G 生成并复制文字版，浮层展示至任意键。
+// 阵亡自动生成一次（经典手动 + 投喂；演示/观赏自动驾驶不刷文件）；
+// 投喂模式游戏中随时按 G 生成并复制文字版，浮层展示至任意键。
 // ---------------------------------------------------------------------------
 
 REPORT_W :: 800
@@ -7204,25 +7271,31 @@ main :: proc() {
         case .PAUSED:
             if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) do state = .PLAYING
             if rl.IsKeyPressed(.R) { reset_game(); state = .PLAYING }
+            // Q: 回标题（保留地图与 game_mode 选择）
+            if rl.IsKeyPressed(.Q) { back_to_title() }
             // allow inspecting from the other view while paused
             if rl.IsKeyPressed(.V) do toggle_view()
             if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
         case .GAME_OVER, .WIN:
-            // 经典模式阵亡：自动生成战报卡一次（autopilot 会自动重开，不刷文件）
-            if state == .GAME_OVER && game_mode == .CLASSIC && !autopilot && !report_ready {
+            // 阵亡自动生成战报卡一次：经典手动 + 投喂（非演示）都出卡
+            if state == .GAME_OVER && gameover_wants_report() && !report_ready {
                 report_generate()
             }
-            // C: 复制文字战报（两种模式都行；投喂阵亡有 1.5s 窗口也可按）
+            // C: 复制文字战报（两种模式都行；结算屏常驻，随时可按）
             if state == .GAME_OVER && !editor_open && rl.IsKeyPressed(.C) {
                 report_copy_text()
             }
-            // 创造台打开时 Enter/R 属于编辑器（投喂模式 autopilot 会自动重开）
+            // 创造台打开时 Enter/R 属于编辑器
             if !editor_open && (rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.R)) {
                 reset_game()
                 state = .PLAYING
             }
-            // autopilot 死亡后自动重开，继续演示
-            if autopilot && state == .GAME_OVER {
+            // Esc: 回标题（保留地图与 game_mode 选择）
+            if !editor_open && !input_open && edit_target == .NONE && rl.IsKeyPressed(.ESCAPE) {
+                back_to_title()
+            }
+            // attract 演示 / 经典观赏自动驾驶：死亡后自动重开，继续演出
+            if state == .GAME_OVER && gameover_auto_restart() {
                 restart_timer -= dt
                 if restart_timer <= 0 {
                     reset_game()
@@ -7251,6 +7324,12 @@ main :: proc() {
 
         // DEBUG: offscreen captures (reliable even when the window is occluded)
         if shot_mode {
+            // 剧本投喂段：阵亡立即重开保持演示连续性（产生的战报文件删掉，不留残留）
+            if shots >= 1 && shots <= 5 && state == .GAME_OVER {
+                if report_file != "" do os.remove(report_file)
+                reset_game()
+                state = .PLAYING
+            }
             if shots == 0 && time_total > 0.4 {
                 capture("shot_title.png", alpha)
                 shots = 1
@@ -7300,6 +7379,28 @@ main :: proc() {
                 capture("shot_map.png", alpha)
                 shots = 8
             } else if shots == 8 {
+                // 经典模式死亡现场：结算屏 + 战报卡（README/验收截图）
+                game_mode = .CLASSIC
+                autopilot = false
+                reset_game()
+                state = .PLAYING
+                // 填些好看的数据，让战报卡有内容
+                score = 120
+                eaten = 12
+                play_clock = 95
+                for len(snake) < 12 {
+                    tail := snake[len(snake) - 1]
+                    append(&snake, tail)
+                    append(&prev_snake, tail)
+                }
+                state = .GAME_OVER
+                report_generate()
+                shots = 9
+            } else if shots == 9 && time_total > 18.8 {
+                capture("shot_gameover.png", alpha)
+                if report_file != "" do os.remove(report_file) // 截图用的战报文件不留残留
+                shots = 10
+            } else if shots == 10 {
                 break // 截图完成，自动退出
             }
         }
