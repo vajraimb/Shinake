@@ -176,6 +176,13 @@ creator_asked    := false       // nickname prompt already shown this session
 toast          : string          // owned clone
 toast_t        : f32 = 0
 
+// --- 战报图 (battle report card) state ---
+session_eaten  : map[string]int  // 食物名 -> 本局吃掉次数（投喂模式；经典模式不记）
+report_tex     : rl.Texture2D    // 最近生成的战报卡（id != 0 时可上屏）
+report_ready   := false          // 本局战报已生成过（防止每帧重复生成）
+report_open    := false          // 投喂模式 G 键弹出的战报浮层
+report_file    : string          // 最近保存的 PNG 文件名（owned clone）
+
 // --- 教练模式 (interactive tutorial) + 演示模式 (attract loop) state ---
 tutorial_active    := false
 tutorial_step      := 0
@@ -355,6 +362,8 @@ reset_game :: proc() {
     input_len = 0
     ai_has_target = false
     clear(&immune_toasted)
+    clear(&session_eaten)
+    report_clear()
 
     if game_mode == .FEEDING {
         // 投喂模式：AI 常驻，自己起跑，等玩家投喂
@@ -3358,6 +3367,132 @@ self_test :: proc() -> bool {
     title_idle_t = 0
     fmt.println("attract: PASS")
 
+    // ================= Phase 6: 战报图 (battle report) =================
+    // --- T24: 段位 thresholds — classic by score, feeding by eaten ---
+    {
+        ok24 := true
+        check24 :: proc(ok: ^bool, got: string, want: string) {
+            if got != want {
+                fmt.println("SELFTEST FAIL: rank mismatch, got", got, "want", want)
+                ok^ = false
+            }
+        }
+        t, _ := rank_classic(0);   check24(&ok24, t, "蛇界萌新")
+        t, _  = rank_classic(49);  check24(&ok24, t, "蛇界萌新")
+        t, _  = rank_classic(50);  check24(&ok24, t, "初出茅庐")
+        t, _  = rank_classic(149); check24(&ok24, t, "初出茅庐")
+        t, _  = rank_classic(150); check24(&ok24, t, "老练机长")
+        t, _  = rank_classic(299); check24(&ok24, t, "老练机长")
+        t, _  = rank_classic(300); check24(&ok24, t, "立方体传说")
+        t, _  = rank_classic(499); check24(&ok24, t, "立方体传说")
+        t, _  = rank_classic(500); check24(&ok24, t, "三维之神")
+        t, _  = rank_feeding(0);   check24(&ok24, t, "新手饲养员")
+        t, _  = rank_feeding(9);   check24(&ok24, t, "新手饲养员")
+        t, _  = rank_feeding(10);  check24(&ok24, t, "资深饲养员")
+        t, _  = rank_feeding(24);  check24(&ok24, t, "资深饲养员")
+        t, _  = rank_feeding(25);  check24(&ok24, t, "黑暗料理大师")
+        t, _  = rank_feeding(49);  check24(&ok24, t, "黑暗料理大师")
+        t, _  = rank_feeding(50);  check24(&ok24, t, "食神下凡")
+        if !ok24 do return false
+        fmt.println("report ranks: PASS")
+    }
+
+    // --- T25: session_eaten accounting — two eats of one kind, reset clears ---
+    {
+        game_mode = .FEEDING
+        reset_game()
+        if len(session_eaten) != 0 {
+            fmt.println("SELFTEST FAIL: session_eaten not empty after reset")
+            return false
+        }
+        // benign kind: no tail-blast, no confusion — deterministic eat path
+        tk := FoodKind{
+            name = strings.clone("自测榴莲"), author = "AI",
+            hue = 45, color = hsv_rgb(45, 0.72, 1.0), shape = .SPHERE,
+            rarity = 1, fx_growth = 1, fx_score = 10, fx_bursts = 1,
+        }
+        append(&kinds, tk)
+        kind_by_name[tk.name] = len(kinds) - 1
+        clear(&foods)
+        append(&foods, Food{kind = len(kinds) - 1, pos = {1, 2, 3}})
+        eat_food(0)
+        append(&foods, Food{kind = len(kinds) - 1, pos = {4, 5, 6}})
+        eat_food(0)
+        if session_eaten["自测榴莲"] != 2 || eaten != 2 {
+            fmt.println("SELFTEST FAIL: session_eaten count:",
+                session_eaten["自测榴莲"], "eaten:", eaten)
+            return false
+        }
+        reset_game()
+        if len(session_eaten) != 0 {
+            fmt.println("SELFTEST FAIL: reset_game did not clear session_eaten")
+            return false
+        }
+        fmt.println("report session accounting: PASS")
+    }
+
+    // --- T26: report_text — feeding content, classic no-menu, menu cap <=8 ---
+    {
+        ob := best
+        game_mode = .FEEDING
+        reset_game()
+        score = 320
+        best = 670
+        eaten = 28
+        play_clock = 754
+        // 榴莲×3 必须排第一；再注册 11 种各 ×1，菜单行最多列 8 条
+        duri := kind_index("榴莲")
+        session_eaten[kinds[duri].name] = 3
+        extras := [?]string{"彩虹糖", "虚空布丁", "闪电莓", "老干妈", "香菜",
+            "螺蛳粉", "臭豆腐", "仰望星空", "鲱鱼罐头", "蓝纹奶酪", "豆汁儿"}
+        for n in extras {
+            idx := kind_index(n)
+            session_eaten[kinds[idx].name] = 1
+        }
+        t := report_text()
+        must := [?]string{"得分 320", "投喂 28 个", "榴莲×3", "奇葩菜单：",
+            "段位：黑暗料理大师", "github.com/vajraimb/Shinake"}
+        for m in must {
+            if !strings.contains(t, m) {
+                fmt.println("SELFTEST FAIL: feeding report_text missing:", m)
+                return false
+            }
+        }
+        // menu line caps at 8 entries even with 12 kinds eaten
+        menu_start := strings.index(t, "奇葩菜单：")
+        menu_rest := t[menu_start:]
+        menu_end := strings.index(menu_rest, "\n")
+        menu_line := menu_rest[:menu_end]
+        if strings.count(menu_line, "×") != 8 {
+            fmt.println("SELFTEST FAIL: menu line entries != 8:", menu_line)
+            return false
+        }
+        if !strings.has_prefix(menu_line, "奇葩菜单：榴莲×3") {
+            fmt.println("SELFTEST FAIL: menu not sorted by count desc:", menu_line)
+            return false
+        }
+        // classic variant: no menu line, has rank + duration
+        game_mode = .CLASSIC
+        score = 40
+        tc := report_text()
+        if strings.contains(tc, "奇葩菜单") {
+            fmt.println("SELFTEST FAIL: classic report_text has a menu line")
+            return false
+        }
+        mustc := [?]string{"经典模式", "得分 40", "时长 12:34", "段位：蛇界萌新"}
+        for m in mustc {
+            if !strings.contains(tc, m) {
+                fmt.println("SELFTEST FAIL: classic report_text missing:", m)
+                return false
+            }
+        }
+        reset_game()
+        best = ob
+        game_mode = .CLASSIC
+        state = .TITLE
+        fmt.println("report text: PASS")
+    }
+
     // restore tutorial.txt exactly as found
     if orig_tut_exists {
         _ = os.write_entire_file(TUTORIAL_FILE, orig_tut)
@@ -3513,6 +3648,7 @@ eat_food :: proc(i: int) {
     f := foods[i]
     k := &kinds[f.kind]
     eaten += 1
+    session_eaten[k.name] += 1 // 战报奇葩菜单用（kinds[].name 常驻，引用安全）
     blueprint_ok := false
     if k.blueprint != "" {
         actions, ok := bp_compile(k.blueprint)
@@ -3658,6 +3794,13 @@ handle_input :: proc() {
                 } else {
                     editor_open_blank()
                 }
+            }
+            // G: 战报图 — 生成战绩卡 PNG + 复制文字版 + 浮层展示至任意键
+            if rl.IsKeyPressed(.G) {
+                name := report_generate()
+                report_copy_text(false) // toast 统一在下面发
+                report_open = report_tex.id != 0
+                set_toast(name != "" ? fmt.tprintf("战报已保存并复制: %s", name) : "战报生成失败")
             }
             // 1-8 预设；⇧1-8 作品库快捷投放（新的在前；图鉴打开时 ⇧ 无效）
             shift := rl.IsKeyDown(.LEFT_SHIFT) || rl.IsKeyDown(.RIGHT_SHIFT)
@@ -5413,6 +5556,8 @@ CJK_SOURCE :: [?]string{
     // 教练模式 + 演示模式 (coach tutorial + attract captions)
     "这条蛇是开的你的工作是喂它！按打开投喂框输入任意词，回车投放试试预设食物图鉴翻页再投一个创造台调整数值然后保存并投放毕业复制分享码发给朋友。蛇归你了第步·跳过教程按任意键继续转向（屏幕方向）切换第一人称环绕视角可以随时让救场",
     "自动驾驶中——看它怎么飞每一种食物都是玩家发明的说一句话，就能造出带剧本的效果创造你自己的食物吧——按任意键开始！新手教程标题界面秒无操作进入演示",
+    // 战报图 (battle report card) labels, ranks, toasts
+    "战报经典模式得分最高长度节吃掉个时长奇葩菜单段位这局还什么都没吃到再得晋升已是按任意键关闭保存并复制文字快去炫耀吧蛇界萌新初出茅庐老练机长立方体传说三维之神新手饲养员资深黑暗料理大师食神下凡莲虹虚榴彩",
 }
 
 // top-1400 Han chars by frequency, counted from ~100k chars of real Chinese
@@ -5809,6 +5954,23 @@ draw_title :: proc() {
 
 draw_game_over :: proc() {
     rl.DrawRectangle(0, 0, SCREEN_W, SCREEN_H, rl.Color{20, 0, 0, 150})
+    // 经典阵亡且战报卡已生成：卡片式布局
+    if game_mode == .CLASSIC && report_tex.id != 0 {
+        draw_centered("GAME OVER", 40, 60, rl.RED, true)
+        scale: f32 = 560.0 / REPORT_W
+        w: f32 = 560
+        h: f32 = REPORT_H * scale
+        rl.DrawTextureEx(report_tex, {f32(SCREEN_W) / 2 - w / 2, 120}, 0, scale, rl.WHITE)
+        y := i32(120 + h)
+        if score >= best && score > 0 {
+            draw_centered("NEW BEST!", y + 20, 26, rl.GOLD, true)
+        }
+        hint: cstring = "C 复制文字战报"
+        if report_file != "" do hint = fmt.ctprintf("战报已保存 %s · C 复制文字战报", report_file)
+        draw_centered(hint, y + 56, 22, rl.Color{200, 205, 220, 255})
+        draw_centered("Press ENTER to play again", y + 94, 24, rl.LIGHTGRAY)
+        return
+    }
     draw_centered("GAME OVER", SCREEN_H/2 - 120, 76, rl.RED, true)
     draw_centered(fmt.ctprintf("Score: %d", score), SCREEN_H/2 - 28, 34, rl.RAYWHITE)
     if score >= best && score > 0 {
@@ -5942,6 +6104,7 @@ draw_frame :: proc(alpha: f32) {
     draw_dex()
     draw_input_box()
     draw_editor()
+    draw_report_overlay()
     draw_toast()
     draw_attract()
     draw_tutorial()
@@ -5985,6 +6148,302 @@ record_capture :: proc(rt: rl.RenderTexture2D, filename: cstring, alpha: f32) {
     rl.ExportImage(img, filename)
     rl.UnloadImage(img)
 }
+
+// ---------------------------------------------------------------------------
+// 战报图 (battle report card): 800x450 PNG 战绩卡 + 可复制的文字战报
+// 经典模式阵亡自动生成一次（autopilot 自动重开时不刷文件）；
+// 投喂模式随时按 G 生成并复制文字版，浮层展示至任意键。
+// ---------------------------------------------------------------------------
+
+REPORT_W :: 800
+REPORT_H :: 450
+
+RANK_GRAY   :: rl.Color{158, 164, 180, 255}
+RANK_GREEN  :: rl.Color{105, 220, 140, 255}
+RANK_BLUE   :: rl.Color{110, 170, 245, 255}
+RANK_PURPLE :: rl.Color{185, 125, 245, 255}
+RANK_GOLD   :: rl.Color{245, 205,  80, 255}
+
+// 段位（纯函数，可测）：经典按得分，投喂按吃掉个数
+rank_classic :: proc(sc: int) -> (string, rl.Color) {
+    switch {
+    case sc <  50: return "蛇界萌新",   RANK_GRAY
+    case sc < 150: return "初出茅庐",   RANK_GREEN
+    case sc < 300: return "老练机长",   RANK_BLUE
+    case sc < 500: return "立方体传说", RANK_PURPLE
+    }
+    return "三维之神", RANK_GOLD
+}
+
+rank_feeding :: proc(n: int) -> (string, rl.Color) {
+    switch {
+    case n < 10: return "新手饲养员",   RANK_GRAY
+    case n < 25: return "资深饲养员",   RANK_GREEN
+    case n < 50: return "黑暗料理大师", RANK_PURPLE
+    }
+    return "食神下凡", RANK_GOLD
+}
+
+rank_title :: proc() -> (string, rl.Color) {
+    if game_mode == .FEEDING do return rank_feeding(eaten)
+    return rank_classic(score)
+}
+
+// 经典模式晋级提示：下一个段位名 + 还差多少分
+next_rank_classic :: proc(sc: int) -> (name: string, need: int, at_max: bool) {
+    switch {
+    case sc <  50: return "初出茅庐",    50 - sc, false
+    case sc < 150: return "老练机长",   150 - sc, false
+    case sc < 300: return "立方体传说", 300 - sc, false
+    case sc < 500: return "三维之神",   500 - sc, false
+    }
+    return "", 0, true
+}
+
+ReportEntry :: struct { name: string, count: int, color: rl.Color }
+
+// 奇葩菜单：按吃掉次数降序（同次数按名字字典序，保证确定性），最多 8 条
+menu_entries :: proc(allocator := context.temp_allocator) -> []ReportEntry {
+    entries := make([dynamic]ReportEntry, allocator)
+    for name, count in session_eaten {
+        col := RANK_GRAY
+        if idx, ok := kind_by_name[name]; ok do col = kinds[idx].color
+        append(&entries, ReportEntry{name, count, col})
+    }
+    // 小数组插入排序：次数降序，名字升序
+    for i in 1..<len(entries) {
+        for j := i; j > 0; j -= 1 {
+            a, b := entries[j - 1], entries[j]
+            before := a.count > b.count || (a.count == b.count && a.name < b.name)
+            if before do break
+            entries[j - 1], entries[j] = b, a
+        }
+    }
+    return entries[:min(8, len(entries))]
+}
+
+// 文字战报（纯函数，可测）：投喂模式带奇葩菜单行（<=8 条），经典模式不带
+report_text :: proc(allocator := context.temp_allocator) -> string {
+    sb := strings.builder_make(allocator)
+    title, _ := rank_title()
+    strings.write_string(&sb, "🐍 Shinake 战报\n")
+    if game_mode == .FEEDING {
+        self_made := 0
+        for name, _ in session_eaten {
+            if idx, ok := kind_by_name[name]; ok && kinds[idx].author == "自创" do self_made += 1
+        }
+        fmt.sbprintf(&sb, "投喂实验室 · 得分 %d · 投喂 %d 个 · 发现 %d 种 · 自创 %d 道\n",
+            score, eaten, len(kinds), self_made)
+        entries := menu_entries()
+        if len(entries) > 0 {
+            strings.write_string(&sb, "奇葩菜单：")
+            for e, i in entries {
+                if i > 0 do strings.write_string(&sb, " ")
+                fmt.sbprintf(&sb, "%s×%d", e.name, e.count)
+            }
+            strings.write_string(&sb, "\n")
+        }
+    } else {
+        secs := int(play_clock)
+        fmt.sbprintf(&sb, "经典模式 · 得分 %d · 最高 %d · 长度 %d · 吃掉 %d 个 · 时长 %d:%02d\n",
+            score, best, len(snake), eaten, secs / 60, secs % 60)
+    }
+    fmt.sbprintf(&sb, "段位：%s\n", title)
+    strings.write_string(&sb, "AI 开蛇，你造食物 → github.com/vajraimb/Shinake")
+    return strings.to_string(sb)
+}
+
+// 战绩卡本体（画进 800x450 渲染目标；布局按带区分：头/数据/菜单/徽章/页脚）
+draw_report_card :: proc() {
+    W :: REPORT_W
+    H :: REPORT_H
+    INK   :: rl.Color{232, 236, 248, 255}
+    DIM   :: rl.Color{146, 152, 176, 255}
+    FAINT :: rl.Color{62, 68, 96, 255}
+    GOLD  :: rl.Color{250, 214, 92, 255}
+    title, tcol := rank_title()
+
+    rl.DrawRectangleGradientV(0, 0, W, H, rl.Color{26, 30, 48, 255}, rl.Color{12, 14, 24, 255})
+    rl.DrawRectangle(0, 0, W, 5, tcol)
+
+    // 头部：SHINAKE 战报 + 模式标签
+    x: i32 = 40
+    draw_text("SHINAKE", x, 26, 40, rl.Color{125, 232, 150, 255}, true)
+    x += measure_text("SHINAKE", 40, true) + 12
+    draw_text("战报", x, 26, 40, INK)
+    mode_label: cstring = game_mode == .FEEDING ? "投喂实验室" : "经典模式"
+    draw_text(mode_label, W - 40 - measure_text(mode_label, 20), 36, 20, DIM)
+    rl.DrawRectangle(40, 78, W - 80, 2, FAINT)
+
+    // 大得分（左）+ 数据格（右，2×2）
+    draw_text("得分", 40, 92, 17, DIM)
+    draw_text(fmt.ctprintf("%d", score), 38, 108, 84, GOLD, true)
+    secs := int(play_clock)
+    stats := [?]struct{l: cstring, v: string}{
+        {"最高分", fmt.tprintf("%d", best)},
+        {"长度",   fmt.tprintf("%d 节", len(snake))},
+        {"吃掉",   fmt.tprintf("%d 个", eaten)},
+        {"时长",   fmt.tprintf("%d:%02d", secs / 60, secs % 60)},
+    }
+    for s, i in stats {
+        cx: i32 = 340 + i32(i % 2) * 220
+        cy: i32 = 92 + i32(i / 2) * 58
+        draw_text(s.l, cx, cy, 16, DIM)
+        draw_text(fmt.ctprintf("%s", s.v), cx, cy + 20, 28, INK, true)
+    }
+
+    // 中段：投喂模式列奇葩菜单（2 列 × 4 行）；经典模式给晋级提示
+    y0: i32 = 210
+    if game_mode == .FEEDING {
+        draw_text("奇葩菜单", 40, y0, 20, INK, true)
+        rl.DrawRectangle(40, y0 + 26, 84, 3, tcol)
+        entries := menu_entries()
+        if len(entries) == 0 {
+            draw_text("这局还什么都没吃到", 40, y0 + 40, 17, DIM)
+        }
+        for e, i in entries {
+            ex: i32 = 40 + i32(i % 2) * 310
+            ey: i32 = y0 + 34 + i32(i / 2) * 27
+            rl.DrawCircle(ex + 8, ey + 10, 7, e.color)
+            draw_text(fmt.ctprintf("%s ×%d", e.name, e.count), ex + 24, ey, 19, INK)
+        }
+    } else {
+        name, need, maxed := next_rank_classic(score)
+        hint := maxed ? fmt.tprintf("已是最高段位 · %s", title) :
+            fmt.tprintf("再得 %d 分晋级「%s」", need, name)
+        hc := fmt.ctprintf("%s", hint)
+        draw_text(hc, (W - measure_text(hc, 19)) / 2, y0 + 56, 19, DIM)
+    }
+
+    // 段位徽章：段位色圆角胶囊 + 深色标题字
+    draw_text("段位", 40, 356, 15, DIM)
+    bw := measure_text(fmt.ctprintf("%s", title), 20) + 44
+    rl.DrawRectangleRounded({40, 372, f32(bw), 30}, 0.5, 10, tcol)
+    draw_text(fmt.ctprintf("%s", title), 40 + 22, 377, 20, rl.Color{16, 18, 28, 255}, true)
+
+    // 页脚：日期 + 仓库地址
+    now := time.now()
+    yy, mo, dd := time.date(now)
+    draw_text(fmt.ctprintf("%04d-%02d-%02d", yy, int(mo), dd), 40, 416, 15, DIM)
+    REPO :: "github.com/vajraimb/Shinake"
+    draw_text(REPO, W - 40 - measure_text(REPO, 15), 416, 15, DIM)
+
+    rl.DrawRectangleRoundedLinesEx({1, 1, W - 2, H - 2}, 0.05, 8, 2, FAINT)
+}
+
+// 渲染战绩卡并导出 PNG（Y 翻转与 capture() 同理）；成功时保留一份上屏纹理
+render_report_card :: proc(filename: cstring) -> bool {
+    if !fonts_ok do return false
+    rt := rl.LoadRenderTexture(REPORT_W, REPORT_H)
+    rl.BeginTextureMode(rt)
+    rl.ClearBackground(rl.Color{12, 14, 24, 255})
+    draw_report_card()
+    rl.EndTextureMode()
+    img := rl.LoadImageFromTexture(rt.texture)
+    rl.ImageFlipVertical(&img)
+    ok := rl.ExportImage(img, filename)
+    if report_tex.id != 0 do rl.UnloadTexture(report_tex)
+    report_tex = ok ? rl.LoadTextureFromImage(img) : rl.Texture2D{}
+    rl.UnloadImage(img)
+    rl.UnloadRenderTexture(rt)
+    return ok
+}
+
+// 生成战绩卡：时间戳文件名（与 best.txt 同目录），返回 "" 表示失败
+report_generate :: proc() -> string {
+    now := time.now()
+    yy, mo, dd := time.date(now)
+    hh, mm, ss := time.clock(now)
+    name := fmt.tprintf("report_%04d%02d%02d_%02d%02d%02d.png", yy, int(mo), dd, hh, mm, ss)
+    report_ready = true // 失败也不再每帧重试
+    if render_report_card(fmt.ctprintf("%s", name)) {
+        if report_file != "" do delete(report_file)
+        report_file = strings.clone(name)
+        return report_file
+    }
+    return ""
+}
+
+report_copy_text :: proc(with_toast := true) {
+    rl.SetClipboardText(fmt.ctprintf("%s", report_text()))
+    if with_toast do set_toast("文字战报已复制 · 快去炫耀吧")
+}
+
+report_clear :: proc() {
+    if report_tex.id != 0 { rl.UnloadTexture(report_tex); report_tex = {} }
+    if report_file != "" { delete(report_file); report_file = "" }
+    report_ready = false
+    report_open = false
+}
+
+// 投喂模式 G 浮层：压暗背景 + 居中展示战绩卡至任意键
+draw_report_overlay :: proc() {
+    if !report_open || report_tex.id == 0 || state != .PLAYING do return
+    rl.DrawRectangle(0, 0, SCREEN_W, SCREEN_H, rl.Color{0, 0, 0, 170})
+    scale: f32 = 640.0 / REPORT_W
+    w: f32 = 640
+    h: f32 = REPORT_H * scale
+    x := f32(SCREEN_W) / 2 - w / 2
+    y := f32(SCREEN_H) / 2 - h / 2 - 20
+    rl.DrawTextureEx(report_tex, {x, y}, 0, scale, rl.WHITE)
+    draw_centered("按任意键关闭 · 战报已保存并复制", i32(y + h) + 24, 22, rl.LIGHTGRAY)
+}
+
+// SNAKE_REPORT=1：伪造一局投喂session，渲染样张战报并自检（隐藏窗口里跑，
+// 字体已经就绪）。同时校验经典模式的文字战报 + 段位判定。
+report_sample_test :: proc() -> bool {
+    game_mode = .FEEDING
+    reset_game()
+    score = 320
+    best = 670
+    eaten = 28
+    play_clock = 754
+    for len(snake) < 9 do append(&snake, snake[len(snake) - 1]) // 长度 9
+    // 7 个预设 + 5 个伪造 = 12 种；其中 3 道自创
+    Seed :: struct { name: string, n: int, author: string, hue: f32 }
+    seeds := [?]Seed{
+        {"榴莲",     3, "AI",    45},
+        {"火箭辣椒", 2, "自创",  10},
+        {"神秘蛋",   1, "AI",   280},
+        {"彩虹糖",   4, "自创", 200},
+        {"虚空布丁", 1, "自创", 320},
+    }
+    for s in seeds {
+        idx := kind_index(s.name)
+        kinds[idx].author = s.author
+        kinds[idx].hue = int(s.hue)
+        kinds[idx].color = hsv_rgb(s.hue, 0.72, 1.0)
+        session_eaten[kinds[idx].name] = s.n
+    }
+    fmt.println("--- report_text (feeding) ---")
+    fmt.println(report_text())
+
+    ok := render_report_card("report_sample.png")
+    if !ok {
+        fmt.println("REPORT FAIL: render_report_card export failed")
+        return false
+    }
+    fi, err := os.stat("report_sample.png", context.temp_allocator)
+    if err != nil || fi.size <= 20 * 1024 {
+        fmt.println("REPORT FAIL: report_sample.png missing or too small:", fi.size, err)
+        return false
+    }
+    fmt.printf("report_sample.png: %d bytes\n", fi.size)
+
+    // 经典变体：score 40 → 蛇界萌新，无菜单行
+    game_mode = .CLASSIC
+    score = 40
+    title, _ := rank_title()
+    fmt.println("--- report_text (classic) ---")
+    fmt.println(report_text())
+    if title != "蛇界萌新" {
+        fmt.println("REPORT FAIL: classic rank for score 40:", title)
+        return false
+    }
+    fmt.println("REPORT: PASS")
+    return true
+}
+
 
 // SNAKE_SHOT only: a canned blueprint kind so the dex capture shows the
 // [蓝图] tag (the 火箭辣椒 creative-prompt example design)
@@ -6042,10 +6501,13 @@ main :: proc() {
     // SNAKE_RECORD=<outdir> is the demo-reel variant: it runs the attract
     // scenario for RECORD_SECONDS of game time and dumps ~10 fps PNG frames
     // into <outdir>/frames/ (see make_demo.py for the WebP assembly).
+    // SNAKE_REPORT=1 is the battle-report variant: fabricates a feeding
+    // session, renders report_sample.png and prints the text report.
     shot_mode := os.get_env("SNAKE_SHOT", context.allocator) == "1"
     record_dir := os.get_env("SNAKE_RECORD", context.allocator)
     record_mode := record_dir != ""
-    if shot_mode || record_mode {
+    report_mode := os.get_env("SNAKE_REPORT", context.allocator) == "1"
+    if shot_mode || record_mode || report_mode {
         rl.SetConfigFlags({.MSAA_4X_HINT, .WINDOW_HIDDEN})
     } else {
         rl.SetConfigFlags({.MSAA_4X_HINT})
@@ -6080,6 +6542,11 @@ main :: proc() {
     make_presets()
     load_creations() // 作品库（creations.json）— 预设之后注册，不投放不碰 last_cast
     reset_game()
+
+    // SNAKE_REPORT=1: fonts + presets are ready here — fabricate, render, exit
+    if report_mode {
+        os.exit(report_sample_test() ? 0 : 1)
+    }
 
     shots := 0
     shot_bp_idx := -1 // blueprint kind index injected for the dex capture
@@ -6149,27 +6616,35 @@ main :: proc() {
             }
         case .PLAYING:
             if attract_active do attract_update(dt)
+            // 战报浮层：任意键关闭，本帧其余输入全部吞掉（模拟照常运行）
+            report_was_open := report_open
+            if report_open {
+                if any_key || mouse_input do report_open = false
+            }
             // Esc 先让面板（投喂框/创造台/文本编辑）消费；没人消费才轮到教程跳过
-            tut_esc := rl.IsKeyPressed(.ESCAPE) && !input_open && !editor_open && edit_target == .NONE
-            handle_text_input()
-            if editor_open {
-                editor_handle_input(dt) // 创造台接管键盘；游戏照常运行
-            } else {
-                handle_input()
-            }
-            // H: 随时重开教程（游戏不重置，从第 1 步重来）
-            if rl.IsKeyPressed(.H) && !input_open && edit_target == .NONE {
-                tutorial_start(game_mode == .FEEDING ? .FEED : .CLASSIC)
-            }
-            if !input_open && !editor_open {
-                if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) { state = .PAUSED; break }
-                if rl.IsKeyPressed(.R) { reset_game(); break }
-            }
+            tut_esc := false
+            if !report_open {
+                tut_esc = rl.IsKeyPressed(.ESCAPE) && !input_open && !editor_open && edit_target == .NONE
+                handle_text_input()
+                if editor_open {
+                    editor_handle_input(dt) // 创造台接管键盘；游戏照常运行
+                } else {
+                    handle_input()
+                }
+                // H: 随时重开教程（游戏不重置，从第 1 步重来）
+                if rl.IsKeyPressed(.H) && !input_open && edit_target == .NONE {
+                    tutorial_start(game_mode == .FEEDING ? .FEED : .CLASSIC)
+                }
+                if !input_open && !editor_open {
+                    if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) { state = .PAUSED; break }
+                    if rl.IsKeyPressed(.R) { reset_game(); break }
+                }
 
-            // manual speed control (auto-acceleration on food still applies)
-            if game_mode == .CLASSIC {
-                if rl.IsKeyPressed(.MINUS) do move_interval = min(0.50, move_interval + 0.02)
-                if rl.IsKeyPressed(.EQUAL) do move_interval = max(MIN_INTERVAL, move_interval - 0.02)
+                // manual speed control (auto-acceleration on food still applies)
+                if game_mode == .CLASSIC {
+                    if rl.IsKeyPressed(.MINUS) do move_interval = min(0.50, move_interval + 0.02)
+                    if rl.IsKeyPressed(.EQUAL) do move_interval = max(MIN_INTERVAL, move_interval - 0.02)
+                }
             }
 
             // the snake holds still until the player steers for the first time
@@ -6197,7 +6672,7 @@ main :: proc() {
             if game_mode == .FEEDING do update_food_rot(dt)
             alpha = clamp(smoothstep(move_timer / move_interval), 0, 1)
             update_particles(dt)
-            tutorial_step_logic(any_key, tut_esc) // 教练模式：观察状态变化推进步骤
+            tutorial_step_logic(any_key && !report_was_open, tut_esc) // 教练模式：观察状态变化推进步骤
         case .PAUSED:
             if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) do state = .PLAYING
             if rl.IsKeyPressed(.R) { reset_game(); state = .PLAYING }
@@ -6205,6 +6680,14 @@ main :: proc() {
             if rl.IsKeyPressed(.V) do toggle_view()
             if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
         case .GAME_OVER, .WIN:
+            // 经典模式阵亡：自动生成战报卡一次（autopilot 会自动重开，不刷文件）
+            if state == .GAME_OVER && game_mode == .CLASSIC && !autopilot && !report_ready {
+                report_generate()
+            }
+            // C: 复制文字战报（两种模式都行；投喂阵亡有 1.5s 窗口也可按）
+            if state == .GAME_OVER && !editor_open && rl.IsKeyPressed(.C) {
+                report_copy_text()
+            }
             // 创造台打开时 Enter/R 属于编辑器（投喂模式 autopilot 会自动重开）
             if !editor_open && (rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.R)) {
                 reset_game()

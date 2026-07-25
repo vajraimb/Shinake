@@ -52,11 +52,19 @@ Workshop**, or `B` to watch the AI play by itself.
   food-god school; press `H` anytime to retake it, `Esc` to skip
 - 📺 **Attract mode** — idle on the title screen for 30 s and the AI
   snake starts its own demo reel; any key takes over
+- 📊 **Battle-report card** — auto-generated on death / press `G` for an
+  800×450 card (weird menu + rank badge); the text version copies with
+  one keystroke, repo link included
 
 ![Attract mode](docs/attract.webp)
 
 *This attract loop was recorded fully autonomously with `SNAKE_RECORD` +
 `make_demo.py` (241-frame animated WebP, under 0.5 MB).*
+
+![Battle-report card](docs/report.png)
+
+*Auto-generated on classic death, or press `G` anytime in the Feeding Lab:
+an 800×450 card saved next to the binary, `C` copies the text version.*
 
 | Workshop · manual design | Workshop · AI blueprint |
 | :---: | :---: |
@@ -90,7 +98,6 @@ Workshop**, or `B` to watch the AI play by itself.
 
 - "Nastiest Recipe" weekly challenge — share-code battles: whose dish
   wrecks the AI hardest
-- Battle-report cards — auto-generated end-of-run summaries worth posting
 - Highlight replays — last 30 s always recording, one-key export
 - Achievements — Master Alchemist, Poison Grandmaster, 100-Cast Streak…
 - Skin workshop · spectator mode
@@ -164,7 +171,8 @@ title screen; any key exits.
 
 Feeding Lab: `T` feed box · `1-8` presets · `⇧1-8` quick-cast creations ·
 `E` workshop · `Tab` dex (`↑↓` select, `Enter` cast, `X` delete creation,
-`C` copy share code, `E` remix) · `Cmd+V` paste a share code
+`C` copy share code, `E` remix) · `G` battle-report card (auto on classic
+death; `C` copies the text report) · `Cmd+V` paste a share code
 
 Workshop: `↑↓` fields · `←→` adjust · `Enter` edit/confirm · `Esc` close
 </details>
@@ -181,10 +189,11 @@ odin build . -out:shinake -o:speed
 ```
 
 Single file `main.odin`, no other dependencies. Headless self-tests:
-`SNAKE_SELFTEST=1 ./shinake` (28 checks: share codes, blueprint engine,
-library, picky-eater regression, tutorial + attract state machines),
-`SNAKE_LLMTEST=1` (LLM path, with `mock_llm.py`), `SNAKE_SHOT=1`
-(offscreen captures), `SNAKE_RECORD=<dir>` (demo-reel frames).
+`SNAKE_SELFTEST=1 ./shinake` (31 checks: share codes, blueprint engine,
+library, picky-eater regression, tutorial + attract state machines,
+battle report), `SNAKE_LLMTEST=1` (LLM path, with `mock_llm.py`),
+`SNAKE_SHOT=1` (offscreen captures), `SNAKE_RECORD=<dir>` (demo-reel
+frames), `SNAKE_REPORT=1` (sample battle-report card).
 </details>
 
 ## 📦 Download

@@ -15,6 +15,7 @@ tutorial.txt
 dbg*.png
 off_*.png
 shot_*.png
+/report_*.png
 
 # os junk
 .DS_Store
