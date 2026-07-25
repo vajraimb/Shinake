@@ -176,6 +176,27 @@ creator_asked    := false       // nickname prompt already shown this session
 toast          : string          // owned clone
 toast_t        : f32 = 0
 
+// --- 教练模式 (interactive tutorial) + 演示模式 (attract loop) state ---
+tutorial_active    := false
+tutorial_step      := 0
+tutorial_chapter   := TutorialChapter.FEED
+tutorial_mark      := 0      // counter baseline captured at step entry
+tutorial_steer_mask  : u32   // distinct steering keys seen (classic ch. step 1)
+tutorial_steer_count := 0
+// counters the tutorial detectors read (monotonic; detectors compare > mark)
+cast_word_total       := 0   // every cast_word() call
+preset_cast_total     := 0   // every cast_preset() call
+dex_cast_total        := 0   // every 图鉴 Enter cast
+view_toggle_total     := 0   // every V flip
+autopilot_toggle_total := 0  // every B flip
+
+attract_active   := false
+attract_elapsed  : f32 = 0   // seconds since the demo started
+attract_cast_idx := 0        // playlist cursor (loops via modulo)
+attract_cast_t   : f32 = 0   // time since the last playlist cast
+attract_topup_t  : f32 = 0   // anti-starvation top-up clock (demo has no player)
+title_idle_t     : f32 = 0   // seconds of no input on the title screen
+
 // --- LLM recipe generation (FEED_LLM_* env config) ---
 LLM_State :: enum { IDLE, COOKING, READY, FAILED }
 
@@ -836,6 +857,7 @@ spawn_kind :: proc(kind_idx: int) {
 
 cast_word :: proc(word: string) {
     if len(word) == 0 do return
+    cast_word_total += 1
     if idx, ok := kind_by_name[word]; ok {
         spawn_kind(idx)
         last_cast_kind = idx
@@ -853,6 +875,7 @@ cast_word :: proc(word: string) {
 
 cast_preset :: proc(i: int) {
     if i < 0 || i >= 8 do return
+    preset_cast_total += 1
     if i == 7 {
         // 神秘蛋：随机效果，每次都不一样
         h := u32(rand.int_max(1 << 31)) + 1
@@ -3153,6 +3176,196 @@ self_test :: proc() -> bool {
 
     fmt.println("harm learning: ALL PASS")
 
+    // ================= Phase 5: 教练模式 + 演示模式 =================
+    // snapshot tutorial.txt so the suite never clobbers a real user file
+    orig_tut: []u8
+    orig_tut_exists := false
+    if d, err := os.read_entire_file(TUTORIAL_FILE, context.allocator); err == nil {
+        orig_tut = d
+        orig_tut_exists = true
+    }
+    _ = os.remove(TUTORIAL_FILE)
+
+    // --- T22: tutorial machine — FEED chapter walks 1→8 by state flags ---
+    game_mode = .FEEDING
+    reset_game()
+    state = .PLAYING
+    if tutorial_seen() {
+        fmt.println("SELFTEST FAIL: tutorial.txt present after remove")
+        return false
+    }
+    tutorial_start(.FEED)
+    if !tutorial_active || tutorial_step != 0 {
+        fmt.println("SELFTEST FAIL: tutorial_start", tutorial_active, tutorial_step)
+        return false
+    }
+    tutorial_step_logic(false, false) // info step needs a key — must not advance
+    if tutorial_step != 0 {
+        fmt.println("SELFTEST FAIL: info step advanced without a key")
+        return false
+    }
+    tutorial_step_logic(true, false) // step 0 (info) → 1
+    if tutorial_step != 1 || !tutorial_active {
+        fmt.println("SELFTEST FAIL: step 0→1")
+        return false
+    }
+    input_open = true // T pressed (same flag the game sets)
+    tutorial_step_logic(false, false)
+    if tutorial_step != 2 {
+        fmt.println("SELFTEST FAIL: step 1→2 (input_open detector)")
+        return false
+    }
+    input_open = false
+    cast_word("教程试词") // word cast (watch cast_word_total)
+    tutorial_step_logic(false, false)
+    if tutorial_step != 3 {
+        fmt.println("SELFTEST FAIL: step 2→3 (cast_word detector)")
+        return false
+    }
+    cast_preset(0) // preset cast
+    tutorial_step_logic(false, false)
+    if tutorial_step != 4 {
+        fmt.println("SELFTEST FAIL: step 3→4 (cast_preset detector)")
+        return false
+    }
+    dex_open = true
+    dex_enter_cast(0) // 图鉴 Enter cast
+    tutorial_step_logic(false, false)
+    if tutorial_step != 5 {
+        fmt.println("SELFTEST FAIL: step 4→5 (dex cast detector)")
+        return false
+    }
+    dex_open = false
+    editor_open = true // E pressed
+    tutorial_step_logic(false, false)
+    if tutorial_step != 6 {
+        fmt.println("SELFTEST FAIL: step 5→6 (editor detector)")
+        return false
+    }
+    editor_open = false
+    {   // 创造台保存：注册一个 自创 kind（creations_count 增加，不写文件）
+        ck := gen_kind(strings.clone("教程测试果"), 0)
+        ck.author = "自创"
+        append(&kinds, ck)
+        kind_by_name[ck.name] = len(kinds) - 1
+    }
+    tutorial_step_logic(false, false)
+    if tutorial_step != 7 {
+        fmt.println("SELFTEST FAIL: step 6→7 (creation-saved detector)")
+        return false
+    }
+    tutorial_step_logic(true, false) // step 7 (info) → finish
+    if tutorial_active || tutorial_step != 8 {
+        fmt.println("SELFTEST FAIL: tutorial did not finish at step 8")
+        return false
+    }
+    if !tutorial_seen() {
+        fmt.println("SELFTEST FAIL: finishing did not write tutorial.txt")
+        return false
+    }
+    // Esc path: skipping mid-chapter deactivates and writes the flag
+    _ = os.remove(TUTORIAL_FILE)
+    tutorial_start(.CLASSIC)
+    tutorial_step_logic(false, true)
+    if tutorial_active || !tutorial_seen() {
+        fmt.println("SELFTEST FAIL: Esc skip did not deactivate+flag")
+        return false
+    }
+    // CLASSIC chapter detectors: 4 distinct steer keys, V flip, B flip
+    tutorial_start(.CLASSIC)
+    tut_note_steer(1 << 0)
+    tut_note_steer(1 << 1)
+    tut_note_steer(1 << 2)
+    tut_note_steer(1 << 0) // dup: still 3 distinct
+    tutorial_step_logic(false, false)
+    if tutorial_step != 0 {
+        fmt.println("SELFTEST FAIL: steer detector fired at 3 distinct keys")
+        return false
+    }
+    tut_note_steer(1 << 3) // 4 distinct
+    tutorial_step_logic(false, false)
+    if tutorial_step != 1 {
+        fmt.println("SELFTEST FAIL: classic step 0→1 (steer detector)")
+        return false
+    }
+    toggle_view() // V pressed
+    tutorial_step_logic(false, false)
+    if tutorial_step != 2 {
+        fmt.println("SELFTEST FAIL: classic step 1→2 (view detector)")
+        return false
+    }
+    autopilot_toggle_total += 1 // B pressed
+    tutorial_step_logic(false, false)
+    if tutorial_active {
+        fmt.println("SELFTEST FAIL: classic chapter did not finish at step 3")
+        return false
+    }
+    fmt.println("tutorial: PASS")
+
+    // --- T23: attract playlist timeline + any-key exit + idle trigger ---
+    pre_w := cast_word_total
+    pre_p := preset_cast_total
+    attract_begin()
+    if !attract_active || state != .PLAYING {
+        fmt.println("SELFTEST FAIL: attract_begin", attract_active, state)
+        return false
+    }
+    attract_update(0.05) // first playlist cast fires immediately: preset 苹果
+    if preset_cast_total != pre_p + 1 || cast_word_total != pre_w {
+        fmt.println("SELFTEST FAIL: attract cast @0s", preset_cast_total - pre_p, cast_word_total - pre_w)
+        return false
+    }
+    if attract_caption_index() != 0 {
+        fmt.println("SELFTEST FAIL: caption @0s", attract_caption_index())
+        return false
+    }
+    for _ in 0..<121 do attract_update(0.05) // ≈ 6.1 s → cast 火箭辣椒 (word)
+    if cast_word_total != pre_w + 1 || preset_cast_total != pre_p + 1 {
+        fmt.println("SELFTEST FAIL: attract cast @6s", cast_word_total - pre_w)
+        return false
+    }
+    if attract_caption_index() != 1 {
+        fmt.println("SELFTEST FAIL: caption @6s", attract_caption_index())
+        return false
+    }
+    for _ in 0..<120 do attract_update(0.05) // ≈ 12.1 s → cast 星星 (preset)
+    if preset_cast_total != pre_p + 2 || cast_word_total != pre_w + 1 {
+        fmt.println("SELFTEST FAIL: attract cast @12s", preset_cast_total - pre_p)
+        return false
+    }
+    if attract_caption_index() != 2 {
+        fmt.println("SELFTEST FAIL: caption @12s", attract_caption_index())
+        return false
+    }
+    attract_exit() // any-key exit: back to title, game reset, idle clock cleared
+    if attract_active || state != .TITLE || title_idle_t != 0 {
+        fmt.println("SELFTEST FAIL: attract_exit", attract_active, state, title_idle_t)
+        return false
+    }
+    title_idle_t = 0
+    if attract_idle_tick(0.1, true) || title_idle_t != 0 {
+        fmt.println("SELFTEST FAIL: input did not reset the idle clock")
+        return false
+    }
+    fired := -1
+    for i in 1..=310 {
+        if attract_idle_tick(0.1, false) { fired = i; break }
+    }
+    if fired < 299 || fired > 301 {
+        fmt.println("SELFTEST FAIL: idle attract did not fire at ~30 s:", fired)
+        return false
+    }
+    title_idle_t = 0
+    fmt.println("attract: PASS")
+
+    // restore tutorial.txt exactly as found
+    if orig_tut_exists {
+        _ = os.write_entire_file(TUTORIAL_FILE, orig_tut)
+        delete(orig_tut)
+    } else {
+        _ = os.remove(TUTORIAL_FILE)
+    }
+
     fmt.println("blueprint engine: ALL PASS")
     return true
 }
@@ -3422,9 +3635,7 @@ snap_axis :: proc(v: rl.Vector3) -> IV3 {
 // - first-person: snake-frame relative (turn left/right, pitch up/down)
 handle_input :: proc() {
     // (!input_open: V also pastes into the feed box — don't flip the camera then)
-    if rl.IsKeyPressed(.V) && !input_open {
-        view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
-    }
+    if rl.IsKeyPressed(.V) && !input_open do toggle_view()
     // M: modern / classic snake skin
     if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
 
@@ -3468,11 +3679,7 @@ handle_input :: proc() {
                 if (rl.IsKeyPressed(.ENTER) || rl.IsKeyPressed(.KP_ENTER)) && rows > 0 {
                     // Enter: 立即投喂选中的食物（图鉴保持打开）
                     idx := dex_kind_at(min(dex_sel, rows - 1))
-                    if idx >= 0 {
-                        spawn_kind(idx)
-                        last_cast_kind = idx
-                        set_toast(fmt.tprintf("已投喂: %s", kinds[idx].name))
-                    }
+                    if idx >= 0 do dex_enter_cast(idx)
                 }
                 if rl.IsKeyPressed(.X) && rows > 0 {
                     // X: 从作品库删除选中的自创作品
@@ -3488,6 +3695,7 @@ handle_input :: proc() {
     // B: toggle AI autopilot
     if rl.IsKeyPressed(.B) {
         autopilot = !autopilot
+        autopilot_toggle_total += 1
         if autopilot do clear(&dir_queue) // AI 接管前清空玩家排队的方向
     }
     if autopilot do return // AI 操控时忽略方向键
@@ -3496,6 +3704,16 @@ handle_input :: proc() {
     go_right := rl.IsKeyPressed(.D) || rl.IsKeyPressed(.RIGHT)
     go_up    := rl.IsKeyPressed(.W) || rl.IsKeyPressed(.UP)
     go_down  := rl.IsKeyPressed(.S) || rl.IsKeyPressed(.DOWN)
+
+    // 教练模式（经典章第 1 步）统计按过的方向键种类——只观察，不拦截
+    if rl.IsKeyPressed(.A)     do tut_note_steer(1 << 0)
+    if rl.IsKeyPressed(.LEFT)  do tut_note_steer(1 << 1)
+    if rl.IsKeyPressed(.D)     do tut_note_steer(1 << 2)
+    if rl.IsKeyPressed(.RIGHT) do tut_note_steer(1 << 3)
+    if rl.IsKeyPressed(.W)     do tut_note_steer(1 << 4)
+    if rl.IsKeyPressed(.UP)    do tut_note_steer(1 << 5)
+    if rl.IsKeyPressed(.S)     do tut_note_steer(1 << 6)
+    if rl.IsKeyPressed(.DOWN)  do tut_note_steer(1 << 7)
 
     if view_mode == .FIRST {
         if go_left  do queue_dir(cross_i(head_up, dir))
@@ -3570,6 +3788,324 @@ copy_share_code :: proc(idx: int) {
     if code == "" do return
     rl.SetClipboardText(fmt.ctprintf("%s", code))
     set_toast(fmt.tprintf("分享码已复制: %s", kinds[idx].name))
+}
+
+// ---------------------------------------------------------------------------
+// 教练模式 (Coach): a learn-by-doing tutorial that runs INSIDE the real game.
+// The overlay teaches one key at a time; the taught keys keep working
+// normally — steps complete by observing state changes (pure detectors),
+// never by intercepting input. Steps are plain data: add a line to the
+// chapter's step array (+ a small detector proc) to extend the tutorial.
+// ---------------------------------------------------------------------------
+
+TutorialChapter :: enum { FEED, CLASSIC }
+
+// screen region left bright while the rest of the screen dims (~55%)
+TutRegion :: enum { NONE, BOTTOM_BAR, FEED_BOX, DEX_PANEL, EDITOR_PANEL }
+
+TutStep :: struct {
+    text:     string,
+    region:   TutRegion,
+    baseline: proc() -> int,   // counter snapshot taken on step entry (nil = flag/info step)
+    detector: proc() -> bool,  // nil = info step (any key advances)
+}
+
+TUTORIAL_FILE :: "tutorial.txt" // written on finish OR skip → never auto-starts again
+
+tutorial_seen :: proc() -> bool {
+    _, err := os.read_entire_file(TUTORIAL_FILE, context.temp_allocator)
+    return err == nil
+}
+
+tutorial_write_flag :: proc() {
+    _ = os.write_entire_file(TUTORIAL_FILE, string(TUTORIAL_NOTE))
+}
+TUTORIAL_NOTE :: "done\n"
+
+// --- detector support: tiny pure procs reading game state ---
+
+tut_note_steer :: proc(bit: u32) {
+    if tutorial_steer_mask & bit == 0 {
+        tutorial_steer_mask |= bit
+        tutorial_steer_count += 1
+    }
+}
+
+// 图鉴 Enter 投喂（唯一会推进 dex_cast_total 的路径）
+dex_enter_cast :: proc(idx: int) {
+    spawn_kind(idx)
+    last_cast_kind = idx
+    dex_cast_total += 1
+    set_toast(fmt.tprintf("已投喂: %s", kinds[idx].name))
+}
+
+// V: single flip point so the tutorial can count view changes
+toggle_view :: proc() {
+    view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
+    view_toggle_total += 1
+}
+
+tut_bl_cast_word  :: proc() -> int { return cast_word_total }
+tut_bl_preset     :: proc() -> int { return preset_cast_total }
+tut_bl_dex        :: proc() -> int { return dex_cast_total }
+tut_bl_creations  :: proc() -> int { return creations_count() }
+tut_bl_view       :: proc() -> int { return view_toggle_total }
+tut_bl_autopilot  :: proc() -> int { return autopilot_toggle_total }
+
+tut_det_input_open :: proc() -> bool { return input_open }
+tut_det_cast_word  :: proc() -> bool { return cast_word_total > tutorial_mark }
+tut_det_preset     :: proc() -> bool { return preset_cast_total > tutorial_mark }
+tut_det_dex        :: proc() -> bool { return dex_cast_total > tutorial_mark }
+tut_det_editor     :: proc() -> bool { return editor_open }
+tut_det_creations  :: proc() -> bool { return creations_count() > tutorial_mark }
+tut_det_steer      :: proc() -> bool { return tutorial_steer_count >= 4 }
+tut_det_view       :: proc() -> bool { return view_toggle_total > tutorial_mark }
+tut_det_autopilot  :: proc() -> bool { return autopilot_toggle_total > tutorial_mark }
+
+// --- the step lists (data!) ---
+
+TUTORIAL_FEED_STEPS := [?]TutStep{
+    {text = "这条蛇是 AI 开的——你的工作是喂它！", region = .NONE},
+    {text = "按 T 打开投喂框", region = .BOTTOM_BAR,
+     detector = tut_det_input_open},
+    {text = "输入任意词，回车投放", region = .FEED_BOX,
+     baseline = tut_bl_cast_word, detector = tut_det_cast_word},
+    {text = "按 1-8 试试预设食物", region = .BOTTOM_BAR,
+     baseline = tut_bl_preset, detector = tut_det_preset},
+    {text = "按 Tab 打开图鉴，↑↓ 翻页，Enter 再投一个", region = .DEX_PANEL,
+     baseline = tut_bl_dex, detector = tut_det_dex},
+    {text = "按 E 打开创造台", region = .BOTTOM_BAR,
+     detector = tut_det_editor},
+    {text = "←→ 调整任意数值，然后「保存并投放」", region = .EDITOR_PANEL,
+     baseline = tut_bl_creations, detector = tut_det_creations},
+    {text = "毕业！按 C 复制分享码发给朋友。蛇归你了！", region = .NONE},
+}
+
+TUTORIAL_CLASSIC_STEPS := [?]TutStep{
+    {text = "A/D/W/S 转向（屏幕方向）", region = .NONE,
+     detector = tut_det_steer},
+    {text = "按 V 切换第一人称/环绕视角", region = .BOTTOM_BAR,
+     baseline = tut_bl_view, detector = tut_det_view},
+    {text = "按 B 可以随时让 AI 救场", region = .BOTTOM_BAR,
+     baseline = tut_bl_autopilot, detector = tut_det_autopilot},
+}
+
+tutorial_steps :: proc() -> []TutStep {
+    if tutorial_chapter == .FEED do return TUTORIAL_FEED_STEPS[:]
+    return TUTORIAL_CLASSIC_STEPS[:]
+}
+
+tutorial_start :: proc(chapter: TutorialChapter) {
+    tutorial_active = true
+    tutorial_chapter = chapter
+    tutorial_step = 0
+    tutorial_mark = 0
+    tutorial_steer_mask = 0
+    tutorial_steer_count = 0
+    steps := tutorial_steps()
+    if steps[0].baseline != nil do tutorial_mark = steps[0].baseline()
+}
+
+tutorial_advance :: proc() {
+    tutorial_step += 1
+    steps := tutorial_steps()
+    if tutorial_step >= len(steps) {
+        tutorial_active = false
+        tutorial_write_flag() // 毕业：不再自动开课
+        return
+    }
+    if steps[tutorial_step].baseline != nil {
+        tutorial_mark = steps[tutorial_step].baseline()
+    }
+}
+
+tutorial_skip :: proc() {
+    tutorial_active = false
+    tutorial_write_flag() // 跳过同样不再自动开课
+}
+
+// one frame of the tutorial state machine — pure (no raylib), so the
+// self-test can drive it: any_key/esc are sampled by the caller.
+tutorial_step_logic :: proc(any_key, esc: bool) {
+    if !tutorial_active do return
+    if esc { // Esc 随时优雅退出，游戏原样继续
+        tutorial_skip()
+        return
+    }
+    steps := tutorial_steps()
+    if tutorial_step >= len(steps) {
+        tutorial_active = false
+        return
+    }
+    s := steps[tutorial_step]
+    if s.detector == nil {
+        if any_key do tutorial_advance()
+    } else if s.detector() {
+        tutorial_advance()
+    }
+}
+
+tutorial_region_rect :: proc(r: TutRegion) -> rl.Rectangle {
+    switch r {
+    case .BOTTOM_BAR:   return {0, SCREEN_H - 74, SCREEN_W, 74}
+    case .FEED_BOX:     return {510, 736, 580, 98}
+    case .DEX_PANEL:    return {SCREEN_W - 392, 160, 384, 344}
+    case .EDITOR_PANEL: return {SCREEN_W - 594, 6, 588, SCREEN_H - 12}
+    case .NONE:         return {}
+    }
+    return {}
+}
+
+// dim everything (~55%) except the step's highlight rect + a speech bubble
+draw_tutorial :: proc() {
+    if !tutorial_active || state != .PLAYING do return
+    steps := tutorial_steps()
+    if tutorial_step >= len(steps) do return
+    s := steps[tutorial_step]
+
+    dim := rl.Color{0, 0, 0, 140} // ~55%
+    if s.region == .NONE {
+        rl.DrawRectangle(0, 0, SCREEN_W, SCREEN_H, dim)
+    } else {
+        r := tutorial_region_rect(s.region)
+        x0, y0 := i32(r.x), i32(r.y)
+        x1 := i32(r.x + r.width)
+        y1 := i32(r.y + r.height)
+        rl.DrawRectangle(0, 0, SCREEN_W, y0, dim)
+        rl.DrawRectangle(0, y1, SCREEN_W, SCREEN_H - y1, dim)
+        rl.DrawRectangle(0, y0, x0, y1 - y0, dim)
+        rl.DrawRectangle(x1, y0, SCREEN_W - x1, y1 - y0, dim)
+        pulse := 0.6 + 0.4 * math.sin(time_total * 5)
+        rl.DrawRectangleLinesEx(r, 2, {255, 214, 130, u8(110 + 90 * pulse)})
+    }
+
+    // speech-bubble panel, bottom-center (raised when it would cover the feed box)
+    text := fmt.ctprintf("%s", s.text)
+    sub: cstring
+    if s.detector == nil {
+        sub = fmt.ctprintf("第 %d/%d 步 · 按任意键继续 · Esc 跳过教程", tutorial_step + 1, len(steps))
+    } else {
+        sub = fmt.ctprintf("第 %d/%d 步 · Esc 跳过教程", tutorial_step + 1, len(steps))
+    }
+    tw := measure_text(text, 25, true)
+    sw := measure_text(sub, 15)
+    pw := max(tw, sw) + 56
+    ph: i32 = 78
+    px := (SCREEN_W - pw) / 2
+    py: i32 = SCREEN_H - 196
+    if s.region == .FEED_BOX do py = 626
+    rl.DrawRectangle(px, py, pw, ph, {12, 15, 26, 242})
+    rl.DrawRectangleLinesEx({f32(px), f32(py), f32(pw), f32(ph)}, 1, {255, 210, 140, 170})
+    draw_text(text, px + (pw - tw) / 2, py + 13, 25, {255, 236, 180, 255}, true)
+    draw_text(sub, px + (pw - sw) / 2, py + 49, 15, {165, 170, 188, 255})
+}
+
+// ---------------------------------------------------------------------------
+// 演示模式 (attract loop): 30 s idle on the title screen → the AI snake
+// starts performing by itself: feeding mode (autopilot is native there) plus
+// a scripted cast playlist, with rotating selling-point captions. Any input
+// bails back to the title screen. This same scenario is the demo reel the
+// SNAKE_RECORD hook captures.
+// ---------------------------------------------------------------------------
+
+TITLE_IDLE_ATTRACT_SECS :: 30.0
+ATTRACT_CAST_SECS       :: 6.0
+ATTRACT_CAPTION_SECS    :: 5.0
+
+AttractItem :: struct {
+    word:   string, // non-empty: cast via cast_word (showcase word)
+    preset: int,    // word == "": cast via cast_preset
+}
+
+ATTRACT_PLAYLIST := [?]AttractItem{
+    {preset = 0},          // 苹果
+    {word = "火箭辣椒"},    // 剧本蓝图同款：先上天，再坠毁
+    {preset = 6},          // 星星
+    {word = "星星糖"},
+    {preset = 1},          // 辣椒（暴走）
+    {preset = 3},          // 手榴弹（炸尾）
+    {word = "神秘蛋"},
+    {preset = 2},          // 冰棍
+    {preset = 5},          // 毒蘑菇（蛇会学乖）
+    {preset = 7},          // 神秘蛋预设：每次随机
+    {preset = 4},          // 便便（扣分，终身拒吃）
+    {word = "星星糖"},
+}
+
+ATTRACT_CAPTIONS := [?]string{
+    "AI 自动驾驶中——看它怎么飞",
+    "每一种食物都是玩家发明的",
+    "说一句话，就能造出带剧本的效果",
+    "创造你自己的食物吧——按任意键开始！",
+}
+
+attract_begin :: proc() {
+    attract_active = true
+    attract_elapsed = 0
+    attract_cast_idx = 0
+    attract_cast_t = ATTRACT_CAST_SECS // 第一投立即开火
+    attract_topup_t = 0
+    title_idle_t = 0
+    game_mode = .FEEDING
+    reset_game()
+    state = .PLAYING
+}
+
+attract_update :: proc(dt: f32) {
+    if !attract_active do return
+    attract_elapsed += dt
+    attract_cast_t += dt
+    if attract_cast_t >= ATTRACT_CAST_SECS {
+        attract_cast_t = 0
+        item := ATTRACT_PLAYLIST[attract_cast_idx % len(ATTRACT_PLAYLIST)]
+        attract_cast_idx += 1
+        if item.word != "" {
+            cast_word(item.word)
+        } else {
+            cast_preset(item.preset)
+        }
+    }
+    // 断粮救场：没有玩家看着，别让蛇空场超过 ~2 秒（演示观赏性）
+    attract_topup_t += dt
+    if attract_topup_t >= 2.0 {
+        attract_topup_t = 0
+        if willing_food_count() == 0 {
+            cast_preset(int(rand.int_max(8)))
+        }
+    }
+}
+
+attract_exit :: proc() {
+    attract_active = false
+    title_idle_t = 0
+    state = .TITLE
+    reset_game()
+}
+
+attract_caption_index :: proc() -> int {
+    return int(attract_elapsed / ATTRACT_CAPTION_SECS) % len(ATTRACT_CAPTIONS)
+}
+
+// title-screen idle clock; returns true once when 30 s elapse with no input
+attract_idle_tick :: proc(dt: f32, any_input: bool) -> bool {
+    if any_input {
+        title_idle_t = 0
+        return false
+    }
+    title_idle_t += dt
+    return title_idle_t >= TITLE_IDLE_ATTRACT_SECS
+}
+
+// rotating selling-point caption bar, bottom-center (replaces the H hint)
+draw_attract :: proc() {
+    if !attract_active do return
+    c := fmt.ctprintf("%s", ATTRACT_CAPTIONS[attract_caption_index()])
+    w := measure_text(c, 23, true)
+    x := (SCREEN_W - w) / 2
+    y: i32 = SCREEN_H - 116
+    rl.DrawRectangle(x - 22, y - 9, w + 44, 40, {10, 12, 20, 200})
+    rl.DrawRectangleLinesEx({f32(x - 22), f32(y - 9), f32(w + 44), 40}, 1, {255, 210, 140, 130})
+    draw_text(c, x, y, 23, {255, 232, 175, 255}, true)
 }
 
 // ---------------------------------------------------------------------------
@@ -4029,9 +4565,7 @@ editor_handle_input :: proc(dt: f32) {
         editor_text_keys()
         return
     }
-    if rl.IsKeyPressed(.V) {
-        view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
-    }
+    if rl.IsKeyPressed(.V) do toggle_view()
     if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
     if rl.IsKeyPressed(.ESCAPE) {
         editor_close()
@@ -4876,6 +5410,9 @@ CJK_SOURCE :: [?]string{
     "已清除 未配置 只能手动 忙请稍候 不能为空 保存失败 已保存 时可以 请换个说法 请重试或 先有蓝图才能 无名料理 设计中 金身 得分 自创 样品",
     "速度不变 长 炸掉尾巴 长度不变 全屏 粒子 下个蛋 无敌护盾 掉头反转 立刻 秒后 重复次 概率 宏 未定义 共条 我的食物 火箭辣椒 坠毁 咯哒",
     "★×°…·「」（），。？： › ←↑→↓ 、 ⇧ 删",
+    // 教练模式 + 演示模式 (coach tutorial + attract captions)
+    "这条蛇是开的你的工作是喂它！按打开投喂框输入任意词，回车投放试试预设食物图鉴翻页再投一个创造台调整数值然后保存并投放毕业复制分享码发给朋友。蛇归你了第步·跳过教程按任意键继续转向（屏幕方向）切换第一人称环绕视角可以随时让救场",
+    "自动驾驶中——看它怎么飞每一种食物都是玩家发明的说一句话，就能造出带剧本的效果创造你自己的食物吧——按任意键开始！新手教程标题界面秒无操作进入演示",
 }
 
 // top-1400 Han chars by frequency, counted from ~100k chars of real Chinese
@@ -5266,6 +5803,8 @@ draw_title :: proc() {
     if best > 0 {
         draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 240, 21, rl.GOLD)
     }
+    draw_centered("H: 新手教程 · 标题界面 30 秒无操作自动进入演示", SCREEN_H/2 + 272, 16,
+        rl.Color{115, 120, 136, 255})
 }
 
 draw_game_over :: proc() {
@@ -5404,6 +5943,8 @@ draw_frame :: proc(alpha: f32) {
     draw_input_box()
     draw_editor()
     draw_toast()
+    draw_attract()
+    draw_tutorial()
     if state == .PLAYING && !started {
         draw_centered("Steer with A / D / W / S to launch the snake", SCREEN_H - 76, 24,
             rl.Color{u8(200 + 55 * math.sin(time_total * 4)), 220, 120, 255}, true)
@@ -5428,6 +5969,21 @@ capture :: proc(filename: cstring, alpha: f32) {
     rl.ExportImage(img, filename)
     rl.UnloadImage(img)
     rl.UnloadRenderTexture(rt)
+}
+
+// SNAKE_RECORD reel: ~24 s of the attract scenario at ~10 fps → ~240 PNGs
+RECORD_SECONDS :: 24.0
+RECORD_DT      :: 0.1
+
+// same offscreen technique as capture(), reusing one persistent render target
+record_capture :: proc(rt: rl.RenderTexture2D, filename: cstring, alpha: f32) {
+    rl.BeginTextureMode(rt)
+    draw_frame(alpha)
+    rl.EndTextureMode()
+    img := rl.LoadImageFromTexture(rt.texture)
+    rl.ImageFlipVertical(&img)
+    rl.ExportImage(img, filename)
+    rl.UnloadImage(img)
 }
 
 // SNAKE_SHOT only: a canned blueprint kind so the dex capture shows the
@@ -5482,9 +6038,14 @@ main :: proc() {
     llm_init_config() // FEED_LLM_API_KEY / FEED_LLM_BASE_URL / FEED_LLM_MODEL
 
     // DEBUG: offscreen-render verification mode (SNAKE_SHOT=1) — runs with a
-    // hidden window and quits by itself once all captures are taken
+    // hidden window and quits by itself once all captures are taken.
+    // SNAKE_RECORD=<outdir> is the demo-reel variant: it runs the attract
+    // scenario for RECORD_SECONDS of game time and dumps ~10 fps PNG frames
+    // into <outdir>/frames/ (see make_demo.py for the WebP assembly).
     shot_mode := os.get_env("SNAKE_SHOT", context.allocator) == "1"
-    if shot_mode {
+    record_dir := os.get_env("SNAKE_RECORD", context.allocator)
+    record_mode := record_dir != ""
+    if shot_mode || record_mode {
         rl.SetConfigFlags({.MSAA_4X_HINT, .WINDOW_HIDDEN})
     } else {
         rl.SetConfigFlags({.MSAA_4X_HINT})
@@ -5523,6 +6084,16 @@ main :: proc() {
     shots := 0
     shot_bp_idx := -1 // blueprint kind index injected for the dex capture
 
+    // SNAKE_RECORD: persistent render target + the attract scenario as the reel
+    record_rt: rl.RenderTexture2D
+    record_t: f32 = 0
+    record_frame := 0
+    if record_mode {
+        _ = os.make_directory_all(fmt.tprintf("%s/frames", record_dir))
+        record_rt = rl.LoadRenderTexture(SCREEN_W, SCREEN_H)
+        attract_begin()
+    }
+
     for !rl.WindowShouldClose() {
         dt := min(rl.GetFrameTime(), 0.05)
         time_total += dt
@@ -5533,27 +6104,62 @@ main :: proc() {
             play(snd_die)
         }
 
+        // sampled once per frame: attract exit + idle clock + tutorial "any key"
+        any_key := rl.GetKeyPressed() != .KEY_NULL
+        mouse_input := rl.IsMouseButtonPressed(.LEFT) || rl.IsMouseButtonPressed(.RIGHT) ||
+            rl.IsMouseButtonPressed(.MIDDLE) || rl.GetMouseWheelMove() != 0
+
         alpha := clamp(move_timer / move_interval, 0, 1)
+
+        // 演示模式：任何输入退回标题界面（这个按键本身被吞掉，不再触发标题操作）
+        attract_swallowed := false
+        if attract_active && (any_key || mouse_input) {
+            attract_exit()
+            attract_swallowed = true
+        }
 
         switch state {
         case .TITLE:
-            if rl.IsKeyPressed(.SPACE) || rl.IsKeyPressed(.ENTER) {
-                game_mode = .CLASSIC
-                autopilot = false
-                reset_game()
-                state = .PLAYING
-            }
-            if rl.IsKeyPressed(.F) {
-                game_mode = .FEEDING
-                reset_game()
-                state = .PLAYING
+            if !attract_swallowed {
+                if !shot_mode && attract_idle_tick(dt, any_key || mouse_input) {
+                    attract_begin()
+                    break
+                }
+                // H: 教程（投喂章 / 经典章，按当前模式）
+                if rl.IsKeyPressed(.H) {
+                    autopilot = false
+                    reset_game()
+                    state = .PLAYING
+                    tutorial_start(game_mode == .FEEDING ? .FEED : .CLASSIC)
+                    break
+                }
+                if rl.IsKeyPressed(.SPACE) || rl.IsKeyPressed(.ENTER) {
+                    game_mode = .CLASSIC
+                    autopilot = false
+                    reset_game()
+                    state = .PLAYING
+                    if !tutorial_seen() do tutorial_start(.CLASSIC) // 首次启动自动开课
+                }
+                if rl.IsKeyPressed(.F) {
+                    game_mode = .FEEDING
+                    reset_game()
+                    state = .PLAYING
+                    if !tutorial_seen() do tutorial_start(.FEED) // 首次启动自动开课
+                }
             }
         case .PLAYING:
+            if attract_active do attract_update(dt)
+            // Esc 先让面板（投喂框/创造台/文本编辑）消费；没人消费才轮到教程跳过
+            tut_esc := rl.IsKeyPressed(.ESCAPE) && !input_open && !editor_open && edit_target == .NONE
             handle_text_input()
             if editor_open {
                 editor_handle_input(dt) // 创造台接管键盘；游戏照常运行
             } else {
                 handle_input()
+            }
+            // H: 随时重开教程（游戏不重置，从第 1 步重来）
+            if rl.IsKeyPressed(.H) && !input_open && edit_target == .NONE {
+                tutorial_start(game_mode == .FEEDING ? .FEED : .CLASSIC)
             }
             if !input_open && !editor_open {
                 if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) { state = .PAUSED; break }
@@ -5591,13 +6197,12 @@ main :: proc() {
             if game_mode == .FEEDING do update_food_rot(dt)
             alpha = clamp(smoothstep(move_timer / move_interval), 0, 1)
             update_particles(dt)
+            tutorial_step_logic(any_key, tut_esc) // 教练模式：观察状态变化推进步骤
         case .PAUSED:
             if rl.IsKeyPressed(.P) || rl.IsKeyPressed(.SPACE) do state = .PLAYING
             if rl.IsKeyPressed(.R) { reset_game(); state = .PLAYING }
             // allow inspecting from the other view while paused
-            if rl.IsKeyPressed(.V) {
-                view_mode = view_mode == .FIRST ? .ORBIT : .FIRST
-            }
+            if rl.IsKeyPressed(.V) do toggle_view()
             if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
         case .GAME_OVER, .WIN:
             // 创造台打开时 Enter/R 属于编辑器（投喂模式 autopilot 会自动重开）
@@ -5620,6 +6225,18 @@ main :: proc() {
 
         rl.BeginDrawing()
         draw_frame(alpha)
+
+        // SNAKE_RECORD: a frame every 100 ms of game time for ~24 s, then exit 0
+        if record_mode {
+            record_t += dt
+            for f32(record_frame) * RECORD_DT <= record_t + 0.0001 &&
+                f32(record_frame) * RECORD_DT <= RECORD_SECONDS + 0.0001 {
+                record_capture(record_rt,
+                    fmt.ctprintf("%s/frames/f%04d.png", record_dir, record_frame + 1), alpha)
+                record_frame += 1
+            }
+            if record_t >= RECORD_SECONDS + RECORD_DT do break
+        }
 
         // DEBUG: offscreen captures (reliable even when the window is occluded)
         if shot_mode {
@@ -5671,6 +6288,7 @@ main :: proc() {
         rl.UnloadFont(font_bold)
         if cjk_ok do rl.UnloadFont(font_cjk)
     }
+    if record_mode do rl.UnloadRenderTexture(record_rt)
     if audio_ok {
         rl.UnloadSound(snd_eat)
         rl.UnloadSound(snd_die)

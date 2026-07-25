@@ -9,6 +9,7 @@ snake3d-*.zip
 # runtime data
 best.txt
 creations.json
+tutorial.txt
 
 # debug captures
 dbg*.png

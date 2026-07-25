@@ -48,6 +48,15 @@ Workshop**, or `B` to watch the AI play by itself.
   12³ cube. Press `B` and watch the AI paint with a 90-segment body
 - 📮 **Viral share codes** — one keystroke (`C`) copies your creation;
   a friend pastes it to play. Your **creator byline** travels inside
+- 🎓 **Hands-on tutorial** — first launch walks you through 8 steps of
+  food-god school; press `H` anytime to retake it, `Esc` to skip
+- 📺 **Attract mode** — idle on the title screen for 30 s and the AI
+  snake starts its own demo reel; any key takes over
+
+![Attract mode](docs/attract.webp)
+
+*This attract loop was recorded fully autonomously with `SNAKE_RECORD` +
+`make_demo.py` (241-frame animated WebP, under 0.5 MB).*
 
 | Workshop · manual design | Workshop · AI blueprint |
 | :---: | :---: |
@@ -122,6 +131,24 @@ The workshop's "★ describe an idea" uses the same variables.
 </details>
 
 <details>
+<summary><b>Recording the demo reel (SNAKE_RECORD)</b></summary>
+
+Runs the 24 s attract scenario (the same scripted playlist + rotating
+captions as the title-screen demo) in a hidden window, capturing an
+offscreen frame every 100 ms, then assembles them into an animated WebP
+with PIL:
+
+```bash
+SNAKE_RECORD=/tmp/shinake_rec ./shinake        # → /tmp/shinake_rec/frames/f0001.png…f0241.png
+python3 make_demo.py /tmp/shinake_rec/frames docs/attract.webp --fps 10
+```
+
+`make_demo.py`: tunable `--fps 10` `--width 512` `--quality 70`,
+plus `--selftest`. The same demo also plays live after 30 s idle on the
+title screen; any key exits.
+</details>
+
+<details>
 <summary><b>Full controls</b></summary>
 
 | Input | Action |
@@ -133,6 +160,7 @@ The workshop's "★ describe an idea" uses the same variables.
 | `IJKL` / mouse drag | Rotate / orbit the cube, `U`/`O`/wheel zoom |
 | `-` / `=` | Slow down / speed up |
 | `P` / `Space` | Pause · `R` restart |
+| `H` | Tutorial (restart anytime, title or in-game) |
 
 Feeding Lab: `T` feed box · `1-8` presets · `⇧1-8` quick-cast creations ·
 `E` workshop · `Tab` dex (`↑↓` select, `Enter` cast, `X` delete creation,
@@ -153,9 +181,10 @@ odin build . -out:shinake -o:speed
 ```
 
 Single file `main.odin`, no other dependencies. Headless self-tests:
-`SNAKE_SELFTEST=1 ./shinake` (26 checks: share codes, blueprint engine,
-library, picky-eater regression), `SNAKE_LLMTEST=1` (LLM path, with
-`mock_llm.py`), `SNAKE_SHOT=1` (offscreen captures).
+`SNAKE_SELFTEST=1 ./shinake` (28 checks: share codes, blueprint engine,
+library, picky-eater regression, tutorial + attract state machines),
+`SNAKE_LLMTEST=1` (LLM path, with `mock_llm.py`), `SNAKE_SHOT=1`
+(offscreen captures), `SNAKE_RECORD=<dir>` (demo-reel frames).
 </details>
 
 ## 📦 Download

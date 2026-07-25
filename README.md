@@ -41,6 +41,15 @@
   按 `B` 看 AI 飞出 90 节的艺术品
 - 📮 **分享码裂变** — 得意之作一键复制（`C`），发给朋友粘贴即玩，
   码里还带着**你的创作者署名**
+- 🎓 **手把手教程** — 首次启动自动开课，8 步学会当造物主；
+  随时按 `H` 重学，`Esc` 跳过
+- 📺 **演示模式** — 标题界面 30 秒无操作，AI 蛇自动开播 attract loop，
+  任意键接管
+
+![演示模式](docs/attract.webp)
+
+*这条 attract loop 是 `SNAKE_RECORD` + `make_demo.py` 全自动录制的
+（241 帧动画 WebP，不到 0.5 MB）。*
 
 | 创造台 · 手动设计 | 创造台 · AI 创意蓝图 |
 | :---: | :---: |
@@ -103,6 +112,21 @@ export FEED_LLM_MODEL=kimi-k2-0905-preview           # 默认值
 </details>
 
 <details>
+<summary><b>录制演示动画（SNAKE_RECORD）</b></summary>
+
+隐藏窗口跑 24 秒演示剧本（就是标题界面的 attract loop：预设 + 展示词
+定时投喂 + 轮播卖点字幕），每 100 ms 离屏截一帧，再用 PIL 拼成动画 WebP：
+
+```bash
+SNAKE_RECORD=/tmp/shinake_rec ./shinake        # → /tmp/shinake_rec/frames/f0001.png…f0241.png
+python3 make_demo.py /tmp/shinake_rec/frames docs/attract.webp --fps 10
+```
+
+`make_demo.py`：`--fps 10` `--width 512` `--quality 70` 均可调，
+`--selftest` 自检。标题界面 30 秒无操作也会进入同一演示，任意键退出。
+</details>
+
+<details>
 <summary><b>完整操作表</b></summary>
 
 | 按键 | 作用 |
@@ -114,6 +138,7 @@ export FEED_LLM_MODEL=kimi-k2-0905-preview           # 默认值
 | `IJKL` / 鼠标拖拽 | 旋转 / 环绕立方体，`U`/`O`/滚轮缩放 |
 | `-` / `=` | 减速 / 加速 |
 | `P` / `空格` | 暂停 · `R` 重开 |
+| `H` | 教程（标题界面或游戏中随时重开） |
 
 投喂实验室：`T` 投喂框 · `1-8` 预设 · `⇧1-8` 快捷投喂作品 ·
 `E` 创造台 · `Tab` 图鉴（`↑↓` 选择，`Enter` 投喂，`X` 删除作品，
@@ -133,8 +158,8 @@ odin build . -out:shinake -o:speed
 ```
 
 单文件 `main.odin`，无其他依赖。无头自测：`SNAKE_SELFTEST=1 ./shinake`
-（26 项：分享码/蓝图引擎/作品库/挑食回归），`SNAKE_LLMTEST=1`（LLM 链路，
-配合 `mock_llm.py`），`SNAKE_SHOT=1`（离屏截图）。
+（28 项：分享码/蓝图引擎/作品库/挑食回归/教程与演示状态机），`SNAKE_LLMTEST=1`（LLM 链路，
+配合 `mock_llm.py`），`SNAKE_SHOT=1`（离屏截图），`SNAKE_RECORD=<目录>`（录制演示帧）。
 </details>
 
 ## 📦 下载
