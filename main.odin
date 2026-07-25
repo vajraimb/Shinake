@@ -377,24 +377,44 @@ reset_game :: proc() {
 }
 
 spawn_food :: proc() {
-    if len(snake) >= GRID_N * GRID_N * GRID_N {
+    if len(snake) >= map_free_cells() {
         state = .WIN
         play(snd_win)
         return
     }
-    for {
+    // never on the snake, never inside a map wall, not too close to the head
+    for _ in 0..<400 {
         f := IV3{
             i32(rand.int_max(GRID_N)),
             i32(rand.int_max(GRID_N)),
             i32(rand.int_max(GRID_N)),
         }
-        // never on the snake, and not too close to the head
         d := abs(f.x - snake[0].x) + abs(f.y - snake[0].y) + abs(f.z - snake[0].z)
-        if !on_snake(f) && d >= 4 {
-            food = f
+        if on_snake(f) || map_solid(f) || d < 4 do continue
+        food = f
+        return
+    }
+    // crowded board (the old loop could spin forever here): deterministic scan
+    for i in 0..<CELLS {
+        c := cell3(i)
+        if on_snake(c) || map_solid(c) do continue
+        d := abs(c.x - snake[0].x) + abs(c.y - snake[0].y) + abs(c.z - snake[0].z)
+        if d >= 4 {
+            food = c
             return
         }
     }
+    // last resort: any fillable cell at all (snake fills nearly everything)
+    for i in 0..<CELLS {
+        c := cell3(i)
+        if !on_snake(c) && !map_solid(c) {
+            food = c
+            return
+        }
+    }
+    // nothing fillable left — that IS a full board
+    state = .WIN
+    play(snd_win)
 }
 
 queue_dir :: proc(d: IV3) {
@@ -457,6 +477,12 @@ step :: proc() {
         die()
         return
     }
+    // obstacle collision: solid map cells kill like the boundary wall;
+    // 护盾 ghosts straight through instead (same as shielded self-bite)
+    if map_solid(nh) && shield_timer <= 0 {
+        die()
+        return
+    }
     // self collision (tail cell frees up unless growing)
     body := pending_growth > 0 ? snake[:] : snake[:len(snake) - 1]
     for s in body {
@@ -494,7 +520,7 @@ step :: proc() {
         _ = pop(&snake)
     }
 
-    if len(snake) >= GRID_N * GRID_N * GRID_N {
+    if len(snake) >= map_free_cells() {
         state = .WIN
         play(snd_win)
     }
@@ -619,6 +645,7 @@ safe_to_eat :: proc(first: IV3) -> bool {
 
     // can the simulated head still reach its own tail?
     mark_body(sim[:], &sim_blocked)
+    mark_map(&sim_blocked) // 障碍在生存模拟里是永久的墙
     bfs(sim[len(sim) - 1], &sim_dist, &sim_blocked)
     for off in DIRS6 {
         n := IV3{sim[0].x + off.x, sim[0].y + off.y, sim[0].z + off.z}
@@ -637,6 +664,7 @@ ai_choose :: proc() -> IV3 {
     // 1. shortest safe path to the current target (if any)
     if ai_has_target {
         mark_body(snake[:], &ai_blocked)
+        mark_map(&ai_blocked)
         bfs(ai_target, &ai_dist, &ai_blocked)
         for off in DIRS6 {
             n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
@@ -653,6 +681,7 @@ ai_choose :: proc() -> IV3 {
 
     // 2. no safe route (or nothing edible) — chase our own tail to buy time
     mark_body(snake[:], &ai_blocked)
+    mark_map(&ai_blocked)
     bfs(tip, &ai_dist, &ai_blocked)
     best_d = 1 << 30
     for off in DIRS6 {
@@ -673,6 +702,219 @@ ai_choose :: proc() -> IV3 {
         if in_bounds(n) && !ai_blocked[idx3(n)] do return off
     }
     return dir
+}
+
+// ---------------------------------------------------------------------------
+// 障碍地图 (obstacle maps, v3.0): a 1728-cell bitmask of solid cells.
+// Solids kill like the boundary wall; the AI's blocked-cell model, every
+// free-cell picker, the minimap and the HUD all read the same bits.
+// ---------------------------------------------------------------------------
+
+MAP_CELLS :: GRID_N * GRID_N * GRID_N // 1728
+MAP_WORDS :: (MAP_CELLS + 63) / 64    // 27 u64 words
+
+MapData :: struct {
+    name:   string,
+    byline: string,   // "" for built-ins
+    bits:   [MAP_WORDS]u64,  // bitmask over idx3 order; 1 = solid
+}
+
+current_map  : MapData
+map_has_walls := false   // fast path: false = 虚空, callers skip all checks
+
+MapID :: enum { VOID, PILLARS, CROSS, HIVE, CAVE }
+
+map_id   := MapID.VOID
+map_seed : u32 = 41      // 随机洞穴: N 每次进入都 +1，所以第一张洞穴是 #42
+cave_name_buf: [40]u8
+
+map_bit :: proc(i: int) -> bool {
+    return current_map.bits[i >> 6] & (u64(1) << u64(i & 63)) != 0
+}
+
+map_solid :: proc(c: IV3) -> bool {
+    if !map_has_walls || !in_bounds(c) do return false
+    return map_bit(idx3(c))
+}
+
+// note: setting a bit raises map_has_walls; clearing bits does NOT lower it
+// again (stale-true is harmless — it only disables the fast path). Bulk
+// edits end with map_finalize() or map_clear() to keep the flag exact.
+map_set :: proc(c: IV3, solid: bool) {
+    if !in_bounds(c) do return
+    i := idx3(c)
+    mask := u64(1) << u64(i & 63)
+    if solid {
+        current_map.bits[i >> 6] |= mask
+        map_has_walls = true
+    } else {
+        current_map.bits[i >> 6] &= ~mask
+    }
+}
+
+map_clear :: proc() {
+    for i in 0..<MAP_WORDS do current_map.bits[i] = 0
+    map_has_walls = false
+}
+
+map_solid_count :: proc() -> int {
+    n := 0
+    for w in current_map.bits {
+        v := w
+        for v != 0 {  // Kernighan popcount: ≤ a few hundred set bits
+            v &= v - 1
+            n += 1
+        }
+    }
+    return n
+}
+
+map_finalize :: proc() {
+    map_has_walls = map_solid_count() > 0
+}
+
+// the snake can only ever fill non-solid cells — WIN triggers there
+map_free_cells :: proc() -> int {
+    return MAP_CELLS - map_solid_count()
+}
+
+// OR solid cells into an AI blocked array (call right after mark_body)
+mark_map :: proc(blocked: ^[CELLS]bool) {
+    if !map_has_walls do return
+    for i in 0..<CELLS {
+        if map_bit(i) do blocked[i] = true
+    }
+}
+
+// 出生区留空: nothing solid within Manhattan distance 3 of the cube center
+map_clear_center :: proc() {
+    c :: GRID_N / 2
+    for z in 0..<GRID_N do for y in 0..<GRID_N do for x in 0..<GRID_N {
+        if abs(x - c) + abs(y - c) + abs(z - c) <= 3 {
+            i := x + GRID_N * (y + GRID_N * z)
+            current_map.bits[i >> 6] &= ~(u64(1) << u64(i & 63))
+        }
+    }
+}
+
+// fraction of free cells reachable from the (0,0,0)-area free cell (BFS)
+map_free_reach_ratio :: proc() -> f32 {
+    free := 0
+    start := -1
+    for i in 0..<CELLS {
+        if !map_bit(i) {
+            free += 1
+            if start < 0 do start = i
+        }
+    }
+    if free == 0 do return 0
+    blocked: [CELLS]bool
+    dist:    [CELLS]i32
+    for i in 0..<CELLS do blocked[i] = map_bit(i)
+    bfs(cell3(start), &dist, &blocked)
+    reached := 0
+    for i in 0..<CELLS do if dist[i] >= 0 do reached += 1
+    return f32(reached) / f32(free)
+}
+
+// --- the 5 built-in maps ---
+
+map_build_void :: proc() {
+    map_clear()
+    current_map.name = "虚空"
+    current_map.byline = ""
+}
+
+map_build_pillars :: proc() {  // 4 根立柱 (x,z)∈{(3,3),(3,8),(8,3),(8,8)}, y 2..9 → 32
+    map_clear()
+    PILLAR_XZ :: [2]i32{3, 8}
+    for px in PILLAR_XZ do for pz in PILLAR_XZ {
+        for y in 2..=9 do map_set({px, i32(y), pz}, true)
+    }
+    current_map.name = "石柱林"
+    current_map.byline = ""
+    map_finalize()
+}
+
+map_build_cross :: proc() {
+    // 两堵垂直整墙 x=6 / z=6，各开一扇 2 格门，高度错开：
+    // x 墙低门 z=3 (y 4-5)，z 墙高门 x=3 (y 7-8) → 144+144-12-4 = 272
+    map_clear()
+    MID :: GRID_N / 2
+    for y in 0..<GRID_N do for z in 0..<GRID_N do map_set({MID, i32(y), i32(z)}, true)
+    for y in 0..<GRID_N do for x in 0..<GRID_N do map_set({i32(x), i32(y), MID}, true)
+    map_set({MID, 4, 3}, false)
+    map_set({MID, 5, 3}, false)
+    map_set({3, 7, MID}, false)
+    map_set({3, 8, MID}, false)
+    current_map.name = "十字回廊"
+    current_map.byline = ""
+    map_finalize()
+}
+
+map_build_hive :: proc() {
+    // 2×2×2 砖块摆在 (3,3,3)+4n 每个格点（轴向 span {2,3}/{6,7}/{10,11}），
+    // 任何一格距中心 ≤3 的整块跳过 → 23 块 × 8 = 184
+    map_clear()
+    CENTERS :: [3]i32{3, 7, 11}
+    c :: GRID_N / 2
+    for cz in CENTERS do for cy in CENTERS do for cx in CENTERS {
+        keep := true
+        for dz in 0..<2 do for dy in 0..<2 do for dx in 0..<2 {
+            cell := IV3{cx - 1 + i32(dx), cy - 1 + i32(dy), cz - 1 + i32(dz)}
+            if abs(cell.x - c) + abs(cell.y - c) + abs(cell.z - c) <= 3 {
+                keep = false
+                break
+            }
+        }
+        if !keep do continue
+        for dz in 0..<2 do for dy in 0..<2 do for dx in 0..<2 {
+            map_set({cx - 1 + i32(dx), cy - 1 + i32(dy), cz - 1 + i32(dz)}, true)
+        }
+    }
+    current_map.name = "蜂巢"
+    current_map.byline = ""
+    map_finalize()
+}
+
+map_build_cave :: proc(seed: u32) {
+    // xorshift 从 seed 逐格 p=0.055 填充；连通自由格 <85% 就确定性地换
+    // seed+1 重试（给定 N 永远生成同一张图；中心 3 格内永远畅通）
+    s := seed
+    for _ in 0..<100 {
+        map_clear()
+        h := s != 0 ? s : 0x9E3779B9
+        for i in 0..<MAP_CELLS {
+            if xnext(&h, 1000) < 55 {
+                current_map.bits[i >> 6] |= u64(1) << u64(i & 63)
+            }
+        }
+        map_clear_center()
+        map_finalize()
+        if map_free_reach_ratio() >= 0.85 do break
+        s += 1
+    }
+    current_map.name = fmt.bprintf(cave_name_buf[:], "随机洞穴 #%d", seed)
+    current_map.byline = ""
+}
+
+map_apply :: proc(id: MapID) {
+    map_id = id
+    switch id {
+    case .VOID:    map_build_void()
+    case .PILLARS: map_build_pillars()
+    case .CROSS:   map_build_cross()
+    case .HIVE:    map_build_hive()
+    case .CAVE:    map_build_cave(map_seed)
+    }
+}
+
+// 标题界面 N：虚空→石柱林→十字回廊→蜂巢→随机洞穴→虚空…
+// 每次进入随机洞穴都换一个新种子
+map_cycle :: proc() {
+    next := MapID((int(map_id) + 1) % len(MapID))
+    if next == .CAVE do map_seed += 1
+    map_apply(next)
 }
 
 // ---------------------------------------------------------------------------
@@ -855,7 +1097,7 @@ spawn_kind :: proc(kind_idx: int) {
             i32(rand.int_max(GRID_N)),
         }
         d := abs(f.x - snake[0].x) + abs(f.y - snake[0].y) + abs(f.z - snake[0].z)
-        if on_snake(f) || d < 4 do continue
+        if on_snake(f) || map_solid(f) || d < 4 do continue
         occupied := false
         for of in foods do if of.pos == f { occupied = true; break }
         if occupied do continue
@@ -3493,6 +3735,237 @@ self_test :: proc() -> bool {
         fmt.println("report text: PASS")
     }
 
+    // ================= Phase 7: 障碍地图 (obstacle maps, v3.0) =================
+    // snapshot the map state so the suite leaves zero residue
+    st_map   := current_map
+    st_id    := map_id
+    st_seed  := map_seed
+    st_walls := map_has_walls
+
+    // --- T27: bitmask set/get/clear/count + bounds guards ---
+    map_clear()
+    if map_has_walls || map_solid_count() != 0 || map_free_cells() != CELLS {
+        fmt.println("SELFTEST FAIL: map_clear", map_has_walls, map_solid_count())
+        return false
+    }
+    map_set({3, 4, 5}, true)
+    map_set({0, 0, 0}, true)
+    map_set({GRID_N - 1, GRID_N - 1, GRID_N - 1}, true)
+    if !map_solid({3, 4, 5}) || !map_solid({0, 0, 0}) || !map_solid({11, 11, 11}) ||
+       map_solid({3, 4, 6}) || map_solid_count() != 3 || !map_has_walls ||
+       map_free_cells() != CELLS - 3 {
+        fmt.println("SELFTEST FAIL: map set/get", map_solid_count())
+        return false
+    }
+    map_set({3, 4, 5}, false)
+    if map_solid({3, 4, 5}) || map_solid_count() != 2 {
+        fmt.println("SELFTEST FAIL: map unset", map_solid_count())
+        return false
+    }
+    map_set({-1, 0, 0}, true)
+    map_set({GRID_N, 0, 0}, true) // out of bounds: no-ops
+    if map_solid_count() != 2 || map_solid({-1, 0, 0}) || map_solid({GRID_N, 0, 0}) {
+        fmt.println("SELFTEST FAIL: map bounds guard", map_solid_count())
+        return false
+    }
+    map_clear()
+    if map_has_walls || map_solid_count() != 0 {
+        fmt.println("SELFTEST FAIL: map_clear after edits")
+        return false
+    }
+    fmt.println("map bitmask: PASS")
+
+    // --- T28: a wall ahead kills like the boundary; 护盾 ghosts through ---
+    game_mode = .CLASSIC
+    map_clear()
+    map_set({8, 6, 6}, true) // reset_game 的蛇头在 (7,6,6) 朝 +x 飞
+    map_finalize()
+    autopilot = false
+    reset_game()
+    state = .PLAYING
+    step()
+    if state != .GAME_OVER {
+        fmt.println("SELFTEST FAIL: map wall did not kill", state, snake[0])
+        return false
+    }
+    death_squawk = false
+    reset_game()
+    state = .PLAYING
+    if !map_solid({8, 6, 6}) {
+        fmt.println("SELFTEST FAIL: reset_game cleared the map")
+        return false
+    }
+    shield_timer = 5
+    step() // 金身穿墙：头进入实心格，不死
+    if state != .PLAYING || snake[0] != (IV3{8, 6, 6}) {
+        fmt.println("SELFTEST FAIL: shield ghost through wall", state, snake[0])
+        return false
+    }
+    shield_timer = 0
+    death_squawk = false
+    fmt.println("map collision: PASS")
+
+    // --- T29: AI routes around walls; enclosed food falls back, no crash ---
+    map_clear()
+    map_set({8, 6, 6}, true) // 正挡在头 (7,6,6) 与食物 (9,6,6) 之间
+    map_finalize()
+    reset_game()
+    state = .PLAYING
+    food = IV3{9, 6, 6}
+    ai_target = food
+    ai_has_target = true
+    d_ai := ai_choose()
+    if d_ai == (IV3{1, 0, 0}) {
+        fmt.println("SELFTEST FAIL: AI drove straight into a map wall")
+        return false
+    }
+    n_ai := IV3{snake[0].x + d_ai.x, snake[0].y + d_ai.y, snake[0].z + d_ai.z}
+    if !in_bounds(n_ai) || map_solid(n_ai) {
+        fmt.println("SELFTEST FAIL: AI picked a lethal cell", d_ai, n_ai)
+        return false
+    }
+    // 把食物六面焊死：BFS 找不到路，必须安全退回追尾/保命
+    for off in DIRS6 {
+        c := IV3{food.x + off.x, food.y + off.y, food.z + off.z}
+        if in_bounds(c) && !on_snake(c) do map_set(c, true)
+    }
+    map_finalize()
+    d_ai2 := ai_choose()
+    n_ai2 := IV3{snake[0].x + d_ai2.x, snake[0].y + d_ai2.y, snake[0].z + d_ai2.z}
+    if !in_bounds(n_ai2) || map_solid(n_ai2) {
+        fmt.println("SELFTEST FAIL: enclosed-food fallback is lethal", d_ai2, n_ai2)
+        return false
+    }
+    fmt.println("map AI: PASS")
+
+    // --- T30: spawn_kind / spawn_food never pick solid cells ---
+    map_clear()
+    for z in 0..<GRID_N do for y in 0..<GRID_N do map_set({0, i32(y), i32(z)}, true)
+    map_finalize()
+    game_mode = .FEEDING
+    reset_game()
+    clear(&foods)
+    for _ in 0..<200 do spawn_kind(0)
+    if len(foods) != 200 {
+        fmt.println("SELFTEST FAIL: spawn_kind starved with walls", len(foods))
+        return false
+    }
+    for f in foods {
+        if map_solid(f.pos) || on_snake(f.pos) {
+            fmt.println("SELFTEST FAIL: spawn_kind picked a blocked cell", f.pos)
+            return false
+        }
+    }
+    game_mode = .CLASSIC
+    reset_game()
+    for _ in 0..<50 {
+        spawn_food()
+        if state != .PLAYING || map_solid(food) || on_snake(food) {
+            fmt.println("SELFTEST FAIL: classic spawn picked a blocked cell", food)
+            return false
+        }
+    }
+    fmt.println("map spawn: PASS")
+
+    // --- T31: preset geometry, counts, determinism, connectivity ---
+    map_apply(.VOID)
+    if map_solid_count() != 0 || map_has_walls || current_map.name != "虚空" {
+        fmt.println("SELFTEST FAIL: 虚空", map_solid_count(), current_map.name)
+        return false
+    }
+    map_apply(.PILLARS)
+    if map_solid_count() != 32 || current_map.name != "石柱林" ||
+       !map_solid({3, 2, 3}) || !map_solid({3, 9, 3}) || !map_solid({8, 5, 8}) ||
+       map_solid({3, 1, 3}) || map_solid({3, 10, 3}) {
+        fmt.println("SELFTEST FAIL: 石柱林", map_solid_count())
+        return false
+    }
+    map_apply(.CROSS)
+    if map_solid_count() != 272 || current_map.name != "十字回廊" ||
+       !map_solid({6, 0, 0}) || !map_solid({0, 0, 6}) || !map_solid({6, 6, 6}) ||
+       map_solid({6, 4, 3}) || map_solid({6, 5, 3}) || // x 墙的低门
+       map_solid({3, 7, 6}) || map_solid({3, 8, 6}) {  // z 墙的高门
+        fmt.println("SELFTEST FAIL: 十字回廊", map_solid_count())
+        return false
+    }
+    map_apply(.HIVE)
+    hive_center_ok := true
+    for z in 0..<GRID_N do for y in 0..<GRID_N do for x in 0..<GRID_N {
+        if abs(x - 6) + abs(y - 6) + abs(z - 6) <= 3 &&
+           map_solid({i32(x), i32(y), i32(z)}) {
+            hive_center_ok = false
+        }
+    }
+    if map_solid_count() != 184 || current_map.name != "蜂巢" || !hive_center_ok ||
+       !map_solid({2, 2, 2}) || !map_solid({10, 10, 10}) || map_solid({6, 6, 6}) {
+        fmt.println("SELFTEST FAIL: 蜂巢", map_solid_count(), hive_center_ok)
+        return false
+    }
+    map_seed = 42
+    map_apply(.CAVE)
+    cave_bits := current_map.bits
+    cave_count := map_solid_count()
+    cave_name := strings.clone(current_map.name, context.temp_allocator)
+    map_apply(.CAVE) // 同种子 → 完全相同的比特
+    if current_map.bits != cave_bits || current_map.name != cave_name {
+        fmt.println("SELFTEST FAIL: 随机洞穴 #42 not deterministic")
+        return false
+    }
+    if cave_count < 20 || cave_count > 300 {
+        fmt.println("SELFTEST FAIL: 随机洞穴 density out of range", cave_count)
+        return false
+    }
+    if map_free_reach_ratio() < 0.85 {
+        fmt.println("SELFTEST FAIL: 随机洞穴 connectivity", map_free_reach_ratio())
+        return false
+    }
+    cave_center_ok := true
+    for z in 0..<GRID_N do for y in 0..<GRID_N do for x in 0..<GRID_N {
+        if abs(x - 6) + abs(y - 6) + abs(z - 6) <= 3 &&
+           map_solid({i32(x), i32(y), i32(z)}) {
+            cave_center_ok = false
+        }
+    }
+    if !cave_center_ok {
+        fmt.println("SELFTEST FAIL: 随机洞穴 center not 3-clear")
+        return false
+    }
+    map_seed = 43
+    map_apply(.CAVE)
+    if current_map.bits == cave_bits {
+        fmt.println("SELFTEST FAIL: 随机洞穴 seed made no difference")
+        return false
+    }
+    fmt.println("map presets: PASS")
+
+    // --- T32: reset_game keeps the selected map (R 重开不换图) ---
+    map_apply(.HIVE)
+    keep_bits := current_map.bits
+    game_mode = .CLASSIC
+    reset_game()
+    if map_id != .HIVE || current_map.bits != keep_bits || map_solid_count() != 184 {
+        fmt.println("SELFTEST FAIL: reset_game dropped the map (classic)")
+        return false
+    }
+    game_mode = .FEEDING
+    reset_game()
+    if map_id != .HIVE || current_map.bits != keep_bits {
+        fmt.println("SELFTEST FAIL: reset_game dropped the map (feeding)")
+        return false
+    }
+    fmt.println("map persistence: PASS")
+
+    // restore the map state + game shell exactly as found
+    current_map = st_map
+    map_id = st_id
+    map_seed = st_seed
+    map_has_walls = st_walls
+    game_mode = .CLASSIC
+    autopilot = false
+    shield_timer = 0
+    death_squawk = false
+    state = .TITLE
+
     // restore tutorial.txt exactly as found
     if orig_tut_exists {
         _ = os.write_entire_file(TUTORIAL_FILE, orig_tut)
@@ -3697,6 +4170,7 @@ random_safe_dir :: proc() -> IV3 {
         if off.x == -dir.x && off.y == -dir.y && off.z == -dir.z do continue
         n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
         if !in_bounds(n) do continue
+        if map_solid(n) do continue
         hit := false
         for s in snake[:len(snake) - 1] do if s == n { hit = true; break }
         if !hit do return off
@@ -4182,6 +4656,9 @@ ATTRACT_CAPTIONS := [?]string{
     "创造你自己的食物吧——按任意键开始！",
 }
 
+attract_saved_map  := MapID.VOID // 进入演示前的地图选择，退出时还原
+attract_saved_seed : u32 = 0
+
 attract_begin :: proc() {
     attract_active = true
     attract_elapsed = 0
@@ -4190,6 +4667,10 @@ attract_begin :: proc() {
     attract_topup_t = 0
     title_idle_t = 0
     game_mode = .FEEDING
+    // 演示固定在虚空：playlist 的飞行节奏没有针对迷宫调过
+    attract_saved_map = map_id
+    attract_saved_seed = map_seed
+    if map_id != .VOID do map_apply(.VOID)
     reset_game()
     state = .PLAYING
 }
@@ -4221,6 +4702,10 @@ attract_update :: proc(dt: f32) {
 attract_exit :: proc() {
     attract_active = false
     title_idle_t = 0
+    if map_id != attract_saved_map { // 还原料演示前的地图（洞穴按原种子确定性重建）
+        map_seed = attract_saved_seed
+        map_apply(attract_saved_map)
+    }
     state = .TITLE
     reset_game()
 }
@@ -4309,7 +4794,7 @@ editor_pick_showcase :: proc() {
         {2, GRID_N - 2, 2},
     }
     for cell in candidates {
-        if on_snake(cell) do continue
+        if on_snake(cell) || map_solid(cell) do continue
         occupied := false
         for f in foods do if f.pos == cell { occupied = true; break }
         if !occupied {
@@ -5040,6 +5525,23 @@ draw_boundaries :: proc() {
     draw_grid_lines({0, 0, -1}, line_col)
 }
 
+// 障碍地图：深青灰砖块 + 顶部亮面 + 边缘微光；≤ ~10% 的格子，全画即可
+MAP_BLOCK_COL :: rl.Color{70, 80, 95, 230}
+MAP_TOP_COL   :: rl.Color{104, 118, 138, 235}
+MAP_EDGE_COL  :: rl.Color{150, 168, 192, 110}
+
+draw_map :: proc() {
+    if !map_has_walls do return
+    s :: f32(CELL) * 0.98
+    for i in 0..<CELLS {
+        if !map_bit(i) do continue
+        p := cell_to_world(cell3(i))
+        rl.DrawCubeV(p, {s, s, s}, MAP_BLOCK_COL)
+        rl.DrawCubeV(p + {0, s * 0.47, 0}, {s * 0.92, 0.05, s * 0.92}, MAP_TOP_COL)
+        rl.DrawCubeWires(p, s, s, s, MAP_EDGE_COL)
+    }
+}
+
 // Dotted "flight path" ahead of the head: shows where going straight leads,
 // colored by distance to the first obstacle (green -> yellow -> red).
 draw_path_hint :: proc() {
@@ -5051,6 +5553,11 @@ draw_path_hint :: proc() {
     for i in 1..=GRID_N {
         n := IV3{snake[0].x + dir.x * i32(i), snake[0].y + dir.y * i32(i), snake[0].z + dir.z * i32(i)}
         if n.x < 0 || n.x >= GRID_N || n.y < 0 || n.y >= GRID_N || n.z < 0 || n.z >= GRID_N {
+            obstacle_dist = i
+            found = true
+            break
+        }
+        if map_solid(n) {  // 地图障碍也算“前方障碍物”
             obstacle_dist = i
             found = true
             break
@@ -5558,6 +6065,8 @@ CJK_SOURCE :: [?]string{
     "自动驾驶中——看它怎么飞每一种食物都是玩家发明的说一句话，就能造出带剧本的效果创造你自己的食物吧——按任意键开始！新手教程标题界面秒无操作进入演示",
     // 战报图 (battle report card) labels, ranks, toasts
     "战报经典模式得分最高长度节吃掉个时长奇葩菜单段位这局还什么都没吃到再得晋升已是按任意键关闭保存并复制文字快去炫耀吧蛇界萌新初出茅庐老练机长立方体传说三维之神新手饲养员资深黑暗料理大师食神下凡莲虹虚榴彩",
+    // 障碍地图 (obstacle maps) names + title-screen selector
+    "地图 切换 虚空 石柱林 十字回廊 蜂巢 随机洞穴",
 }
 
 // top-1400 Han chars by frequency, counted from ~100k chars of real Chinese
@@ -5679,6 +6188,13 @@ draw_projection :: proc(px, py, size: i32, ha, va: i32, flip_v: bool,
         v := mini_px(0, size, coord_of(c, va))
         y := flip_v ? py + size - v : py + v
         rl.DrawRectangle(x - r/2, y - r/2, r, r, col)
+    }
+
+    // 障碍：暗灰琥珀小点，三个视图都能读出迷宫结构
+    if map_has_walls {
+        for i in 0..<CELLS {
+            if map_bit(i) do plot(px, py, size, cell3(i), ha, va, flip_v, rl.Color{188, 158, 96, 90}, 2)
+        }
     }
 
     for s in snake do plot(px, py, size, s, ha, va, flip_v, rl.Color{70, 180, 80, 220}, 4)
@@ -5836,7 +6352,7 @@ draw_hud :: proc() {
     if game_mode == .FEEDING {
         draw_text(fmt.ctprintf("FOODS   %d in the cube", len(foods)), 26, 176, 18,
             rl.Color{255, 190, 120, 255})
-        draw_text(fmt.ctprintf("投喂实验室 · 发现 %d 种", len(kinds)), 26, 204, 19,
+        draw_text(fmt.ctprintf("投喂实验室 · 发现 %d 种 · 地图: %s", len(kinds), current_map.name), 26, 204, 19,
             rl.Color{255, 200, 140, 255}, true)
         // 断粮提示：AI 找不到目标且场上真的没有任何愿意吃的食物
         // （ai_has_target 只在移动 tick 更新，willing_food_count 当场重算，
@@ -5895,9 +6411,11 @@ draw_hud :: proc() {
 
     fd := abs(food.x - snake[0].x) + abs(food.y - snake[0].y) + abs(food.z - snake[0].z)
     draw_text(fmt.ctprintf("FOOD    %d cells away", fd), 26, 176, 18, rl.Color{255, 140, 140, 255})
+    draw_text(fmt.ctprintf("地图: %s", current_map.name), 26, 204, 19,
+        rl.Color{150, 168, 192, 255}, true)
     if autopilot {
         pulse := 0.65 + 0.35 * math.sin(time_total * 5)
-        draw_text("AUTOPILOT  (B to take over)", 26, 204, 19,
+        draw_text("AUTOPILOT  (B to take over)", 26, 230, 19,
             rl.Color{255, 200, u8(120 + 80 * pulse), 255}, true)
     }
 
@@ -5945,10 +6463,14 @@ draw_title :: proc() {
     draw_centered("SPACE: classic mode", SCREEN_H/2 + 152, 30, rl.RAYWHITE, true)
     draw_centered("F: 投喂实验室 — AI 蛇自动觅食，你来发明食物 (type any word, T to feed)",
         SCREEN_H/2 + 196, 22, rl.Color{255, 200, 140, 255}, true)
+    // 地图选择（N 循环）：进入游戏前唯一换图入口，选中后跨重开保持
+    map_pulse := 0.7 + 0.3 * math.sin(time_total * 4)
+    draw_centered(fmt.ctprintf("地图: %s   (N 切换)", current_map.name), SCREEN_H/2 + 236, 26,
+        rl.Color{255, u8(190 + 40 * map_pulse), 110, 255}, true)
     if best > 0 {
-        draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 240, 21, rl.GOLD)
+        draw_centered(fmt.ctprintf("Best: %d", best), SCREEN_H/2 + 274, 21, rl.GOLD)
     }
-    draw_centered("H: 新手教程 · 标题界面 30 秒无操作自动进入演示", SCREEN_H/2 + 272, 16,
+    draw_centered("H: 新手教程 · 标题界面 30 秒无操作自动进入演示", SCREEN_H/2 + 306, 16,
         rl.Color{115, 120, 136, 255})
 }
 
@@ -6078,6 +6600,7 @@ draw_frame :: proc(alpha: f32) {
 
     rl.BeginMode3D(cam)
     draw_boundaries()
+    draw_map()
     draw_tether()
     if game_mode == .FEEDING {
         draw_foods()
@@ -6541,6 +7064,7 @@ main :: proc() {
     load_creator() // creator.txt（env SNAKE_CREATOR 优先）
     make_presets()
     load_creations() // 作品库（creations.json）— 预设之后注册，不投放不碰 last_cast
+    map_apply(map_id)  // 默认虚空；填充 current_map.name 等
     reset_game()
 
     // SNAKE_REPORT=1: fonts + presets are ready here — fabricate, render, exit
@@ -6599,6 +7123,10 @@ main :: proc() {
                     state = .PLAYING
                     tutorial_start(game_mode == .FEEDING ? .FEED : .CLASSIC)
                     break
+                }
+                // N: 切换障碍地图（虚空→石柱林→十字回廊→蜂巢→随机洞穴→…）
+                if rl.IsKeyPressed(.N) {
+                    map_cycle()
                 }
                 if rl.IsKeyPressed(.SPACE) || rl.IsKeyPressed(.ENTER) {
                     game_mode = .CLASSIC
@@ -6759,6 +7287,19 @@ main :: proc() {
                 capture("shot_editor_blueprint.png", alpha)
                 shots = 6
             } else if shots == 6 {
+                // 障碍地图展示图（README docs/map.png）：蜂巢 + 经典模式
+                // 自动驾驶，给蛇 ~2.5 s 飞进迷宫深处再截
+                editor_close()
+                map_apply(.HIVE)
+                game_mode = .CLASSIC
+                reset_game()
+                autopilot = true
+                state = .PLAYING
+                shots = 7
+            } else if shots == 7 && time_total > 18.3 {
+                capture("shot_map.png", alpha)
+                shots = 8
+            } else if shots == 8 {
                 break // 截图完成，自动退出
             }
         }

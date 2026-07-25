@@ -55,6 +55,14 @@ Workshop**, or `B` to watch the AI play by itself.
 - 📊 **Battle-report card** — auto-generated on death / press `G` for an
   800×450 card (weird menu + rank badge); the text version copies with
   one keystroke, repo link included
+- 🧱 **Obstacle maps** — 5 built-ins: Void / Pillar Forest / Cross
+  Corridors / Hive / Random Cave; press `N` on the title screen to cycle.
+  AI pathfinding, food spawning and the minimap are all wall-aware
+
+![Obstacle map · the Hive](docs/map.png)
+
+*The Hive map: 23 solid 2×2×2 blocks scattered through the cube; the AI
+autopilot threads the maze while the tri-view minimap tracks every wall.*
 
 ![Attract mode](docs/attract.webp)
 
@@ -91,8 +99,9 @@ an 800×450 card saved next to the binary, `C` copies the text version.*
   the registry interface is ready)
 - **Food Market** — publish / rank / download recipes; share codes are
   the prelude
-- **Fully open 3D snake maps** — obstacles, mazes, user-made maps with
-  their own share codes
+- ✅ **Obstacle maps** (v3.0) → 🚧 **Map share codes & map library** (v3.1)
+  → 🚧 **Map editor** (v3.2) → 💭 **Maps you eat into being**
+  (blueprint `spawn_obstacle`, v3.3)
 
 **💭 Wild ideas**
 
@@ -168,6 +177,7 @@ title screen; any key exits.
 | `-` / `=` | Slow down / speed up |
 | `P` / `Space` | Pause · `R` restart |
 | `H` | Tutorial (restart anytime, title or in-game) |
+| `N` | Cycle obstacle map (title screen, 5 built-ins) |
 
 Feeding Lab: `T` feed box · `1-8` presets · `⇧1-8` quick-cast creations ·
 `E` workshop · `Tab` dex (`↑↓` select, `Enter` cast, `X` delete creation,
@@ -189,9 +199,9 @@ odin build . -out:shinake -o:speed
 ```
 
 Single file `main.odin`, no other dependencies. Headless self-tests:
-`SNAKE_SELFTEST=1 ./shinake` (31 checks: share codes, blueprint engine,
+`SNAKE_SELFTEST=1 ./shinake` (37 checks: share codes, blueprint engine,
 library, picky-eater regression, tutorial + attract state machines,
-battle report), `SNAKE_LLMTEST=1` (LLM path, with `mock_llm.py`),
+battle report, obstacle maps), `SNAKE_LLMTEST=1` (LLM path, with `mock_llm.py`),
 `SNAKE_SHOT=1` (offscreen captures), `SNAKE_RECORD=<dir>` (demo-reel
 frames), `SNAKE_REPORT=1` (sample battle-report card).
 </details>
