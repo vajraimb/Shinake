@@ -177,7 +177,7 @@ toast          : string          // owned clone
 toast_t        : f32 = 0
 
 // --- 战报图 (battle report card) state ---
-session_eaten  : map[string]int  // 食物名 -> 本局吃掉次数（投喂模式；经典模式不记）
+session_eaten  : map[string]int  // 食物名 -> 本局吃掉次数（战报奇葩菜单用；吃掉投喂系食物就记，与模式无关）
 report_tex     : rl.Texture2D    // 最近生成的战报卡（id != 0 时可上屏）
 report_ready   := false          // 本局战报已生成过（防止每帧重复生成）
 report_open    := false          // 投喂模式 G 键弹出的战报浮层
@@ -376,13 +376,44 @@ reset_game :: proc() {
     }
 }
 
+// F: 游戏中即时切换 经典 ↔ 投喂。蛇 / 分数 / 地图 / 特效全部保留，战局继续。
+// 切到投喂：AI 接管、立即起跑、场上无食时补一个苹果开场；豆豆由模式门自然离场
+switch_to_feeding :: proc() {
+    game_mode = .FEEDING
+    autopilot = true
+    started = true
+    clear(&dir_queue)
+    dex_open = false
+    input_open = false
+    report_open = false
+    if len(foods) == 0 do spawn_kind(0)
+}
+
+// 切回经典：交还方向盘、补一颗豆豆；场上剩余投喂食物保留（继续可吃，见 step）
+switch_to_classic :: proc() {
+    game_mode = .CLASSIC
+    autopilot = false
+    clear(&dir_queue)
+    dex_open = false
+    input_open = false
+    report_open = false
+    spawn_food()
+}
+
+// 豆豆与投喂食物不同格（spawn_kind 里 occupied 检查的镜像）
+food_cell_free :: proc(c: IV3) -> bool {
+    for f in foods do if f.pos == c do return false
+    return true
+}
+
 spawn_food :: proc() {
     if len(snake) >= map_free_cells() {
         state = .WIN
         play(snd_win)
         return
     }
-    // never on the snake, never inside a map wall, not too close to the head
+    // never on the snake, never inside a map wall, not too close to the head,
+    // never stacked on a feeding-lab food (both systems coexist after F)
     for _ in 0..<400 {
         f := IV3{
             i32(rand.int_max(GRID_N)),
@@ -390,14 +421,14 @@ spawn_food :: proc() {
             i32(rand.int_max(GRID_N)),
         }
         d := abs(f.x - snake[0].x) + abs(f.y - snake[0].y) + abs(f.z - snake[0].z)
-        if on_snake(f) || map_solid(f) || d < 4 do continue
+        if on_snake(f) || map_solid(f) || d < 4 || !food_cell_free(f) do continue
         food = f
         return
     }
     // crowded board (the old loop could spin forever here): deterministic scan
     for i in 0..<CELLS {
         c := cell3(i)
-        if on_snake(c) || map_solid(c) do continue
+        if on_snake(c) || map_solid(c) || !food_cell_free(c) do continue
         d := abs(c.x - snake[0].x) + abs(c.y - snake[0].y) + abs(c.z - snake[0].z)
         if d >= 4 {
             food = c
@@ -407,7 +438,7 @@ spawn_food :: proc() {
     // last resort: any fillable cell at all (snake fills nearly everything)
     for i in 0..<CELLS {
         c := cell3(i)
-        if !on_snake(c) && !map_solid(c) {
+        if !on_snake(c) && !map_solid(c) && food_cell_free(c) {
             food = c
             return
         }
@@ -495,15 +526,17 @@ step :: proc() {
 
     inject_at(&snake, 0, nh)
 
-    if game_mode == .FEEDING {
-        // feeding: eat whatever food sits at the head cell
-        for f, i in foods {
-            if f.pos == nh {
-                eat_food(i)
-                break
-            }
+    // 两套食物系统全模式共存（F 即时切换后场上可能同时有投喂食物和豆豆）：
+    // 先吃投喂食物（蓝图效果模式无关），豆豆只认经典模式，同拍让到下拍
+    ate := false
+    for f, i in foods {
+        if f.pos == nh {
+            eat_food(i)
+            ate = true
+            break
         }
-    } else if nh == food {
+    }
+    if !ate && game_mode == .CLASSIC && nh == food {
         pending_growth += 1
         score += 10
         eaten += 1
@@ -4022,6 +4055,121 @@ self_test :: proc() -> bool {
         fmt.println("back_to_title: PASS")
     }
 
+    // --- T35: switch_to_feeding — 战局保留，AI 接管立即起跑，空场补食 ---
+    {
+        map_apply(.VOID)
+        game_mode = .CLASSIC
+        autopilot = false
+        reset_game()
+        state = .PLAYING
+        started = true
+        // 吃一颗豆豆再跑两拍，制造一局"进行中"的经典战局
+        food = IV3{snake[0].x + 1, snake[0].y, snake[0].z}
+        step() // +10 分
+        food = IV3{0, 0, 0} // 钉死豆豆，后两拍 deterministic
+        for _ in 0..<2 do step()
+        snap_score, snap_eaten, snap_len := score, eaten, len(snake)
+        snap_head := snake[0]
+        switch_to_feeding()
+        ok35 := game_mode == .FEEDING && autopilot && started &&
+            score == snap_score && eaten == snap_eaten && len(snake) == snap_len &&
+            snake[0] == snap_head && len(dir_queue) == 0 &&
+            !dex_open && !input_open && !report_open
+        // 经典局 foods 为空 → 切入时补一个 kinds[0] 开场
+        ok35 = ok35 && len(foods) == 1 && foods[0].kind == 0
+        // 清空 foods 后再切入（经典兜一圈回来）同样要补
+        clear(&foods)
+        switch_to_classic()
+        switch_to_feeding()
+        ok35 = ok35 && len(foods) == 1 && foods[0].kind == 0 &&
+            score == snap_score && len(snake) == snap_len
+        if !ok35 || snap_score == 0 {
+            fmt.println("SELFTEST FAIL: switch_to_feeding",
+                game_mode, autopilot, score, len(snake), len(foods))
+            return false
+        }
+        fmt.println("switch to feeding: PASS")
+    }
+
+    // --- T36: switch_to_classic — 交还方向盘，豆豆避蛇避墙避 foods 阵列 ---
+    {
+        map_apply(.VOID)
+        game_mode = .FEEDING
+        reset_game()
+        state = .PLAYING
+        // 故意铺几个 foods，豆豆不得与它们叠格
+        append(&foods, Food{kind = 0, pos = {0, 0, 0}})
+        append(&foods, Food{kind = 0, pos = {GRID_N - 1, GRID_N - 1, GRID_N - 1}})
+        append(&foods, Food{kind = 0, pos = {0, GRID_N - 1, 0}})
+        n_foods := len(foods)
+        snap_score, snap_len := score, len(snake)
+        switch_to_classic()
+        ok36 := game_mode == .CLASSIC && !autopilot && len(dir_queue) == 0 &&
+            score == snap_score && len(snake) == snap_len && len(foods) == n_foods &&
+            !on_snake(food) && !map_solid(food)
+        for f in foods do if f.pos == food { ok36 = false; break }
+        if !ok36 {
+            fmt.println("SELFTEST FAIL: switch_to_classic", food, autopilot, len(foods))
+            return false
+        }
+        fmt.println("switch to classic: PASS")
+    }
+
+    // --- T37: 双系统同场 — 经典模式先吃效果食物，下一拍再吃豆豆 ---
+    {
+        map_apply(.VOID)
+        game_mode = .CLASSIC
+        autopilot = false
+        reset_game()
+        state = .PLAYING
+        started = true
+        // 辣椒式暴走食物（自测环境不注册预设，内联一个同款）
+        ck := FoodKind{
+            name = strings.clone("自测辣椒"), author = "本地",
+            hue = 14, color = hsv_rgb(14, 0.72, 1.0), shape = .CONE,
+            rarity = 1, fx_speed = 0.5, fx_speed_t = 5, fx_score = 20, fx_bursts = 1,
+        }
+        append(&kinds, ck)
+        kind_by_name[ck.name] = len(kinds) - 1
+        h := snake[0]
+        append(&foods, Food{kind = len(kinds) - 1, pos = {h.x + 1, h.y, h.z}})
+        food = IV3{h.x + 2, h.y, h.z} // 豆豆在再前一格
+        sc0 := score
+        step() // 踩到效果食物：暴走生效，模式无关；豆豆留到下拍
+        ok37 := state == .PLAYING && fx_speed_timer > 0 && fx_speed_mult == 0.5 &&
+            score == sc0 + 20 && len(foods) == 0
+        step() // 吃到豆豆 +10
+        ok37 = ok37 && state == .PLAYING && score == sc0 + 30
+        if !ok37 {
+            fmt.println("SELFTEST FAIL: dual food systems", score, sc0, fx_speed_timer, len(foods))
+            return false
+        }
+        fmt.println("dual food systems: PASS")
+    }
+
+    // --- T38: 往返切换 — 经典→投喂→经典，蛇长 / 分数 / eaten 全程不变 ---
+    {
+        map_apply(.VOID)
+        game_mode = .CLASSIC
+        autopilot = false
+        reset_game()
+        state = .PLAYING
+        started = true
+        food = IV3{snake[0].x + 1, snake[0].y, snake[0].z}
+        step() // 吃一颗豆
+        snap_score, snap_eaten, snap_len := score, eaten, len(snake)
+        switch_to_feeding()
+        step() // 投喂 AI 飞一拍（新补的食物 ≥4 格远，当拍吃不到）
+        switch_to_classic()
+        if game_mode != .CLASSIC || autopilot || state != .PLAYING ||
+           score != snap_score || eaten != snap_eaten || len(snake) != snap_len {
+            fmt.println("SELFTEST FAIL: mode round trip",
+                game_mode, autopilot, score, eaten, len(snake))
+            return false
+        }
+        fmt.println("mode round trip: PASS")
+    }
+
     // restore the map state + game shell exactly as found
     current_map = st_map
     map_id = st_id
@@ -4316,8 +4464,21 @@ handle_input :: proc() {
     // M: modern / classic snake skin
     if rl.IsKeyPressed(.M) do modern_skin = !modern_skin
 
+    // F: 游戏中即时切换 经典 ↔ 投喂（战局保留；投喂框打字 / 演示 / 教程中不响应）
+    if rl.IsKeyPressed(.F) && !input_open && !attract_active {
+        if tutorial_active {
+            set_toast("教程进行中——完成或 Esc 跳过后再切换")
+        } else if game_mode == .FEEDING {
+            switch_to_classic()
+            set_toast("已切换经典模式 · 方向盘交还你")
+        } else {
+            switch_to_feeding()
+            set_toast("已切换投喂模式 · AI 接管")
+        }
+    }
+
     if game_mode == .FEEDING {
-        // 投喂模式：蛇永远是 AI 操控，玩家只管投喂
+        // 投喂模式：默认 AI 开蛇、玩家只管投喂；B 可收回方向盘手动驾驶（hardcore 彩蛋）
         if rl.IsKeyPressed(.TAB) {
             dex_open = !dex_open
             dex_sel = 0
@@ -4373,21 +4534,23 @@ handle_input :: proc() {
                 copy_share_code(last_cast_kind)
             }
         }
-        return
     }
 
-    // B: toggle AI autopilot
-    if rl.IsKeyPressed(.B) {
+    // B: toggle AI autopilot（经典 + 投喂通用；投喂框打字时 B 是字母）
+    if rl.IsKeyPressed(.B) && !input_open {
         autopilot = !autopilot
         autopilot_toggle_total += 1
         if autopilot do clear(&dir_queue) // AI 接管前清空玩家排队的方向
     }
-    if autopilot do return // AI 操控时忽略方向键
+    // AI 操控时忽略方向键；投喂框输入时 WASD 是打字
+    if autopilot || input_open do return
 
-    go_left  := rl.IsKeyPressed(.A) || rl.IsKeyPressed(.LEFT)
-    go_right := rl.IsKeyPressed(.D) || rl.IsKeyPressed(.RIGHT)
-    go_up    := rl.IsKeyPressed(.W) || rl.IsKeyPressed(.UP)
-    go_down  := rl.IsKeyPressed(.S) || rl.IsKeyPressed(.DOWN)
+    // 投喂图鉴打开时方向键归图鉴翻页（WASD 仍可转向）
+    arrows_to_dex := game_mode == .FEEDING && dex_open
+    go_left  := rl.IsKeyPressed(.A) || (rl.IsKeyPressed(.LEFT)  && !arrows_to_dex)
+    go_right := rl.IsKeyPressed(.D) || (rl.IsKeyPressed(.RIGHT) && !arrows_to_dex)
+    go_up    := rl.IsKeyPressed(.W) || (rl.IsKeyPressed(.UP)    && !arrows_to_dex)
+    go_down  := rl.IsKeyPressed(.S) || (rl.IsKeyPressed(.DOWN)  && !arrows_to_dex)
 
     // 教练模式（经典章第 1 步）统计按过的方向键种类——只观察，不拦截
     if rl.IsKeyPressed(.A)     do tut_note_steer(1 << 0)
@@ -6132,6 +6295,8 @@ CJK_SOURCE :: [?]string{
     "自动驾驶中——看它怎么飞每一种食物都是玩家发明的说一句话，就能造出带剧本的效果创造你自己的食物吧——按任意键开始！新手教程标题界面秒无操作进入演示",
     // 战报图 (battle report card) labels, ranks, toasts
     "战报经典模式得分最高长度节吃掉个时长奇葩菜单段位这局还什么都没吃到再得晋升已是按任意键关闭保存并复制文字快去炫耀吧蛇界萌新初出茅庐老练机长立方体传说三维之神新手饲养员资深黑暗料理大师食神下凡莲虹虚榴彩",
+    // F 模式切换：HUD 模式行 + 切换/教程提示 toast + 底部按键条
+    "模式 经典 手动 投喂 已切换 接管 方向盘交还你 教程进行中——完成或 跳过后再切换",
     // 障碍地图 (obstacle maps) names + title-screen selector
     "地图 切换 虚空 石柱林 十字回廊 蜂巢 随机洞穴",
 }
@@ -6265,7 +6430,8 @@ draw_projection :: proc(px, py, size: i32, ha, va: i32, flip_v: bool,
     }
 
     for s in snake do plot(px, py, size, s, ha, va, flip_v, rl.Color{70, 180, 80, 220}, 4)
-    plot(px, py, size, food, ha, va, flip_v, rl.RED, 6)
+    // 目标点按模式取：经典 = 豆豆；投喂 = AI 当前目标（无目标不画，不指已离场的系统）
+    if t, ok := nav_target(); ok do plot(px, py, size, t, ha, va, flip_v, rl.RED, 6)
     plot(px, py, size, snake[0], ha, va, flip_v, rl.LIME, 6)
 
     draw_text(label, px + 4, py - 18, 14, rl.Color{190, 195, 210, 255}, true)
@@ -6407,6 +6573,12 @@ draw_food_indicator :: proc() {
     draw_text("FOOD", i32(ex) - 20, i32(ey) + 17, 13, rl.Color{255, 120, 120, 230}, true)
 }
 
+// HUD 模式行：当前模式 + 驾驶权（F 切模式，B 切驾驶权）
+mode_hud_label :: proc() -> cstring {
+    if game_mode == .FEEDING do return autopilot ? "投喂·AI" : "投喂·手动"
+    return autopilot ? "经典·AI" : "经典·手动"
+}
+
 draw_hud :: proc() {
     draw_text(fmt.ctprintf("SCORE  %d", score), 26, 22, 30, rl.RAYWHITE, true)
     draw_text(fmt.ctprintf("BEST   %d", best), 26, 60, 21, rl.GOLD)
@@ -6417,9 +6589,24 @@ draw_hud :: proc() {
         26, 150, 18, rl.Color{150, 160, 180, 255})
 
     if game_mode == .FEEDING {
-        draw_text(fmt.ctprintf("FOODS   %d in the cube", len(foods)), 26, 176, 18,
-            rl.Color{255, 190, 120, 255})
-        draw_text(fmt.ctprintf("投喂实验室 · 发现 %d 种 · 地图: %s", len(kinds), current_map.name), 26, 204, 19,
+        // 最近一个蛇还愿意吃的投喂食物的距离（豆豆 FOOD 行的投喂版；
+        // 烂掉 / 被免疫拒食的不算目标，和"没东西吃"提示同一口径）
+        nd: i32 = -1
+        for f in foods {
+            if f.rot > 0 do continue
+            k := &kinds[f.kind]
+            if kind_harmful(k) && snake_memory[k.name] >= 2 do continue
+            d := abs(f.pos.x - snake[0].x) + abs(f.pos.y - snake[0].y) + abs(f.pos.z - snake[0].z)
+            if nd < 0 || d < nd do nd = d
+        }
+        if nd >= 0 {
+            draw_text(fmt.ctprintf("FOODS   %d in the cube · nearest %d cells", len(foods), nd), 26, 176, 18,
+                rl.Color{255, 190, 120, 255})
+        } else {
+            draw_text(fmt.ctprintf("FOODS   %d in the cube", len(foods)), 26, 176, 18,
+                rl.Color{255, 190, 120, 255})
+        }
+        draw_text(fmt.ctprintf("模式: %s · 发现 %d 种 · 地图: %s", mode_hud_label(), len(kinds), current_map.name), 26, 204, 19,
             rl.Color{255, 200, 140, 255}, true)
         // 断粮提示：AI 找不到目标且场上真的没有任何愿意吃的食物
         // （ai_has_target 只在移动 tick 更新，willing_food_count 当场重算，
@@ -6471,14 +6658,14 @@ draw_hud :: proc() {
             draw_text(fmt.ctprintf("%s", strings.to_string(sb)), 26, SCREEN_H - 58, 14,
                 rl.Color{125, 130, 145, 220})
         }
-        draw_text("T: 投喂    1-8: 快捷食物    E: 创造台    Tab: 图鉴    C: 复制分享码    V: 视角    M: 皮肤    IJKL: 转视角    P/Space: 暂停    R: 重开",
+        draw_text("T: 投喂    1-8: 快捷食物    E: 创造台    Tab: 图鉴    C: 复制分享码    F: 模式    B: 手动/AI    V: 视角    M: 皮肤    IJKL: 转视角    P/Space: 暂停    R: 重开",
             26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
         return
     }
 
     fd := abs(food.x - snake[0].x) + abs(food.y - snake[0].y) + abs(food.z - snake[0].z)
     draw_text(fmt.ctprintf("FOOD    %d cells away", fd), 26, 176, 18, rl.Color{255, 140, 140, 255})
-    draw_text(fmt.ctprintf("地图: %s", current_map.name), 26, 204, 19,
+    draw_text(fmt.ctprintf("模式: %s · 地图: %s", mode_hud_label(), current_map.name), 26, 204, 19,
         rl.Color{150, 168, 192, 255}, true)
     if autopilot {
         pulse := 0.65 + 0.35 * math.sin(time_total * 5)
@@ -6486,7 +6673,7 @@ draw_hud :: proc() {
             rl.Color{255, 200, u8(120 + 80 * pulse), 255}, true)
     }
 
-    draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    -/=: speed    V: view    B: autopilot    M: skin    P/Space: pause    R: restart",
+    draw_text("WASD: steer    IJKL or drag: orbit    U/O or wheel: zoom    -/=: speed    V: view    B: autopilot    F: mode    M: skin    P/Space: pause    R: restart",
         26, SCREEN_H - 36, 16, rl.Color{160, 165, 180, 255})
 }
 
@@ -6669,11 +6856,8 @@ draw_frame :: proc(alpha: f32) {
     draw_boundaries()
     draw_map()
     draw_tether()
-    if game_mode == .FEEDING {
-        draw_foods()
-    } else {
-        draw_food()
-    }
+    if game_mode == .CLASSIC do draw_food() // 豆豆只在经典绘制
+    draw_foods() // 投喂食物两模式都画：F 切回经典后场上剩余的继续可吃，不能隐身
     first_person := view_mode == .FIRST && state != .TITLE
     if modern_skin {
         draw_snake_modern(alpha, first_person)

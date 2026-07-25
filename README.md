@@ -146,7 +146,8 @@ python3 make_demo.py /tmp/shinake_rec/frames docs/attract.webp --fps 10
 | 按键 | 作用 |
 |---|---|
 | `A/D/W/S` 或方向键 | 屏幕相对转向（上/下/左/右） |
-| `B` | AI 自动驾驶开关 |
+| `F` | 游戏中即时切换 经典 ↔ 投喂：战局保留不重开，蛇/分数/地图/特效原样续飞 |
+| `B` | AI 自动驾驶开关（全模式通用；投喂模式按 B 可收回方向盘亲自驾驶——hardcore 彩蛋玩法） |
 | `M` | 现代圆管 / 经典方块皮肤 |
 | `V` | 第一人称 / 环绕视角 |
 | `IJKL` / 鼠标拖拽 | 旋转 / 环绕立方体，`U`/`O`/滚轮缩放 |
@@ -175,7 +176,7 @@ odin build . -out:shinake -o:speed
 ```
 
 单文件 `main.odin`，无其他依赖。无头自测：`SNAKE_SELFTEST=1 ./shinake`
-（39 项：分享码/蓝图引擎/作品库/挑食回归/教程与演示状态机/战报图/障碍地图/结算屏判定），`SNAKE_LLMTEST=1`（LLM 链路，
+（43 项：分享码/蓝图引擎/作品库/挑食回归/教程与演示状态机/战报图/障碍地图/结算屏判定/模式即时切换），`SNAKE_LLMTEST=1`（LLM 链路，
 配合 `mock_llm.py`），`SNAKE_SHOT=1`（离屏截图），`SNAKE_RECORD=<目录>`（录制演示帧），
 `SNAKE_REPORT=1`（生成示例战报 report_sample.png）。
 </details>

@@ -171,7 +171,8 @@ title screen; any key exits.
 | Input | Action |
 |---|---|
 | `A/D/W/S` or arrows | Screen-relative steering |
-| `B` | AI autopilot |
+| `F` | Switch Classic ↔ Feeding mid-game: the battle carries over — snake, score, map and effects all live on |
+| `B` | AI autopilot (works in every mode; in the Feeding Lab it hands you the wheel for a hardcore manual run) |
 | `M` | Modern tube / classic cube skin |
 | `V` | First-person / orbit camera |
 | `IJKL` / mouse drag | Rotate / orbit the cube, `U`/`O`/wheel zoom |
@@ -201,9 +202,9 @@ odin build . -out:shinake -o:speed
 ```
 
 Single file `main.odin`, no other dependencies. Headless self-tests:
-`SNAKE_SELFTEST=1 ./shinake` (39 checks: share codes, blueprint engine,
+`SNAKE_SELFTEST=1 ./shinake` (43 checks: share codes, blueprint engine,
 library, picky-eater regression, tutorial + attract state machines,
-battle report, obstacle maps, game-over flow), `SNAKE_LLMTEST=1` (LLM path, with `mock_llm.py`),
+battle report, obstacle maps, game-over flow, mid-game mode switch), `SNAKE_LLMTEST=1` (LLM path, with `mock_llm.py`),
 `SNAKE_SHOT=1` (offscreen captures), `SNAKE_RECORD=<dir>` (demo-reel
 frames), `SNAKE_REPORT=1` (sample battle-report card).
 </details>
