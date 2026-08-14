@@ -20,8 +20,12 @@ import "core:unicode/utf8"
 // Constants
 // ---------------------------------------------------------------------------
 
-GRID_N :: 12          // 12 x 12 x 12 cubic lattice
+GRID_N :: 12          // 12 x 12 x 12 cubic lattice (spherical play field carved from it)
 CELL   :: 1.0
+
+// 球形场地：以原点为球心、半径 WORLD_RADIUS 的球体，与立方体六面相切。
+// 网格仍是 12×12×12，但只有球内的格子可玩；四角区域是禁区。
+WORLD_RADIUS :: f32(GRID_N) * CELL * 0.5
 
 START_INTERVAL :: 0.27   // seconds per move at start
 MIN_INTERVAL   :: 0.08   // fastest
@@ -32,7 +36,7 @@ SCREEN_H :: 900
 
 TAU :: 6.28318530718
 
-// Consistent axis colors used by the compass, minimap and cube edges
+// Consistent axis colors used by the compass, minimap and sphere rings
 AXIS_X :: rl.Color{235,  95,  95, 255}
 AXIS_Y :: rl.Color{105, 225, 115, 255}
 AXIS_Z :: rl.Color{105, 155, 245, 255}
@@ -106,7 +110,7 @@ prev_up        := IV3{0, 1, 0}
 dir_queue      : [dynamic]IV3   // desired absolute directions (snapped to axes)
 pending_growth := 0
 
-view_mode      := ViewMode.ORBIT   // default: panoramic overview of the whole cube
+view_mode      := ViewMode.ORBIT   // default: panoramic overview of the whole sphere
 modern_skin    := true             // M: 现代/经典蛇身皮肤切换
 
 food           := IV3{8, 8, 8}
@@ -241,10 +245,39 @@ cross_v3 :: proc(a, b: rl.Vector3) -> rl.Vector3 {
     return {a.y*b.z - a.z*b.y, a.z*b.x - a.x*b.z, a.x*b.y - a.y*b.x}
 }
 
+len_v3 :: proc(v: rl.Vector3) -> f32 {
+    return math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z)
+}
+
+dot_v3 :: proc(a, b: rl.Vector3) -> f32 {
+    return a.x*b.x + a.y*b.y + a.z*b.z
+}
+
 norm_v3 :: proc(v: rl.Vector3) -> rl.Vector3 {
-    l := math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z)
+    l := len_v3(v)
     if l < 1e-6 do return {0, 0, 0}
     return v / l
+}
+
+// 球面线性插值：方向走大圆，半径线性过渡。用于蛇身/路径贴着球面走弧线。
+slerp_v3 :: proc(a, b: rl.Vector3, t: f32) -> rl.Vector3 {
+    ra, rb := len_v3(a), len_v3(b)
+    if ra < 1e-4 || rb < 1e-4 do return lerp_v3(a, b, t)
+    da, db := a / ra, b / rb
+    d := clamp(dot_v3(da, db), -1, 1)
+    if d > 0.9995 || d < -0.9995 do return lerp_v3(a, b, t)
+    th := math.acos(d)
+    s := math.sin(th)
+    w0 := math.sin((1 - t) * th) / s
+    w1 := math.sin(t * th) / s
+    return norm_v3(da * w0 + db * w1) * (ra + (rb - ra) * t)
+}
+
+// Rodrigues: rotate p around unit axis by ang radians
+rotate_axis_v3 :: proc(p, axis: rl.Vector3, ang: f32) -> rl.Vector3 {
+    c := math.cos(ang)
+    s := math.sin(ang)
+    return p * c + cross_v3(axis, p) * s + axis * dot_v3(axis, p) * (1 - c)
 }
 
 v3_of :: proc(c: IV3) -> rl.Vector3 {
@@ -332,13 +365,13 @@ reset_game :: proc() {
     clear(&particles)
     clear(&foods)
 
-    c :: GRID_N / 2
-    append(&snake, IV3{c + 1, c, c})
-    append(&snake, IV3{c,     c, c})
-    append(&snake, IV3{c - 1, c, c})
+    // 出生在球面赤道（+X 面），朝 +Z 沿大圆绕行，而不是从球心沿轴直飞
+    append(&snake, IV3{GRID_N - 1, GRID_N / 2, GRID_N / 2})
+    append(&snake, IV3{GRID_N - 1, GRID_N / 2, GRID_N / 2 - 1})
+    append(&snake, IV3{GRID_N - 1, GRID_N / 2, GRID_N / 2 - 2})
     for s in snake do append(&prev_snake, s)
 
-    dir = IV3{1, 0, 0}
+    dir = IV3{0, 0, 1}
     head_up = IV3{0, 1, 0}
     prev_dir = dir
     prev_up = head_up
@@ -421,14 +454,14 @@ spawn_food :: proc() {
             i32(rand.int_max(GRID_N)),
         }
         d := abs(f.x - snake[0].x) + abs(f.y - snake[0].y) + abs(f.z - snake[0].z)
-        if on_snake(f) || map_solid(f) || d < 4 || !food_cell_free(f) do continue
+        if !cell_in_world(f) || on_snake(f) || map_solid(f) || d < 4 || !food_cell_free(f) do continue
         food = f
         return
     }
     // crowded board (the old loop could spin forever here): deterministic scan
     for i in 0..<CELLS {
         c := cell3(i)
-        if on_snake(c) || map_solid(c) || !food_cell_free(c) do continue
+        if !cell_in_world(c) || on_snake(c) || map_solid(c) || !food_cell_free(c) do continue
         d := abs(c.x - snake[0].x) + abs(c.y - snake[0].y) + abs(c.z - snake[0].z)
         if d >= 4 {
             food = c
@@ -438,7 +471,7 @@ spawn_food :: proc() {
     // last resort: any fillable cell at all (snake fills nearly everything)
     for i in 0..<CELLS {
         c := cell3(i)
-        if !on_snake(c) && !map_solid(c) && food_cell_free(c) {
+        if cell_in_world(c) && !on_snake(c) && !map_solid(c) && food_cell_free(c) {
             food = c
             return
         }
@@ -456,14 +489,18 @@ queue_dir :: proc(d: IV3) {
     append(&dir_queue, d)
 }
 
-apply_dir :: proc(d: IV3) {
-    if d == dir do return
-    if d.x == -dir.x && d.y == -dir.y && d.z == -dir.z do return  // no 180° turns
+turn_up_to :: proc(d: IV3) {
     if d == head_up {
         head_up = neg_i(dir)
     } else if d == neg_i(head_up) {
         head_up = dir
     }
+}
+
+apply_dir :: proc(d: IV3) {
+    if d == dir do return
+    if d.x == -dir.x && d.y == -dir.y && d.z == -dir.z do return  // no 180° turns
+    turn_up_to(d)
     dir = d
 }
 
@@ -498,15 +535,15 @@ step :: proc() {
     for s in snake do append(&prev_snake, s)
 
     head := snake[0]
-    nh := IV3{head.x + dir.x, head.y + dir.y, head.z + dir.z}
-
-    // boundary collision
-    if nh.x < 0 || nh.x >= GRID_N ||
-       nh.y < 0 || nh.y >= GRID_N ||
-       nh.z < 0 || nh.z >= GRID_N {
-        if shield_timer > 0 do return  // 护盾：撞墙不死，原地停一拍
+    nh, nd, stepped := advance_on_sphere(head, dir)
+    if !stepped {
+        if shield_timer > 0 do return  // 护盾：无路可走时原地停一拍
         die()
         return
+    }
+    if nd != dir {
+        turn_up_to(nd)
+        dir = nd
     }
     // obstacle collision: solid map cells kill like the boundary wall;
     // 护盾 ghosts straight through instead (same as shielded self-bite)
@@ -612,8 +649,70 @@ cell3 :: proc(i: int) -> IV3 {
     return {i32(x), i32(y), i32(z)}
 }
 
-in_bounds :: proc(c: IV3) -> bool {
+in_grid :: proc(c: IV3) -> bool {
     return c.x >= 0 && c.x < GRID_N && c.y >= 0 && c.y < GRID_N && c.z >= 0 && c.z < GRID_N
+}
+
+// 球形场地判定：网格内、且格子中心落在半径 WORLD_RADIUS 的球体内。
+cell_in_world :: proc(c: IV3) -> bool {
+    if !in_grid(c) do return false
+    p := cell_to_world(c)
+    return p.x*p.x + p.y*p.y + p.z*p.z <= WORLD_RADIUS * WORLD_RADIUS
+}
+
+// 可玩区域 = 球形场地。AI 寻路、食物生成、撞墙判定都以此为准。
+in_bounds :: proc(c: IV3) -> bool {
+    return cell_in_world(c)
+}
+
+// 先走「头 + 朝向」——和 AI 的六向 BFS 同一张图，自动驾驶才不会算一套、走一套。
+// 只有这一格已经出球时才贴着球面滑到最近的合法邻格（玩家顶着边界会绕，而不是秒死）。
+advance_on_sphere :: proc(head, d: IV3) -> (next, new_dir: IV3, ok: bool) {
+    n := IV3{head.x + d.x, head.y + d.y, head.z + d.z}
+    if cell_in_world(n) do return n, d, true
+
+    p := cell_to_world(head)
+    pr := len_v3(p)
+    if pr < 0.9 do return n, d, false
+    radial := p / pr
+    tan := v3_of(d)
+    tan -= radial * dot_v3(tan, radial)
+    tl := len_v3(tan)
+    if tl < 1e-5 {
+        n := IV3{head.x + d.x, head.y + d.y, head.z + d.z}
+        return n, d, cell_in_world(n)
+    }
+    tan /= tl
+    axis := cross_v3(radial, tan)
+    al := len_v3(axis)
+    if al < 1e-5 {
+        n := IV3{head.x + d.x, head.y + d.y, head.z + d.z}
+        return n, d, cell_in_world(n)
+    }
+    axis /= al
+    target := rotate_axis_v3(p, axis, CELL / pr)
+    tn := len_v3(target)
+    if tn > 1e-5 do target = target * (pr / tn)
+
+    best := IV3{-1, -1, -1}
+    best_off := d
+    best_s := f32(1e9)
+    found := false
+    for off in DIRS6 {
+        if off.x == -d.x && off.y == -d.y && off.z == -d.z do continue
+        c := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
+        if !cell_in_world(c) do continue
+        w := cell_to_world(c)
+        // 距离大圆落点 + 轻微偏向外侧，避免贴格时一格格往球心掉
+        s := dist_v3(w, target) - 0.35 * (len_v3(w) - pr)
+        if s < best_s {
+            best_s = s
+            best = c
+            best_off = off
+            found = true
+        }
+    }
+    return best, best_off, found
 }
 
 // breadth-first distance field from target over cells marked free in blocked
@@ -665,8 +764,9 @@ safe_to_eat :: proc(first: IV3) -> bool {
     for {
         next := IV3{-1, -1, -1}
         if steps == 0 {
-            next = IV3{cur.x + first.x, cur.y + first.y, cur.z + first.z}
-            if !in_bounds(next) || ai_dist[idx3(next)] < 0 do return false
+            stepped: bool
+            next, _, stepped = advance_on_sphere(cur, first)
+            if !stepped || !in_bounds(next) || ai_dist[idx3(next)] < 0 do return false
         } else {
             dn := ai_dist[idx3(cur)]
             for off in DIRS6 {
@@ -718,8 +818,8 @@ ai_choose :: proc() -> IV3 {
         mark_map(&ai_blocked)
         bfs(ai_target, &ai_dist, &ai_blocked)
         for off in DIRS6 {
-            n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
-            if !in_bounds(n) || ai_blocked[idx3(n)] do continue
+            n, _, ok := advance_on_sphere(head, off)
+            if !ok || !in_bounds(n) || ai_blocked[idx3(n)] do continue
             d := ai_dist[idx3(n)]
             if d >= 0 && d < best_d && safe_to_eat(off) {
                 best_d = d
@@ -736,8 +836,8 @@ ai_choose :: proc() -> IV3 {
     bfs(tip, &ai_dist, &ai_blocked)
     best_d = 1 << 30
     for off in DIRS6 {
-        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
-        if !in_bounds(n) || ai_blocked[idx3(n)] do continue
+        n, _, ok := advance_on_sphere(head, off)
+        if !ok || !in_bounds(n) || ai_blocked[idx3(n)] do continue
         d := ai_dist[idx3(n)]
         if d >= 0 && d < best_d {
             best_d = d
@@ -749,8 +849,8 @@ ai_choose :: proc() -> IV3 {
 
     // 3. doomed — pick any non-lethal move
     for off in DIRS6 {
-        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
-        if in_bounds(n) && !ai_blocked[idx3(n)] do return off
+        n, _, ok := advance_on_sphere(head, off)
+        if ok && in_bounds(n) && !ai_blocked[idx3(n)] do return off
     }
     return dir
 }
@@ -784,7 +884,7 @@ map_bit :: proc(i: int) -> bool {
 }
 
 map_solid :: proc(c: IV3) -> bool {
-    if !map_has_walls || !in_bounds(c) do return false
+    if !map_has_walls || !in_grid(c) do return false
     return map_bit(idx3(c))
 }
 
@@ -792,7 +892,7 @@ map_solid :: proc(c: IV3) -> bool {
 // again (stale-true is harmless — it only disables the fast path). Bulk
 // edits end with map_finalize() or map_clear() to keep the flag exact.
 map_set :: proc(c: IV3, solid: bool) {
-    if !in_bounds(c) do return
+    if !in_grid(c) do return
     i := idx3(c)
     mask := u64(1) << u64(i & 63)
     if solid {
@@ -824,9 +924,21 @@ map_finalize :: proc() {
     map_has_walls = map_solid_count() > 0
 }
 
-// the snake can only ever fill non-solid cells — WIN triggers there
+// the snake can only ever fill non-solid cells inside the sphere — WIN triggers there
 map_free_cells :: proc() -> int {
-    return MAP_CELLS - map_solid_count()
+    n := 0
+    for i in 0..<CELLS {
+        c := cell3(i)
+        if cell_in_world(c) && !map_bit(i) do n += 1
+    }
+    return n
+}
+
+// 球形场地内的格子总数（自测与 HUD 用）
+sphere_cell_count :: proc() -> int {
+    n := 0
+    for i in 0..<CELLS do if cell_in_world(cell3(i)) do n += 1
+    return n
 }
 
 // OR solid cells into an AI blocked array (call right after mark_body)
@@ -837,7 +949,7 @@ mark_map :: proc(blocked: ^[CELLS]bool) {
     }
 }
 
-// 出生区留空: nothing solid within Manhattan distance 3 of the cube center
+// 出生区留空: nothing solid within Manhattan distance 3 of the sphere center
 map_clear_center :: proc() {
     c :: GRID_N / 2
     for z in 0..<GRID_N do for y in 0..<GRID_N do for x in 0..<GRID_N {
@@ -848,11 +960,13 @@ map_clear_center :: proc() {
     }
 }
 
-// fraction of free cells reachable from the (0,0,0)-area free cell (BFS)
+// fraction of in-sphere free cells reachable from the first such cell (BFS)
 map_free_reach_ratio :: proc() -> f32 {
     free := 0
     start := -1
     for i in 0..<CELLS {
+        c := cell3(i)
+        if !cell_in_world(c) do continue
         if !map_bit(i) {
             free += 1
             if start < 0 do start = i
@@ -1148,7 +1262,7 @@ spawn_kind :: proc(kind_idx: int) {
             i32(rand.int_max(GRID_N)),
         }
         d := abs(f.x - snake[0].x) + abs(f.y - snake[0].y) + abs(f.z - snake[0].z)
-        if on_snake(f) || map_solid(f) || d < 4 do continue
+        if !cell_in_world(f) || on_snake(f) || map_solid(f) || d < 4 do continue
         occupied := false
         for of in foods do if of.pos == f { occupied = true; break }
         if occupied do continue
@@ -2950,7 +3064,9 @@ self_test :: proc() -> bool {
     enqueue_actions(rv[:])
     delete(rv)
     run_scheduled()
-    if snake[0] != (IV3{5, 6, 6}) || snake[len(snake) - 1] != (IV3{7, 6, 6}) || dir != (IV3{-1, 0, 0}) {
+    if snake[0] != (IV3{GRID_N - 1, GRID_N / 2, GRID_N / 2 - 2}) ||
+       snake[len(snake) - 1] != (IV3{GRID_N - 1, GRID_N / 2, GRID_N / 2}) ||
+       dir != (IV3{0, 0, -1}) {
         fmt.println("SELFTEST FAIL: reverse", snake[0], snake[len(snake) - 1], dir)
         return false
     }
@@ -2982,23 +3098,31 @@ self_test :: proc() -> bool {
     fmt.println("score_mult: PASS")
 
     // --- T8: shield survives lethal collisions ---
-    clear(&snake)
-    clear(&prev_snake)
-    clear(&dir_queue)
-    append(&snake, IV3{6, 11, 6})
-    append(&snake, IV3{6, 10, 6})
-    append(&snake, IV3{6, 9, 6})
-    for s in snake do append(&prev_snake, s)
-    dir = IV3{0, 1, 0}
+    map_clear()
+    reset_game()
+    state = .PLAYING
+    wall8, _, ok8 := advance_on_sphere(snake[0], dir)
+    if !ok8 {
+        fmt.println("SELFTEST FAIL: shield setup, no geodesic step")
+        return false
+    }
+    map_set(wall8, true)
+    map_finalize()
     autopilot = false
     shield_timer = 5
-    step() // would hit the top wall — shield suppresses death, move skipped
-    if state != .PLAYING || snake[0] != (IV3{6, 11, 6}) {
+    step() // 金身穿墙：头进入实心格，不死
+    if state != .PLAYING || snake[0] != wall8 {
         fmt.println("SELFTEST FAIL: shield wall hit", state, snake[0])
         return false
     }
     shield_timer = 0
-    step() // unshielded now — must die
+    // 头还在墙里：把所有六邻焊死，无护盾再走必须撞死
+    for off in DIRS6 {
+        c := IV3{snake[0].x + off.x, snake[0].y + off.y, snake[0].z + off.z}
+        if cell_in_world(c) do map_set(c, true)
+    }
+    map_finalize()
+    step()
     if state != .GAME_OVER {
         fmt.println("SELFTEST FAIL: unshielded wall hit did not kill")
         return false
@@ -3676,8 +3800,8 @@ self_test :: proc() -> bool {
         t, _  = rank_classic(149); check24(&ok24, t, "初出茅庐")
         t, _  = rank_classic(150); check24(&ok24, t, "老练机长")
         t, _  = rank_classic(299); check24(&ok24, t, "老练机长")
-        t, _  = rank_classic(300); check24(&ok24, t, "立方体传说")
-        t, _  = rank_classic(499); check24(&ok24, t, "立方体传说")
+        t, _  = rank_classic(300); check24(&ok24, t, "球形传说")
+        t, _  = rank_classic(499); check24(&ok24, t, "球形传说")
         t, _  = rank_classic(500); check24(&ok24, t, "三维之神")
         t, _  = rank_feeding(0);   check24(&ok24, t, "新手饲养员")
         t, _  = rank_feeding(9);   check24(&ok24, t, "新手饲养员")
@@ -3793,9 +3917,42 @@ self_test :: proc() -> bool {
     st_seed  := map_seed
     st_walls := map_has_walls
 
+    // --- T26b: 球形场地 + 大圆迈步（贴球面绕行，不再沿轴直穿）---
+    {
+        sc := sphere_cell_count()
+        if cell_in_world({0, 0, 0}) || cell_in_world({11, 11, 11}) ||
+           !cell_in_world({6, 6, 6}) || !cell_in_world({6, 11, 6}) ||
+           !cell_in_world({0, 6, 6}) || cell_in_world({0, 2, 6}) ||
+           sc != 912 || sc >= CELLS {
+            fmt.println("SELFTEST FAIL: spherical world", sc, CELLS)
+            return false
+        }
+        map_clear()
+        reset_game()
+        state = .PLAYING
+        autopilot = false
+        start_dir := dir
+        curved := false
+        for _ in 0..<8 {
+            step()
+            if state != .PLAYING || !cell_in_world(snake[0]) {
+                fmt.println("SELFTEST FAIL: great-circle step left the sphere", state, snake[0])
+                return false
+            }
+            if dir != start_dir do curved = true
+        }
+        if !curved {
+            fmt.println("SELFTEST FAIL: great-circle did not turn (still a straight axis)")
+            return false
+        }
+        death_squawk = false
+        reset_game()
+        fmt.println("sphere world: PASS")
+    }
+
     // --- T27: bitmask set/get/clear/count + bounds guards ---
     map_clear()
-    if map_has_walls || map_solid_count() != 0 || map_free_cells() != CELLS {
+    if map_has_walls || map_solid_count() != 0 || map_free_cells() != sphere_cell_count() {
         fmt.println("SELFTEST FAIL: map_clear", map_has_walls, map_solid_count())
         return false
     }
@@ -3804,7 +3961,7 @@ self_test :: proc() -> bool {
     map_set({GRID_N - 1, GRID_N - 1, GRID_N - 1}, true)
     if !map_solid({3, 4, 5}) || !map_solid({0, 0, 0}) || !map_solid({11, 11, 11}) ||
        map_solid({3, 4, 6}) || map_solid_count() != 3 || !map_has_walls ||
-       map_free_cells() != CELLS - 3 {
+       map_free_cells() != sphere_cell_count() - 1 { // 只有 {3,4,5} 在球内；两个角在球外不占用
         fmt.println("SELFTEST FAIL: map set/get", map_solid_count())
         return false
     }
@@ -3829,7 +3986,13 @@ self_test :: proc() -> bool {
     // --- T28: a wall ahead kills like the boundary; 护盾 ghosts through ---
     game_mode = .CLASSIC
     map_clear()
-    map_set({8, 6, 6}, true) // reset_game 的蛇头在 (7,6,6) 朝 +x 飞
+    reset_game()
+    wall28, _, ok28 := advance_on_sphere(snake[0], dir)
+    if !ok28 {
+        fmt.println("SELFTEST FAIL: map collision setup")
+        return false
+    }
+    map_set(wall28, true) // 挡在大圆下一步上
     map_finalize()
     autopilot = false
     reset_game()
@@ -3842,13 +4005,13 @@ self_test :: proc() -> bool {
     death_squawk = false
     reset_game()
     state = .PLAYING
-    if !map_solid({8, 6, 6}) {
+    if !map_solid(wall28) {
         fmt.println("SELFTEST FAIL: reset_game cleared the map")
         return false
     }
     shield_timer = 5
     step() // 金身穿墙：头进入实心格，不死
-    if state != .PLAYING || snake[0] != (IV3{8, 6, 6}) {
+    if state != .PLAYING || snake[0] != wall28 {
         fmt.println("SELFTEST FAIL: shield ghost through wall", state, snake[0])
         return false
     }
@@ -3858,20 +4021,21 @@ self_test :: proc() -> bool {
 
     // --- T29: AI routes around walls; enclosed food falls back, no crash ---
     map_clear()
-    map_set({8, 6, 6}, true) // 正挡在头 (7,6,6) 与食物 (9,6,6) 之间
-    map_finalize()
     reset_game()
+    wall29, _, ok29 := advance_on_sphere(snake[0], dir)
+    if !ok29 {
+        fmt.println("SELFTEST FAIL: map AI setup")
+        return false
+    }
+    map_set(wall29, true) // 挡在大圆下一步上
+    map_finalize()
     state = .PLAYING
-    food = IV3{9, 6, 6}
+    food = IV3{GRID_N / 2, GRID_N / 2, GRID_N / 2}
     ai_target = food
     ai_has_target = true
     d_ai := ai_choose()
-    if d_ai == (IV3{1, 0, 0}) {
-        fmt.println("SELFTEST FAIL: AI drove straight into a map wall")
-        return false
-    }
-    n_ai := IV3{snake[0].x + d_ai.x, snake[0].y + d_ai.y, snake[0].z + d_ai.z}
-    if !in_bounds(n_ai) || map_solid(n_ai) {
+    n_ai, _, ok_ai := advance_on_sphere(snake[0], d_ai)
+    if !ok_ai || map_solid(n_ai) {
         fmt.println("SELFTEST FAIL: AI picked a lethal cell", d_ai, n_ai)
         return false
     }
@@ -3882,8 +4046,8 @@ self_test :: proc() -> bool {
     }
     map_finalize()
     d_ai2 := ai_choose()
-    n_ai2 := IV3{snake[0].x + d_ai2.x, snake[0].y + d_ai2.y, snake[0].z + d_ai2.z}
-    if !in_bounds(n_ai2) || map_solid(n_ai2) {
+    n_ai2, _, ok_ai2 := advance_on_sphere(snake[0], d_ai2)
+    if !ok_ai2 || map_solid(n_ai2) {
         fmt.println("SELFTEST FAIL: enclosed-food fallback is lethal", d_ai2, n_ai2)
         return false
     }
@@ -3902,7 +4066,7 @@ self_test :: proc() -> bool {
         return false
     }
     for f in foods {
-        if map_solid(f.pos) || on_snake(f.pos) {
+        if !cell_in_world(f.pos) || map_solid(f.pos) || on_snake(f.pos) {
             fmt.println("SELFTEST FAIL: spawn_kind picked a blocked cell", f.pos)
             return false
         }
@@ -3911,7 +4075,7 @@ self_test :: proc() -> bool {
     reset_game()
     for _ in 0..<50 {
         spawn_food()
-        if state != .PLAYING || map_solid(food) || on_snake(food) {
+        if state != .PLAYING || !cell_in_world(food) || map_solid(food) || on_snake(food) {
             fmt.println("SELFTEST FAIL: classic spawn picked a blocked cell", food)
             return false
         }
@@ -4064,7 +4228,7 @@ self_test :: proc() -> bool {
         state = .PLAYING
         started = true
         // 吃一颗豆豆再跑两拍，制造一局"进行中"的经典战局
-        food = IV3{snake[0].x + 1, snake[0].y, snake[0].z}
+        food, _, _ = advance_on_sphere(snake[0], dir)
         step() // +10 分
         food = IV3{0, 0, 0} // 钉死豆豆，后两拍 deterministic
         for _ in 0..<2 do step()
@@ -4132,8 +4296,10 @@ self_test :: proc() -> bool {
         append(&kinds, ck)
         kind_by_name[ck.name] = len(kinds) - 1
         h := snake[0]
-        append(&foods, Food{kind = len(kinds) - 1, pos = {h.x + 1, h.y, h.z}})
-        food = IV3{h.x + 2, h.y, h.z} // 豆豆在再前一格
+        step1, d1, _ := advance_on_sphere(h, dir)
+        step2, _, _ := advance_on_sphere(step1, d1)
+        append(&foods, Food{kind = len(kinds) - 1, pos = step1})
+        food = step2 // 豆豆在再前一格（沿大圆）
         sc0 := score
         step() // 踩到效果食物：暴走生效，模式无关；豆豆留到下拍
         ok37 := state == .PLAYING && fx_speed_timer > 0 && fx_speed_mult == 0.5 &&
@@ -4155,7 +4321,7 @@ self_test :: proc() -> bool {
         reset_game()
         state = .PLAYING
         started = true
-        food = IV3{snake[0].x + 1, snake[0].y, snake[0].z}
+        food, _, _ = advance_on_sphere(snake[0], dir)
         step() // 吃一颗豆
         snap_score, snap_eaten, snap_len := score, eaten, len(snake)
         switch_to_feeding()
@@ -4383,8 +4549,8 @@ random_safe_dir :: proc() -> IV3 {
     for j in 0..<6 {
         off := dirs[(start + j) % 6]
         if off.x == -dir.x && off.y == -dir.y && off.z == -dir.z do continue
-        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
-        if !in_bounds(n) do continue
+        n, _, ok := advance_on_sphere(head, off)
+        if !ok || !in_bounds(n) do continue
         if map_solid(n) do continue
         hit := false
         for s in snake[:len(snake) - 1] do if s == n { hit = true; break }
@@ -4433,7 +4599,7 @@ burst :: proc(p: rl.Vector3) {
 }
 
 update_particles :: proc(dt: f32) {
-    h := f32(GRID_N) * CELL * 0.5
+    R := WORLD_RADIUS - 0.05
     for i := len(particles) - 1; i >= 0; i -= 1 {
         p := &particles[i]
         p.life -= dt
@@ -4443,7 +4609,13 @@ update_particles :: proc(dt: f32) {
         }
         p.vel.y -= 14 * dt
         p.pos += p.vel * dt
-        if p.pos.y < -h + 0.05 { p.pos.y = -h + 0.05; p.vel.y *= -0.4 }
+        r2 := p.pos.x*p.pos.x + p.pos.y*p.pos.y + p.pos.z*p.pos.z
+        if r2 > R * R {
+            n := norm_v3(p.pos)
+            p.pos = n * R
+            vn := p.vel.x*n.x + p.vel.y*n.y + p.vel.z*n.z
+            if vn > 0 do p.vel -= n * vn * 1.4
+        }
     }
 }
 
@@ -5021,10 +5193,10 @@ editor_pick_showcase :: proc() {
         {c, GRID_N - 2, c}, {c, GRID_N - 3, c},
         {c - 2, GRID_N - 2, c}, {c + 2, GRID_N - 2, c},
         {c, GRID_N - 2, c - 2}, {c, GRID_N - 2, c + 2},
-        {2, GRID_N - 2, 2},
+        {c, c + 2, c},
     }
     for cell in candidates {
-        if on_snake(cell) || map_solid(cell) do continue
+        if !cell_in_world(cell) || on_snake(cell) || map_solid(cell) do continue
         occupied := false
         for f in foods do if f.pos == cell { occupied = true; break }
         if !occupied {
@@ -5685,74 +5857,47 @@ save_creator :: proc(name: string) {
 // Rendering
 // ---------------------------------------------------------------------------
 
-half_extent :: proc() -> f32 {
-    return f32(GRID_N) * CELL * 0.5
+// 球体底部的 y 坐标（在 (x,z) 处）：食物/蛇身垂直向下投射到球壳内侧。
+floor_y :: proc(x, z: f32) -> f32 {
+    R := WORLD_RADIUS
+    d := R*R - x*x - z*z
+    if d < 0 do return -R
+    return -math.sqrt(d)
 }
 
-draw_grid_lines :: proc(face: IV3, col: rl.Color) {
-    // grid lines on one outer face of the cube; face = unit normal
-    h := half_extent()
-    N :: GRID_N
-    for i in 0..=N {
-        t := -h + f32(i) * CELL
-        switch {
-        case face.x != 0:
-            x := face.x > 0 ? h : -h
-            rl.DrawLine3D({x, t, -h}, {x, t, h}, col)
-            rl.DrawLine3D({x, -h, t}, {x, h, t}, col)
-        case face.y != 0:
-            y := face.y > 0 ? h : -h
-            rl.DrawLine3D({t, y, -h}, {t, y, h}, col)
-            rl.DrawLine3D({-h, y, t}, {h, y, t}, col)
-        case:
-            z := face.z > 0 ? h : -h
-            rl.DrawLine3D({t, -h, z}, {t, h, z}, col)
-            rl.DrawLine3D({-h, t, z}, {h, t, z}, col)
-        }
-    }
-}
-
+// 球形边界：格对齐纬线 / 经线 + 三条轴色大圆。
+// 实心球壳不能先画——DrawSphere 是批渲染，DisableDepthMask 会在 flush 前被
+// EnableDepthMask 抵消，近半球写入深度后蛇和食物全被挡住。
+// DrawCircle3D 在 XY 平面画圆再绕轴旋转：360° 是恒等变换，轴色大圆必须用 0°/90°。
 draw_boundaries :: proc() {
-    h := half_extent()
-    n := f32(GRID_N) * CELL
-
-    // 6 translucent faces; only skip the fill when the camera is OUTSIDE the
-    // cube beyond that face (in first-person you're inside: all faces show)
-    faces := [?]struct{ c, s: rl.Vector3, skip: bool }{
-        {{ h, 0, 0}, {0.06, n, n}, cam.position.x >  h},
-        {{-h, 0, 0}, {0.06, n, n}, cam.position.x < -h},
-        {{0,  h, 0}, {n, 0.06, n}, cam.position.y >  h},
-        {{0, -h, 0}, {n, 0.06, n}, cam.position.y < -h},
-        {{0, 0,  h}, {n, n, 0.06}, cam.position.z >  h},
-        {{0, 0, -h}, {n, n, 0.06}, cam.position.z < -h},
-    }
-    fill := rl.Color{80, 110, 190, 22}
-    for f in faces {
-        if !f.skip do rl.DrawCubeV(f.c, f.s, fill)
-    }
-
-    // cube edges, color-coded by axis direction (matches compass & minimap)
-    edge_x := rl.Color{AXIS_X.r, AXIS_X.g, AXIS_X.b, 130}
-    edge_y := rl.Color{AXIS_Y.r, AXIS_Y.g, AXIS_Y.b, 130}
-    edge_z := rl.Color{AXIS_Z.r, AXIS_Z.g, AXIS_Z.b, 130}
-    extremes := [2]f32{-h, h}
-    for a in extremes {
-        for b in extremes {
-            rl.DrawLine3D({-h, a, b}, {h, a, b}, edge_x)  // edges parallel to X
-            rl.DrawLine3D({a, -h, b}, {a, h, b}, edge_y)  // edges parallel to Y
-            rl.DrawLine3D({a, b, -h}, {a, b, h}, edge_z)  // edges parallel to Z
-        }
-    }
-
-    // lattice lines on ALL six faces — inside the cube you always see the
-    // reference grid on the wall ahead of you (lines don't block the view)
+    R := WORLD_RADIUS
     line_col := rl.Color{90, 120, 200, 55}
-    draw_grid_lines({1, 0, 0}, line_col)
-    draw_grid_lines({-1, 0, 0}, line_col)
-    draw_grid_lines({0, 1, 0}, line_col)
-    draw_grid_lines({0, -1, 0}, line_col)
-    draw_grid_lines({0, 0, 1}, line_col)
-    draw_grid_lines({0, 0, -1}, line_col)
+    // 纬线：落在每个格子中心的 y，对应原来六面格子线
+    h := f32(GRID_N - 1) * 0.5 * CELL
+    for i in 0..<GRID_N {
+        y := f32(i) * CELL - h
+        rr := R * R - y * y
+        if rr <= 0.08 do continue
+        rl.DrawCircle3D({0, y, 0}, math.sqrt(rr), {1, 0, 0}, 90, line_col)
+    }
+    // 经线：6 条过极点的大圆，每 30° 一条
+    for k in 0..<6 {
+        rl.DrawCircle3D({0, 0, 0}, R, {0, 1, 0}, f32(k) * 30, line_col)
+    }
+
+    // 三条轴色大圆，颜色与罗盘、小地图一致
+    rl.DrawCircle3D({0, 0, 0}, R, {0, 0, 1}, 0,  rl.Color{AXIS_Z.r, AXIS_Z.g, AXIS_Z.b, 130}) // XY
+    rl.DrawCircle3D({0, 0, 0}, R, {0, 1, 0}, 90, rl.Color{AXIS_X.r, AXIS_X.g, AXIS_X.b, 130}) // YZ
+    rl.DrawCircle3D({0, 0, 0}, R, {1, 0, 0}, 90, rl.Color{AXIS_Y.r, AXIS_Y.g, AXIS_Y.b, 130}) // ZX
+}
+
+// 实心球壳放在蛇/食物之后画：深度测试让远半球被挡住，近半球只加一层淡蓝。
+// 必须在关深度写入期间 flush，否则下一次 EnableDepthMask 会让球壳重新遮住内部。
+draw_sphere_shell :: proc() {
+    rlgl.DisableDepthMask()
+    rl.DrawSphere({0, 0, 0}, WORLD_RADIUS, rl.Color{80, 110, 190, 18})
+    rlgl.DrawRenderBatchActive()
+    rlgl.EnableDepthMask()
 }
 
 // 障碍地图：深青灰砖块 + 顶部亮面 + 边缘微光；≤ ~10% 的格子，全画即可
@@ -5765,6 +5910,7 @@ draw_map :: proc() {
     s :: f32(CELL) * 0.98
     for i in 0..<CELLS {
         if !map_bit(i) do continue
+        if !cell_in_world(cell3(i)) do continue // 球外的障碍不画（角落禁区）
         p := cell_to_world(cell3(i))
         rl.DrawCubeV(p, {s, s, s}, MAP_BLOCK_COL)
         rl.DrawCubeV(p + {0, s * 0.47, 0}, {s * 0.92, 0.05, s * 0.92}, MAP_TOP_COL)
@@ -5772,65 +5918,68 @@ draw_map :: proc() {
     }
 }
 
-// Dotted "flight path" ahead of the head: shows where going straight leads,
-// colored by distance to the first obstacle (green -> yellow -> red).
+// Dotted flight path ahead of the head, following the spherical great-circle
+// the snake will actually take (not a straight grid ray).
 draw_path_hint :: proc() {
     if state != .PLAYING && state != .PAUSED do return
 
+    PATH_MAX :: 20
+    pts: [PATH_MAX]IV3
+    n_pts := 0
+    cur := snake[0]
+    cd := dir
     obstacle_dist := 0
     hit_self := false
     found := false
-    for i in 1..=GRID_N {
-        n := IV3{snake[0].x + dir.x * i32(i), snake[0].y + dir.y * i32(i), snake[0].z + dir.z * i32(i)}
-        if n.x < 0 || n.x >= GRID_N || n.y < 0 || n.y >= GRID_N || n.z < 0 || n.z >= GRID_N {
+    for i in 1..=PATH_MAX {
+        nxt, nd, ok := advance_on_sphere(cur, cd)
+        if !ok {
             obstacle_dist = i
             found = true
             break
         }
-        if map_solid(n) {  // 地图障碍也算“前方障碍物”
+        if map_solid(nxt) {
             obstacle_dist = i
             found = true
             break
         }
-        if on_snake(n) {
+        if on_snake(nxt) {
             obstacle_dist = i
             hit_self = true
             found = true
             break
         }
+        pts[n_pts] = nxt
+        n_pts += 1
+        cur = nxt
+        cd = nd
     }
-    if !found do obstacle_dist = GRID_N + 1
+    if !found do obstacle_dist = n_pts + 1
 
     col := rl.Color{80, 230, 110, 170}          // safe
     if obstacle_dist <= 4 do col = rl.Color{240, 200, 60, 190}   // caution
     if obstacle_dist <= 2 do col = rl.Color{240, 70, 60, 220}    // danger
 
-    // thin line ahead of the head (a line never balloons in first-person)
     hp := cell_to_world(snake[0])
-    fdir := v3_of(dir)
-    start := hp + fdir * 0.55
-    if obstacle_dist > 1 {
-        last := IV3{snake[0].x + dir.x * i32(obstacle_dist - 1),
-                    snake[0].y + dir.y * i32(obstacle_dist - 1),
-                    snake[0].z + dir.z * i32(obstacle_dist - 1)}
-        rl.DrawLine3D(start, cell_to_world(last) + fdir * 0.4, col)
-    } else {
-        rl.DrawLine3D(start, start + fdir * 0.3, col)
-    }
-    // tiny waypoint dots only a few cells out, where they stay small on screen
-    for i in 3..<obstacle_dist {
-        n := IV3{snake[0].x + dir.x * i32(i), snake[0].y + dir.y * i32(i), snake[0].z + dir.z * i32(i)}
-        rl.DrawSphereEx(cell_to_world(n), 0.05, 6, 6, col)
+    if n_pts > 0 {
+        prev := hp
+        for i in 0..<n_pts {
+            q := cell_to_world(pts[i])
+            SEG :: 4
+            for s in 0..<SEG {
+                t0 := f32(s) / SEG
+                t1 := f32(s + 1) / SEG
+                rl.DrawLine3D(slerp_v3(prev, q, t0), slerp_v3(prev, q, t1), col)
+            }
+            prev = q
+        }
+        for i in 2..<n_pts {
+            rl.DrawSphereEx(cell_to_world(pts[i]), 0.05, 6, 6, col)
+        }
     }
 
-    // flashing marker on the obstacle itself
-    if found {
-        n := IV3{snake[0].x + dir.x * i32(obstacle_dist), snake[0].y + dir.y * i32(obstacle_dist), snake[0].z + dir.z * i32(obstacle_dist)}
-        // clamp into the cube for wall hits
-        n.x = clamp(n.x, 0, GRID_N - 1)
-        n.y = clamp(n.y, 0, GRID_N - 1)
-        n.z = clamp(n.z, 0, GRID_N - 1)
-        p := cell_to_world(n)
+    if found && n_pts > 0 {
+        p := cell_to_world(pts[n_pts - 1])
         blink := 0.5 + 0.5 * math.sin(time_total * 8)
         k := f32(0.3) + 0.15 * blink
         mark := hit_self ? rl.Color{255, 60, 60, u8(120 + 100 * blink)} : rl.Color{255, 120, 60, u8(80 + 80 * blink)}
@@ -5857,7 +6006,7 @@ draw_tether :: proc() {
         if i % 2 == 0 {
             t0 := f32(i) / SEG
             t1 := f32(i + 1) / SEG
-            rl.DrawLine3D(lerp_v3(a, b, t0), lerp_v3(a, b, t1), col)
+            rl.DrawLine3D(slerp_v3(a, b, t0), slerp_v3(a, b, t1), col)
         }
     }
 }
@@ -5868,13 +6017,13 @@ draw_food :: proc() {
     p.y += bob
     rl.DrawSphereEx(p, 0.34, 12, 12, rl.RED)
     rl.DrawSphereEx(p + {-0.09, 0.1, -0.09}, 0.12, 8, 8, rl.Color{255, 130, 130, 255})
-    // pulsing wire cube beacon
+    // pulsing wire sphere beacon
     k := 0.5 + 0.1 * math.sin(time_total * 4)
-    rl.DrawCubeWires(p, k, k, k, rl.Color{255, 90, 90, 160})
-    // vertical beam down to the floor for depth perception
-    h := half_extent()
-    rl.DrawLine3D({p.x, p.y - 0.4, p.z}, {p.x, -h, p.z}, rl.Color{255, 80, 80, 90})
-    rl.DrawCubeV({p.x, -h + 0.02, p.z}, {0.3, 0.04, 0.3}, rl.Color{255, 80, 80, 70})
+    rl.DrawSphereWires(p, k, 8, 8, rl.Color{255, 90, 90, 160})
+    // vertical beam down to the sphere's inner bottom for depth perception
+    fy := floor_y(p.x, p.z)
+    rl.DrawLine3D({p.x, p.y - 0.4, p.z}, {p.x, fy, p.z}, rl.Color{255, 80, 80, 90})
+    rl.DrawCubeV({p.x, fy + 0.02, p.z}, {0.3, 0.04, 0.3}, rl.Color{255, 80, 80, 70})
 }
 
 // ---------------------------------------------------------------------------
@@ -5890,7 +6039,6 @@ RARITY_COLORS := [3]rl.Color{
 // one food of the given kind at a cell (shared by real foods and the 创造台
 // live preview, so rarity glow/spin look exactly the same)
 draw_one_food :: proc(k: FoodKind, pos: IV3, spin: f32, rot: f32) {
-    h := half_extent()
     p := cell_to_world(pos)
     p.y += math.sin(time_total * 3.2 + spin) * 0.07
 
@@ -5922,8 +6070,8 @@ draw_one_food :: proc(k: FoodKind, pos: IV3, spin: f32, rot: f32) {
             {rc.r, rc.g, rc.b, k.rarity == 2 ? 26 : 14})
         rl.EndBlendMode()
     }
-    // 落地参考线（和苹果的落地光束一个道理）
-    rl.DrawLine3D({p.x, p.y - s - 0.05, p.z}, {p.x, -h, p.z}, {col.r, col.g, col.b, 60})
+    // 落地参考线（和苹果的落地光束一个道理；终点在球壳内侧）
+    rl.DrawLine3D({p.x, p.y - s - 0.05, p.z}, {p.x, floor_y(p.x, p.z), p.z}, {col.r, col.g, col.b, 60})
 }
 
 draw_foods :: proc() {
@@ -6117,54 +6265,49 @@ draw_input_box :: proc() {
 
 draw_snake :: proc(alpha: f32, hide_head: bool) {
     n := len(snake)
-    h := half_extent()
+    joints := fair_sphere_pts(snake_joint_pts(alpha))
+    spine, u_of := build_arc_spine(joints)
 
-    // floor projection shadows (depth cue)
-    for i in 0..<n {
-        cur := cell_to_world(snake[i])
-        j := min(i, len(prev_snake) - 1)
-        p := lerp_v3(cell_to_world(prev_snake[j]), cur, alpha)
-        rl.DrawCubeV({p.x, -h + 0.02, p.z}, {0.4, 0.03, 0.4}, rl.Color{80, 220, 100, 26})
+    // floor projection shadows (depth cue) onto the sphere's inner bottom
+    for p in joints {
+        rl.DrawCubeV({p.x, floor_y(p.x, p.z) + 0.02, p.z}, {0.4, 0.03, 0.4}, rl.Color{80, 220, 100, 26})
     }
-    // head height guide (skip in first-person: the camera sits on this line)
     if !hide_head {
-        hp := cell_to_world(snake[0])
-        if len(prev_snake) > 0 {
-            hp = lerp_v3(cell_to_world(prev_snake[0]), hp, alpha)
-        }
-        rl.DrawLine3D({hp.x, hp.y, hp.z}, {hp.x, -h, hp.z}, rl.Color{200, 255, 200, 36})
+        hp := joints[0]
+        rl.DrawLine3D({hp.x, hp.y, hp.z}, {hp.x, floor_y(hp.x, hp.z), hp.z}, rl.Color{200, 255, 200, 36})
     }
 
-    for i := n - 1; i >= 0; i -= 1 {
-        if hide_head && i == 0 do break
-        cur := cell_to_world(snake[i])
-        j := min(i, len(prev_snake) - 1)
-        prv := cell_to_world(prev_snake[j])
-        p := lerp_v3(prv, cur, alpha)
-
-        // color gradient head -> tail
-        t := f32(i) / f32(max(n - 1, 1))
+    // 弧管身子：格子折线只用来定骨架，画出来是连续球面弧
+    m := len(spine)
+    for k := m - 1; k >= 0; k -= 1 {
+        if hide_head && k == 0 do break
+        t := u_of[k]
         col := rl.Color{
             u8(60  + t * 20),
             u8(220 - t * 90),
             u8(90  - t * 40),
             255,
         }
-        size: f32 = i == 0 ? 0.92 : 0.82 - 0.25 * t
-        rl.DrawCubeV(p, {size, size, size}, col)
-
-        if i == 0 {
-            // eyes, oriented by the 3D facing direction
-            f := rl.Vector3{f32(dir.x), f32(dir.y), f32(dir.z)}
-            s := abs(f.y) == 1 ? rl.Vector3{1, 0, 0} : norm_v3(cross_v3(f, {0, 1, 0}))
-            u := norm_v3(cross_v3(s, f))
-            e1 := p + f * 0.42 + s * 0.2 + u * 0.18
-            e2 := p + f * 0.42 - s * 0.2 + u * 0.18
-            rl.DrawSphereEx(e1, 0.11, 8, 8, rl.WHITE)
-            rl.DrawSphereEx(e2, 0.11, 8, 8, rl.WHITE)
-            rl.DrawSphereEx(e1 + f * 0.06, 0.055, 8, 8, rl.BLACK)
-            rl.DrawSphereEx(e2 + f * 0.06, 0.055, 8, 8, rl.BLACK)
+        size: f32 = 0.82 - 0.25 * t
+        if k == 0 do size = 0.92
+        if k < m - 1 {
+            rn: f32 = 0.82 - 0.25 * u_of[k + 1]
+            rl.DrawCylinderEx(spine[k], spine[k + 1], size * 0.52, rn * 0.52, 8, col)
         }
+        rl.DrawSphereEx(spine[k], size * 0.52, 8, 6, col)
+    }
+
+    if !hide_head {
+        p := joints[0]
+        f := rl.Vector3{f32(dir.x), f32(dir.y), f32(dir.z)}
+        s := abs(f.y) == 1 ? rl.Vector3{1, 0, 0} : norm_v3(cross_v3(f, {0, 1, 0}))
+        u := norm_v3(cross_v3(s, f))
+        e1 := p + f * 0.42 + s * 0.2 + u * 0.18
+        e2 := p + f * 0.42 - s * 0.2 + u * 0.18
+        rl.DrawSphereEx(e1, 0.11, 8, 8, rl.WHITE)
+        rl.DrawSphereEx(e2, 0.11, 8, 8, rl.WHITE)
+        rl.DrawSphereEx(e1 + f * 0.06, 0.055, 8, 8, rl.BLACK)
+        rl.DrawSphereEx(e2 + f * 0.06, 0.055, 8, 8, rl.BLACK)
     }
 }
 
@@ -6188,6 +6331,95 @@ seg_color :: proc(i, n: int) -> rl.Color {
     return {u8(clamp(r, 0, 255)), u8(clamp(g, 0, 255)), u8(clamp(b, 0, 255)), 240}
 }
 
+// 蛇身连续半径：u∈[0,1]，0=头、1=尾尖，与 seg_radius 在关节点处一致
+spine_radius :: proc(u: f32) -> f32 {
+    if u <= 1e-3 do return 0.46
+    return 0.40 * (1.0 - 0.62 * u)
+}
+
+// Catmull-Rom 样条段：p1→p2，参数 t∈[0,1]
+catmull_rom :: proc(p0, p1, p2, p3: rl.Vector3, t: f32) -> rl.Vector3 {
+    t2 := t * t
+    t3 := t2 * t
+    return 0.5 * ((2.0 * p1) + (-p0 + p2) * t +
+        (2.0*p0 - 5.0*p1 + 4.0*p2 - p3) * t2 +
+        (-p0 + 3.0*p1 - 3.0*p2 + p3) * t3)
+}
+
+// 本帧关节点：格子之间用球面插值，身体滑动时走弧而不是弦
+snake_joint_pts :: proc(alpha: f32, allocator := context.temp_allocator) -> []rl.Vector3 {
+    n := len(snake)
+    pts := make([]rl.Vector3, n, allocator)
+    for i in 0..<n {
+        cur := cell_to_world(snake[i])
+        j := min(i, len(prev_snake) - 1)
+        pts[i] = j >= 0 ? slerp_v3(cell_to_world(prev_snake[j]), cur, alpha) : cur
+    }
+    return pts
+}
+
+// 把头尾钉住，中间方向在球面上做拉普拉斯光顺，把格子折线收成一条弧。
+// 逻辑仍一格一格走；只有绘制骨架被拉圆。
+fair_sphere_pts :: proc(pts: []rl.Vector3, allocator := context.temp_allocator) -> []rl.Vector3 {
+    n := len(pts)
+    out := make([]rl.Vector3, n, allocator)
+    copy(out, pts)
+    if n < 3 do return out
+
+    dirs := make([]rl.Vector3, n, allocator)
+    rads := make([]f32, n, allocator)
+    for i in 0..<n {
+        rads[i] = len_v3(out[i])
+        dirs[i] = rads[i] > 1e-4 ? out[i] / rads[i] : rl.Vector3{0, 1, 0}
+    }
+    // 半径往整条蛇的平均球壳靠，折线才落在同一个球面上
+    r_mean: f32 = 0
+    for r in rads do r_mean += r
+    r_mean /= f32(n)
+
+    FAIR_ITERS :: 5
+    for _ in 0..<FAIR_ITERS {
+        next := make([]rl.Vector3, n, allocator)
+        next[0] = dirs[0]
+        next[n - 1] = dirs[n - 1]
+        for i in 1..<n-1 {
+            s := dirs[i - 1] + dirs[i] * 2 + dirs[i + 1]
+            ln := len_v3(s)
+            next[i] = ln > 1e-5 ? s / ln : dirs[i]
+        }
+        copy(dirs, next)
+    }
+    for i in 0..<n {
+        r := rads[i] * 0.35 + r_mean * 0.65
+        out[i] = dirs[i] * r
+    }
+    // 头必须还在格子上，吃豆/碰撞才对得上
+    out[0] = pts[0]
+    return out
+}
+
+// 关节点之间用大圆细分，再径向拉回光顺半径 —— 整条身子是连续弧管
+build_arc_spine :: proc(pts: []rl.Vector3, allocator := context.temp_allocator) -> (spine: []rl.Vector3, u_of: []f32) {
+    n := len(pts)
+    if n == 0 do return {}, {}
+    SPINE_SUB :: 8
+    buf := make([dynamic]rl.Vector3, 0, n * SPINE_SUB + 1, allocator)
+    ubuf := make([dynamic]f32, 0, n * SPINE_SUB + 1, allocator)
+    append(&buf, pts[0])
+    append(&ubuf, 0)
+    if n == 1 do return buf[:], ubuf[:]
+    denom := f32(max(n - 1, 1))
+    for i in 0..<n-1 {
+        for j in 1..=SPINE_SUB {
+            t := f32(j) / f32(SPINE_SUB)
+            q := slerp_v3(pts[i], pts[i + 1], t)
+            append(&buf, q)
+            append(&ubuf, (f32(i) + t) / denom)
+        }
+    }
+    return buf[:], ubuf[:]
+}
+
 dist_v3 :: proc(a, b: rl.Vector3) -> f32 {
     dx, dy, dz := a.x - b.x, a.y - b.y, a.z - b.z
     return math.sqrt(dx * dx + dy * dy + dz * dz)
@@ -6195,64 +6427,61 @@ dist_v3 :: proc(a, b: rl.Vector3) -> f32 {
 
 draw_snake_modern :: proc(alpha: f32, hide_head: bool) {
     n := len(snake)
-    h := half_extent()
     light := norm_v3(rl.Vector3{0.45, 1.0, 0.3})
     fog_ref := cam_dist * 2.0 + 10
 
-    // interpolated joint positions
-    pts := make([]rl.Vector3, n)
-    defer delete(pts)
-    for i in 0..<n {
-        cur := cell_to_world(snake[i])
-        j := min(i, len(prev_snake) - 1)
-        pts[i] = j >= 0 ? lerp_v3(cell_to_world(prev_snake[j]), cur, alpha) : cur
-    }
+    raw := snake_joint_pts(alpha)
+    pts := fair_sphere_pts(raw)
+    spine, u_of := build_arc_spine(pts)
 
     // floor projection shadows (depth cue)
     for i in 0..<n {
         p := pts[i]
         r := seg_radius(i, n)
-        rl.DrawCubeV({p.x, -h + 0.02, p.z}, {r * 1.7, 0.03, r * 1.7}, rl.Color{60, 200, 130, 20})
+        rl.DrawCubeV({p.x, floor_y(p.x, p.z) + 0.02, p.z}, {r * 1.7, 0.03, r * 1.7}, rl.Color{60, 200, 130, 20})
     }
-    // head height guide (skip in first-person)
     if !hide_head {
         hp := pts[0]
-        rl.DrawLine3D({hp.x, hp.y, hp.z}, {hp.x, -h, hp.z}, rl.Color{200, 255, 220, 30})
+        rl.DrawLine3D({hp.x, hp.y, hp.z}, {hp.x, floor_y(hp.x, hp.z), hp.z}, rl.Color{200, 255, 220, 30})
     }
 
-    // tube body: tapered cylinders + joint spheres + specular glints, tail -> head
-    for i := n - 1; i >= 0; i -= 1 {
-        if hide_head && i == 0 do break
-        r := seg_radius(i, n) * (1 + 0.045 * math.sin(time_total * 3 + f32(i) * 0.5))
-        col := seg_color(i, n)
-        // manual distance fog: far segments sink back, near ones pop — layering
-        fog := clamp(1.18 - dist_v3(pts[i], cam.position) / fog_ref, 0.40, 1)
+    // 身体圆管：沿平滑脊柱画锥形管（尾→头），转弯自然过渡
+    m := len(spine)
+    for k := m - 1; k >= 0; k -= 1 {
+        if hide_head && k == 0 do break
+        spl_u := u_of[k]
+        r := spine_radius(spl_u) * (1 + 0.045 * math.sin(time_total * 3 + spl_u * 22))
+        col := seg_color(int(spl_u * f32(max(n - 1, 1))), n)
+        fog := clamp(1.18 - dist_v3(spine[k], cam.position) / fog_ref, 0.40, 1)
         body := rl.Color{u8(f32(col.r) * fog), u8(f32(col.g) * fog), u8(f32(col.b) * fog), col.a}
-
-        if i < n - 1 {
-            rn := seg_radius(i + 1, n) * (1 + 0.045 * math.sin(time_total * 3 + f32(i + 1) * 0.5))
-            rl.DrawCylinderEx(pts[i], pts[i + 1], r, rn, 10, body)
+        rl.DrawSphereEx(spine[k], r, 8, 6, body)
+        if k < m - 1 {
+            rn := spine_radius(u_of[k + 1]) * (1 + 0.045 * math.sin(time_total * 3 + u_of[k + 1] * 22))
+            rl.DrawCylinderEx(spine[k], spine[k + 1], r, rn, 8, body)
         }
-        rl.DrawSphereEx(pts[i], r, 12, 9, body)
-        // glossy highlight bump toward the light
-        rl.DrawSphereEx(pts[i] + light * (r * 0.58), r * 0.40, 8, 6, rl.Color{255, 255, 255, 52})
+    }
 
-        if i == 0 && !hide_head {
-            f := rl.Vector3{f32(dir.x), f32(dir.y), f32(dir.z)}
-            s := abs(f.y) == 1 ? rl.Vector3{1, 0, 0} : norm_v3(cross_v3(f, {0, 1, 0}))
-            u := norm_v3(cross_v3(s, f))
-            e1 := pts[0] + f * 0.40 + s * 0.21 + u * 0.19
-            e2 := pts[0] + f * 0.40 - s * 0.21 + u * 0.19
-            rl.DrawSphereEx(e1, 0.12, 8, 8, rl.WHITE)
-            rl.DrawSphereEx(e2, 0.12, 8, 8, rl.WHITE)
-            rl.DrawSphereEx(e1 + f * 0.07, 0.06, 8, 8, rl.BLACK)
-            rl.DrawSphereEx(e2 + f * 0.07, 0.06, 8, 8, rl.BLACK)
-            // soft pulsing aura around the head
-            rl.BeginBlendMode(.ADDITIVE)
-            rl.DrawSphereEx(pts[0], 0.85 + 0.1 * math.sin(time_total * 2.5), 14, 10,
-                rl.Color{50, 230, 130, 30})
-            rl.EndBlendMode()
-        }
+    // 头球 + 眼睛画在真实格子上；身子只靠弧管，不再一格一颗珠子把弧折断
+    if !hide_head {
+        r := seg_radius(0, n) * (1 + 0.045 * math.sin(time_total * 3))
+        col := seg_color(0, n)
+        fog := clamp(1.18 - dist_v3(pts[0], cam.position) / fog_ref, 0.40, 1)
+        body := rl.Color{u8(f32(col.r) * fog), u8(f32(col.g) * fog), u8(f32(col.b) * fog), col.a}
+        rl.DrawSphereEx(pts[0], r, 12, 9, body)
+        rl.DrawSphereEx(pts[0] + light * (r * 0.58), r * 0.40, 8, 6, rl.Color{255, 255, 255, 52})
+        f := rl.Vector3{f32(dir.x), f32(dir.y), f32(dir.z)}
+        s := abs(f.y) == 1 ? rl.Vector3{1, 0, 0} : norm_v3(cross_v3(f, {0, 1, 0}))
+        u := norm_v3(cross_v3(s, f))
+        e1 := pts[0] + f * 0.40 + s * 0.21 + u * 0.19
+        e2 := pts[0] + f * 0.40 - s * 0.21 + u * 0.19
+        rl.DrawSphereEx(e1, 0.12, 8, 8, rl.WHITE)
+        rl.DrawSphereEx(e2, 0.12, 8, 8, rl.WHITE)
+        rl.DrawSphereEx(e1 + f * 0.07, 0.06, 8, 8, rl.BLACK)
+        rl.DrawSphereEx(e2 + f * 0.07, 0.06, 8, 8, rl.BLACK)
+        rl.BeginBlendMode(.ADDITIVE)
+        rl.DrawSphereEx(pts[0], 0.85 + 0.1 * math.sin(time_total * 2.5), 14, 10,
+            rl.Color{50, 230, 130, 30})
+        rl.EndBlendMode()
     }
 }
 
@@ -6294,7 +6523,7 @@ CJK_SOURCE :: [?]string{
     "这条蛇是开的你的工作是喂它！按打开投喂框输入任意词，回车投放试试预设食物图鉴翻页再投一个创造台调整数值然后保存并投放毕业复制分享码发给朋友。蛇归你了第步·跳过教程按任意键继续转向（屏幕方向）切换第一人称环绕视角可以随时让救场",
     "自动驾驶中——看它怎么飞每一种食物都是玩家发明的说一句话，就能造出带剧本的效果创造你自己的食物吧——按任意键开始！新手教程标题界面秒无操作进入演示",
     // 战报图 (battle report card) labels, ranks, toasts
-    "战报经典模式得分最高长度节吃掉个时长奇葩菜单段位这局还什么都没吃到再得晋升已是按任意键关闭保存并复制文字快去炫耀吧蛇界萌新初出茅庐老练机长立方体传说三维之神新手饲养员资深黑暗料理大师食神下凡莲虹虚榴彩",
+    "战报经典模式得分最高长度节吃掉个时长奇葩菜单段位这局还什么都没吃到再得晋升已是按任意键关闭保存并复制文字快去炫耀吧蛇界萌新初出茅庐老练机长球形传说三维之神新手饲养员资深黑暗料理大师食神下凡莲虹虚榴彩",
     // F 模式切换：HUD 模式行 + 切换/教程提示 toast + 底部按键条
     "模式 经典 手动 投喂 已切换 接管 方向盘交还你 教程进行中——完成或 跳过后再切换",
     // 障碍地图 (obstacle maps) names + title-screen selector
@@ -6404,16 +6633,19 @@ mini_px :: proc(origin, size, coord: i32) -> i32 {
 // One orthographic projection panel. ha = horizontal axis, va = vertical axis.
 draw_projection :: proc(px, py, size: i32, ha, va: i32, flip_v: bool,
                         label: cstring, hcol, vcol: rl.Color) {
-    rl.DrawRectangle(px, py, size, size, rl.Color{18, 20, 30, 200})
-    // mid cross for orientation
+    rl.DrawRectangle(px, py, size, size, rl.Color{14, 16, 24, 200})
+    // playable disc = sphere silhouette (inscribed in the 12³ square)
     mid := px + size/2
     midy := py + size/2
-    rl.DrawLine(px, midy, px + size, midy, rl.Color{70, 76, 92, 120})
-    rl.DrawLine(mid, py, mid, py + size, rl.Color{70, 76, 92, 120})
-    // axis-colored edges: bottom = horizontal axis, left = vertical axis
-    rl.DrawRectangle(px, py + size - 2, size, 2, hcol)
-    rl.DrawRectangle(px, py, 2, size, vcol)
-    rl.DrawRectangleLinesEx({f32(px), f32(py), f32(size), f32(size)}, 1, rl.Color{120, 128, 150, 160})
+    rl.DrawCircle(mid, midy, f32(size/2 - 1), rl.Color{22, 26, 40, 230})
+    rl.DrawCircleLines(mid, midy, f32(size/2 - 1), rl.Color{90, 120, 200, 140})
+    // mid cross for orientation, clipped to the disc
+    rl.DrawLine(px + 4, midy, px + size - 4, midy, rl.Color{70, 76, 92, 120})
+    rl.DrawLine(mid, py + 4, mid, py + size - 4, rl.Color{70, 76, 92, 120})
+    // axis-colored ticks on the circle (bottom = horizontal, left = vertical)
+    rl.DrawLineEx({f32(px + 8), f32(py + size - 3)}, {f32(px + size - 8), f32(py + size - 3)}, 2, hcol)
+    rl.DrawLineEx({f32(px + 3), f32(py + 8)}, {f32(px + 3), f32(py + size - 8)}, 2, vcol)
+    rl.DrawRectangleLinesEx({f32(px), f32(py), f32(size), f32(size)}, 1, rl.Color{80, 88, 110, 120})
 
     plot :: proc(px, py, size: i32, c: IV3, ha, va: i32, flip_v: bool, col: rl.Color, r: i32) {
         x := mini_px(px, size, coord_of(c, ha))
@@ -6422,10 +6654,11 @@ draw_projection :: proc(px, py, size: i32, ha, va: i32, flip_v: bool,
         rl.DrawRectangle(x - r/2, y - r/2, r, r, col)
     }
 
-    // 障碍：暗灰琥珀小点，三个视图都能读出迷宫结构
+    // 障碍：暗灰琥珀小点，三个视图都能读出迷宫结构（只画球内）
     if map_has_walls {
         for i in 0..<CELLS {
-            if map_bit(i) do plot(px, py, size, cell3(i), ha, va, flip_v, rl.Color{188, 158, 96, 90}, 2)
+            c := cell3(i)
+            if map_bit(i) && cell_in_world(c) do plot(px, py, size, c, ha, va, flip_v, rl.Color{188, 158, 96, 90}, 2)
         }
     }
 
@@ -6600,10 +6833,10 @@ draw_hud :: proc() {
             if nd < 0 || d < nd do nd = d
         }
         if nd >= 0 {
-            draw_text(fmt.ctprintf("FOODS   %d in the cube · nearest %d cells", len(foods), nd), 26, 176, 18,
+            draw_text(fmt.ctprintf("FOODS   %d in the sphere · nearest %d cells", len(foods), nd), 26, 176, 18,
                 rl.Color{255, 190, 120, 255})
         } else {
-            draw_text(fmt.ctprintf("FOODS   %d in the cube", len(foods)), 26, 176, 18,
+            draw_text(fmt.ctprintf("FOODS   %d in the sphere", len(foods)), 26, 176, 18,
                 rl.Color{255, 190, 120, 255})
         }
         draw_text(fmt.ctprintf("模式: %s · 发现 %d 种 · 地图: %s", mode_hud_label(), len(kinds), current_map.name), 26, 204, 19,
@@ -6700,7 +6933,7 @@ draw_title :: proc() {
     pulse := 0.75 + 0.25 * math.sin(time_total * 3)
     draw_centered("3D  SNAKE", SCREEN_H/2 - 170, 88,
         rl.Color{u8(120 * pulse + 90), 255, u8(140 * pulse + 60), 255}, true)
-    draw_centered("True 3D - six directions inside a 12x12x12 cube, with a panoramic overview",
+    draw_centered("True 3D - six directions inside a spherical arena, with a panoramic overview",
         SCREEN_H/2 - 64, 23, rl.Color{170, 175, 190, 255})
     draw_centered("A / D: screen-left & right      W / S: screen-up & down (relative to your view)",
         SCREEN_H/2 - 18, 20, rl.Color{190, 195, 210, 255})
@@ -6710,7 +6943,7 @@ draw_title :: proc() {
         SCREEN_H/2 + 38, 18, rl.Color{255, 200, 140, 255})
     draw_centered("Press M to switch between the modern tube skin and the classic cube skin.",
         SCREEN_H/2 + 62, 18, rl.Color{140, 230, 190, 255})
-    draw_centered("Pause anytime with P or SPACE to inspect the cube. The dotted line shows where",
+    draw_centered("Pause anytime with P or SPACE to inspect the sphere. The dotted line shows where",
         SCREEN_H/2 + 86, 18, rl.Color{150, 155, 170, 255})
     draw_centered("flying straight leads. Mini-map and axis compass share the edge colors.",
         SCREEN_H/2 + 110, 18, rl.Color{150, 155, 170, 255})
@@ -6778,7 +7011,7 @@ update_camera :: proc(dt: f32, alpha: f32) {
     // smoothed head position (shared by both camera modes)
     hp := cell_to_world(snake[0])
     if len(prev_snake) > 0 {
-        hp = lerp_v3(cell_to_world(prev_snake[0]), hp, alpha)
+        hp = slerp_v3(cell_to_world(prev_snake[0]), hp, alpha)
     }
 
     shake_off := rl.Vector3{0, 0, 0}
@@ -6831,7 +7064,7 @@ update_camera :: proc(dt: f32, alpha: f32) {
         cam_yaw += dt * 0.25
     }
 
-    // orbit pivots on the CUBE CENTER: dragging rotates the whole cube
+    // orbit pivots on the SPHERE CENTER: dragging rotates the whole sphere
     // (frame, snake, food) as one rigid object on screen
     k := clamp(dt * 4, 0, 1)
     cam_target = lerp_v3(cam_target, {0, 0, 0}, k)
@@ -6866,6 +7099,7 @@ draw_frame :: proc(alpha: f32) {
     }
     draw_path_hint()
     draw_particles()
+    draw_sphere_shell()
     rl.EndMode3D()
 
     draw_tint()
@@ -6944,7 +7178,7 @@ rank_classic :: proc(sc: int) -> (string, rl.Color) {
     case sc <  50: return "蛇界萌新",   RANK_GRAY
     case sc < 150: return "初出茅庐",   RANK_GREEN
     case sc < 300: return "老练机长",   RANK_BLUE
-    case sc < 500: return "立方体传说", RANK_PURPLE
+    case sc < 500: return "球形传说", RANK_PURPLE
     }
     return "三维之神", RANK_GOLD
 }
@@ -6968,7 +7202,7 @@ next_rank_classic :: proc(sc: int) -> (name: string, need: int, at_max: bool) {
     switch {
     case sc <  50: return "初出茅庐",    50 - sc, false
     case sc < 150: return "老练机长",   150 - sc, false
-    case sc < 300: return "立方体传说", 300 - sc, false
+    case sc < 300: return "球形传说", 300 - sc, false
     case sc < 500: return "三维之神",   500 - sc, false
     }
     return "", 0, true
