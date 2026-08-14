@@ -9,6 +9,7 @@ snake3d-*.zip
 # runtime data
 best.txt
 creations.json
+macros.json
 tutorial.txt
 
 # debug captures
@@ -19,3 +20,4 @@ shot_*.png
 
 # os junk
 .DS_Store
+__pycache__/

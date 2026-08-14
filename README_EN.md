@@ -13,10 +13,10 @@
 
 ![Spherical arena](docs/sphere.webp)
 
-*The play field is a sphere now: the snake rides great circles on the
-shell, latitude / longitude lines plus three axis-colored meridians
-mark the boundary. Recorded fully autonomously with `SNAKE_RECORD` +
-`make_demo.py` (241-frame animated WebP, 0.36 MB).*
+*The play field is a sphere now: latitude / longitude lines plus three
+axis-colored meridians mark the boundary, and the snake body is drawn as
+a smooth arc. Recorded fully autonomously with `SNAKE_RECORD` +
+`make_demo.py` (241-frame animated WebP, 0.38 MB).*
 
 ![Feeding Lab demo](docs/feeding.webp)
 
@@ -52,8 +52,8 @@ Workshop**, or `B` to watch the AI play by itself.
   delay / repeat / chance. Your killer combo can be **saved as your own
   primitive** that future AI designs will reference
 - 🌐 **Spherical arena** — a sphere carved from the 12³ lattice; the
-  corners are off-limits. The body is drawn as an arc on the shell, and
-  hitting the rim wraps along a great circle instead of punching through
+  corners are off-limits. Movement is still six-way grid steps, but the
+  body is drawn as a smooth arc, and the spherical boundary is the wall
 - 🧊 **A true-3D snake** — no floor, no gravity, six directions inside
   the sphere. Press `B` and watch the AI paint with a 90-segment body
 - 📮 **Viral share codes** — one keystroke (`C`) copies your creation;

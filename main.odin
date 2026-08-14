@@ -365,13 +365,13 @@ reset_game :: proc() {
     clear(&particles)
     clear(&foods)
 
-    // 出生在球面赤道（+X 面），朝 +Z 沿大圆绕行，而不是从球心沿轴直飞
-    append(&snake, IV3{GRID_N - 1, GRID_N / 2, GRID_N / 2})
-    append(&snake, IV3{GRID_N - 1, GRID_N / 2, GRID_N / 2 - 1})
-    append(&snake, IV3{GRID_N - 1, GRID_N / 2, GRID_N / 2 - 2})
+    c :: GRID_N / 2
+    append(&snake, IV3{c + 1, c, c})
+    append(&snake, IV3{c,     c, c})
+    append(&snake, IV3{c - 1, c, c})
     for s in snake do append(&prev_snake, s)
 
-    dir = IV3{0, 0, 1}
+    dir = IV3{1, 0, 0}
     head_up = IV3{0, 1, 0}
     prev_dir = dir
     prev_up = head_up
@@ -535,15 +535,13 @@ step :: proc() {
     for s in snake do append(&prev_snake, s)
 
     head := snake[0]
-    nh, nd, stepped := advance_on_sphere(head, dir)
-    if !stepped {
-        if shield_timer > 0 do return  // 护盾：无路可走时原地停一拍
+    nh := IV3{head.x + dir.x, head.y + dir.y, head.z + dir.z}
+
+    // boundary collision: the play field is a sphere (radius WORLD_RADIUS)
+    if !cell_in_world(nh) {
+        if shield_timer > 0 do return  // 护盾：撞墙不死，原地停一拍
         die()
         return
-    }
-    if nd != dir {
-        turn_up_to(nd)
-        dir = nd
     }
     // obstacle collision: solid map cells kill like the boundary wall;
     // 护盾 ghosts straight through instead (same as shielded self-bite)
@@ -764,9 +762,8 @@ safe_to_eat :: proc(first: IV3) -> bool {
     for {
         next := IV3{-1, -1, -1}
         if steps == 0 {
-            stepped: bool
-            next, _, stepped = advance_on_sphere(cur, first)
-            if !stepped || !in_bounds(next) || ai_dist[idx3(next)] < 0 do return false
+            next = IV3{cur.x + first.x, cur.y + first.y, cur.z + first.z}
+            if !in_bounds(next) || ai_dist[idx3(next)] < 0 do return false
         } else {
             dn := ai_dist[idx3(cur)]
             for off in DIRS6 {
@@ -818,8 +815,8 @@ ai_choose :: proc() -> IV3 {
         mark_map(&ai_blocked)
         bfs(ai_target, &ai_dist, &ai_blocked)
         for off in DIRS6 {
-            n, _, ok := advance_on_sphere(head, off)
-            if !ok || !in_bounds(n) || ai_blocked[idx3(n)] do continue
+            n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
+            if !in_bounds(n) || ai_blocked[idx3(n)] do continue
             d := ai_dist[idx3(n)]
             if d >= 0 && d < best_d && safe_to_eat(off) {
                 best_d = d
@@ -836,8 +833,8 @@ ai_choose :: proc() -> IV3 {
     bfs(tip, &ai_dist, &ai_blocked)
     best_d = 1 << 30
     for off in DIRS6 {
-        n, _, ok := advance_on_sphere(head, off)
-        if !ok || !in_bounds(n) || ai_blocked[idx3(n)] do continue
+        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
+        if !in_bounds(n) || ai_blocked[idx3(n)] do continue
         d := ai_dist[idx3(n)]
         if d >= 0 && d < best_d {
             best_d = d
@@ -849,8 +846,8 @@ ai_choose :: proc() -> IV3 {
 
     // 3. doomed — pick any non-lethal move
     for off in DIRS6 {
-        n, _, ok := advance_on_sphere(head, off)
-        if ok && in_bounds(n) && !ai_blocked[idx3(n)] do return off
+        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
+        if in_bounds(n) && !ai_blocked[idx3(n)] do return off
     }
     return dir
 }
@@ -3064,9 +3061,9 @@ self_test :: proc() -> bool {
     enqueue_actions(rv[:])
     delete(rv)
     run_scheduled()
-    if snake[0] != (IV3{GRID_N - 1, GRID_N / 2, GRID_N / 2 - 2}) ||
-       snake[len(snake) - 1] != (IV3{GRID_N - 1, GRID_N / 2, GRID_N / 2}) ||
-       dir != (IV3{0, 0, -1}) {
+    if snake[0] != (IV3{GRID_N / 2 - 1, GRID_N / 2, GRID_N / 2}) ||
+       snake[len(snake) - 1] != (IV3{GRID_N / 2 + 1, GRID_N / 2, GRID_N / 2}) ||
+       dir != (IV3{-1, 0, 0}) {
         fmt.println("SELFTEST FAIL: reverse", snake[0], snake[len(snake) - 1], dir)
         return false
     }
@@ -3101,11 +3098,7 @@ self_test :: proc() -> bool {
     map_clear()
     reset_game()
     state = .PLAYING
-    wall8, _, ok8 := advance_on_sphere(snake[0], dir)
-    if !ok8 {
-        fmt.println("SELFTEST FAIL: shield setup, no geodesic step")
-        return false
-    }
+    wall8 := IV3{snake[0].x + dir.x, snake[0].y + dir.y, snake[0].z + dir.z}
     map_set(wall8, true)
     map_finalize()
     autopilot = false
@@ -3917,7 +3910,7 @@ self_test :: proc() -> bool {
     st_seed  := map_seed
     st_walls := map_has_walls
 
-    // --- T26b: 球形场地 + 大圆迈步（贴球面绕行，不再沿轴直穿）---
+    // --- T26b: 球形场地从 12³ 格子里挖出来：八角在球外，面心与中心在球内 ---
     {
         sc := sphere_cell_count()
         if cell_in_world({0, 0, 0}) || cell_in_world({11, 11, 11}) ||
@@ -3927,22 +3920,20 @@ self_test :: proc() -> bool {
             fmt.println("SELFTEST FAIL: spherical world", sc, CELLS)
             return false
         }
-        map_clear()
-        reset_game()
-        state = .PLAYING
+        // {0,2,6} 仍在 12³ 立方体内，但已出球：朝 -X 走一步必须撞死
+        clear(&snake)
+        clear(&prev_snake)
+        clear(&dir_queue)
+        append(&snake, IV3{1, 2, 6})
+        append(&snake, IV3{2, 2, 6})
+        append(&snake, IV3{3, 2, 6})
+        for s in snake do append(&prev_snake, s)
+        dir = IV3{-1, 0, 0}
         autopilot = false
-        start_dir := dir
-        curved := false
-        for _ in 0..<8 {
-            step()
-            if state != .PLAYING || !cell_in_world(snake[0]) {
-                fmt.println("SELFTEST FAIL: great-circle step left the sphere", state, snake[0])
-                return false
-            }
-            if dir != start_dir do curved = true
-        }
-        if !curved {
-            fmt.println("SELFTEST FAIL: great-circle did not turn (still a straight axis)")
+        state = .PLAYING
+        step()
+        if state != .GAME_OVER {
+            fmt.println("SELFTEST FAIL: sphere boundary did not kill", state, snake[0])
             return false
         }
         death_squawk = false
@@ -3987,12 +3978,8 @@ self_test :: proc() -> bool {
     game_mode = .CLASSIC
     map_clear()
     reset_game()
-    wall28, _, ok28 := advance_on_sphere(snake[0], dir)
-    if !ok28 {
-        fmt.println("SELFTEST FAIL: map collision setup")
-        return false
-    }
-    map_set(wall28, true) // 挡在大圆下一步上
+    wall28 := IV3{snake[0].x + dir.x, snake[0].y + dir.y, snake[0].z + dir.z}
+    map_set(wall28, true) // 挡在正前方
     map_finalize()
     autopilot = false
     reset_game()
@@ -4022,20 +4009,16 @@ self_test :: proc() -> bool {
     // --- T29: AI routes around walls; enclosed food falls back, no crash ---
     map_clear()
     reset_game()
-    wall29, _, ok29 := advance_on_sphere(snake[0], dir)
-    if !ok29 {
-        fmt.println("SELFTEST FAIL: map AI setup")
-        return false
-    }
-    map_set(wall29, true) // 挡在大圆下一步上
+    wall29 := IV3{snake[0].x + dir.x, snake[0].y + dir.y, snake[0].z + dir.z}
+    map_set(wall29, true) // 挡在正前方
     map_finalize()
     state = .PLAYING
     food = IV3{GRID_N / 2, GRID_N / 2, GRID_N / 2}
     ai_target = food
     ai_has_target = true
     d_ai := ai_choose()
-    n_ai, _, ok_ai := advance_on_sphere(snake[0], d_ai)
-    if !ok_ai || map_solid(n_ai) {
+    n_ai := IV3{snake[0].x + d_ai.x, snake[0].y + d_ai.y, snake[0].z + d_ai.z}
+    if !cell_in_world(n_ai) || map_solid(n_ai) {
         fmt.println("SELFTEST FAIL: AI picked a lethal cell", d_ai, n_ai)
         return false
     }
@@ -4046,8 +4029,8 @@ self_test :: proc() -> bool {
     }
     map_finalize()
     d_ai2 := ai_choose()
-    n_ai2, _, ok_ai2 := advance_on_sphere(snake[0], d_ai2)
-    if !ok_ai2 || map_solid(n_ai2) {
+    n_ai2 := IV3{snake[0].x + d_ai2.x, snake[0].y + d_ai2.y, snake[0].z + d_ai2.z}
+    if !cell_in_world(n_ai2) || map_solid(n_ai2) {
         fmt.println("SELFTEST FAIL: enclosed-food fallback is lethal", d_ai2, n_ai2)
         return false
     }
@@ -4228,7 +4211,7 @@ self_test :: proc() -> bool {
         state = .PLAYING
         started = true
         // 吃一颗豆豆再跑两拍，制造一局"进行中"的经典战局
-        food, _, _ = advance_on_sphere(snake[0], dir)
+        food = IV3{snake[0].x + dir.x, snake[0].y + dir.y, snake[0].z + dir.z}
         step() // +10 分
         food = IV3{0, 0, 0} // 钉死豆豆，后两拍 deterministic
         for _ in 0..<2 do step()
@@ -4296,8 +4279,8 @@ self_test :: proc() -> bool {
         append(&kinds, ck)
         kind_by_name[ck.name] = len(kinds) - 1
         h := snake[0]
-        step1, d1, _ := advance_on_sphere(h, dir)
-        step2, _, _ := advance_on_sphere(step1, d1)
+        step1 := IV3{h.x + dir.x, h.y + dir.y, h.z + dir.z}
+        step2 := IV3{step1.x + dir.x, step1.y + dir.y, step1.z + dir.z}
         append(&foods, Food{kind = len(kinds) - 1, pos = step1})
         food = step2 // 豆豆在再前一格（沿大圆）
         sc0 := score
@@ -4321,7 +4304,7 @@ self_test :: proc() -> bool {
         reset_game()
         state = .PLAYING
         started = true
-        food, _, _ = advance_on_sphere(snake[0], dir)
+        food = IV3{snake[0].x + dir.x, snake[0].y + dir.y, snake[0].z + dir.z}
         step() // 吃一颗豆
         snap_score, snap_eaten, snap_len := score, eaten, len(snake)
         switch_to_feeding()
@@ -4549,8 +4532,8 @@ random_safe_dir :: proc() -> IV3 {
     for j in 0..<6 {
         off := dirs[(start + j) % 6]
         if off.x == -dir.x && off.y == -dir.y && off.z == -dir.z do continue
-        n, _, ok := advance_on_sphere(head, off)
-        if !ok || !in_bounds(n) do continue
+        n := IV3{head.x + off.x, head.y + off.y, head.z + off.z}
+        if !in_bounds(n) do continue
         if map_solid(n) do continue
         hit := false
         for s in snake[:len(snake) - 1] do if s == n { hit = true; break }
@@ -5918,68 +5901,65 @@ draw_map :: proc() {
     }
 }
 
-// Dotted flight path ahead of the head, following the spherical great-circle
-// the snake will actually take (not a straight grid ray).
+// Dotted flight path ahead of the head: where flying straight leads,
+// colored by distance to the first obstacle (green -> yellow -> red).
 draw_path_hint :: proc() {
     if state != .PLAYING && state != .PAUSED do return
 
-    PATH_MAX :: 20
-    pts: [PATH_MAX]IV3
-    n_pts := 0
-    cur := snake[0]
-    cd := dir
     obstacle_dist := 0
     hit_self := false
     found := false
-    for i in 1..=PATH_MAX {
-        nxt, nd, ok := advance_on_sphere(cur, cd)
-        if !ok {
+    for i in 1..=GRID_N {
+        n := IV3{snake[0].x + dir.x * i32(i), snake[0].y + dir.y * i32(i), snake[0].z + dir.z * i32(i)}
+        if !cell_in_world(n) {
             obstacle_dist = i
             found = true
             break
         }
-        if map_solid(nxt) {
+        if map_solid(n) {  // 地图障碍也算“前方障碍物”
             obstacle_dist = i
             found = true
             break
         }
-        if on_snake(nxt) {
+        if on_snake(n) {
             obstacle_dist = i
             hit_self = true
             found = true
             break
         }
-        pts[n_pts] = nxt
-        n_pts += 1
-        cur = nxt
-        cd = nd
     }
-    if !found do obstacle_dist = n_pts + 1
+    if !found do obstacle_dist = GRID_N + 1
 
     col := rl.Color{80, 230, 110, 170}          // safe
     if obstacle_dist <= 4 do col = rl.Color{240, 200, 60, 190}   // caution
     if obstacle_dist <= 2 do col = rl.Color{240, 70, 60, 220}    // danger
 
+    // thin line ahead of the head (a line never balloons in first-person)
     hp := cell_to_world(snake[0])
-    if n_pts > 0 {
-        prev := hp
-        for i in 0..<n_pts {
-            q := cell_to_world(pts[i])
-            SEG :: 4
-            for s in 0..<SEG {
-                t0 := f32(s) / SEG
-                t1 := f32(s + 1) / SEG
-                rl.DrawLine3D(slerp_v3(prev, q, t0), slerp_v3(prev, q, t1), col)
-            }
-            prev = q
-        }
-        for i in 2..<n_pts {
-            rl.DrawSphereEx(cell_to_world(pts[i]), 0.05, 6, 6, col)
-        }
+    fdir := v3_of(dir)
+    start := hp + fdir * 0.55
+    if obstacle_dist > 1 {
+        last := IV3{snake[0].x + dir.x * i32(obstacle_dist - 1),
+                    snake[0].y + dir.y * i32(obstacle_dist - 1),
+                    snake[0].z + dir.z * i32(obstacle_dist - 1)}
+        rl.DrawLine3D(start, cell_to_world(last) + fdir * 0.4, col)
+    } else {
+        rl.DrawLine3D(start, start + fdir * 0.3, col)
+    }
+    // tiny waypoint dots only a few cells out, where they stay small on screen
+    for i in 3..<obstacle_dist {
+        n := IV3{snake[0].x + dir.x * i32(i), snake[0].y + dir.y * i32(i), snake[0].z + dir.z * i32(i)}
+        rl.DrawSphereEx(cell_to_world(n), 0.05, 6, 6, col)
     }
 
-    if found && n_pts > 0 {
-        p := cell_to_world(pts[n_pts - 1])
+    // flashing marker on the obstacle itself
+    if found {
+        n := IV3{snake[0].x + dir.x * i32(obstacle_dist), snake[0].y + dir.y * i32(obstacle_dist), snake[0].z + dir.z * i32(obstacle_dist)}
+        // clamp into the grid for boundary hits
+        n.x = clamp(n.x, 0, GRID_N - 1)
+        n.y = clamp(n.y, 0, GRID_N - 1)
+        n.z = clamp(n.z, 0, GRID_N - 1)
+        p := cell_to_world(n)
         blink := 0.5 + 0.5 * math.sin(time_total * 8)
         k := f32(0.3) + 0.15 * blink
         mark := hit_self ? rl.Color{255, 60, 60, u8(120 + 100 * blink)} : rl.Color{255, 120, 60, u8(80 + 80 * blink)}
