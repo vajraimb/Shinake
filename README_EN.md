@@ -11,6 +11,13 @@
 
 [简体中文](README.md) | **English**
 
+![Spherical arena](docs/sphere.webp)
+
+*The play field is a sphere now: the snake rides great circles on the
+shell, latitude / longitude lines plus three axis-colored meridians
+mark the boundary. Recorded fully autonomously with `SNAKE_RECORD` +
+`make_demo.py` (241-frame animated WebP, 0.36 MB).*
+
 ![Feeding Lab demo](docs/feeding.webp)
 
 *A scripted tasting menu: apple + star → chili speed rage → grenade blows
@@ -34,9 +41,9 @@ Workshop**, or `B` to watch the AI play by itself.
   you invent the food. Every word becomes a unique recipe with color,
   shape, rarity, and effects
 - 🕹️ **The original hardcore challenge** — classic mode is fully intact:
-  hit Enter on the title screen and pilot the six-way snake yourself.
-  Sounds easy — it really isn't. Press `B` anytime to let the AI take
-  over (or show you how it's done)
+  hit Enter on the title screen and pilot the six-way snake yourself
+  around the spherical arena. Sounds easy — it really isn't. Press `B`
+  anytime to let the AI take over (or show you how it's done)
 - 🗣️ **Create with one sentence** — tell the workshop "rocket chili" or
   "a hen that lays eggs", and the AI drafts the whole package: name,
   color, and a scripted "rage for 4s, then explode and chop the tail"
@@ -44,8 +51,11 @@ Workshop**, or `B` to watch the AI play by itself.
   head-tail reverse, score multiplier… compose them with
   delay / repeat / chance. Your killer combo can be **saved as your own
   primitive** that future AI designs will reference
-- 🧊 **A true-3D snake** — no floor, no gravity, six directions inside a
-  12³ cube. Press `B` and watch the AI paint with a 90-segment body
+- 🌐 **Spherical arena** — a sphere carved from the 12³ lattice; the
+  corners are off-limits. The body is drawn as an arc on the shell, and
+  hitting the rim wraps along a great circle instead of punching through
+- 🧊 **A true-3D snake** — no floor, no gravity, six directions inside
+  the sphere. Press `B` and watch the AI paint with a 90-segment body
 - 📮 **Viral share codes** — one keystroke (`C`) copies your creation;
   a friend pastes it to play. Your **creator byline** travels inside
 - 🎓 **Hands-on tutorial** — first launch walks you through 8 steps of
@@ -61,13 +71,8 @@ Workshop**, or `B` to watch the AI play by itself.
 
 ![Obstacle map · the Hive](docs/map.png)
 
-*The Hive map: 23 solid 2×2×2 blocks scattered through the cube; the AI
+*The Hive map: 23 solid 2×2×2 blocks scattered through the sphere; the AI
 autopilot threads the maze while the tri-view minimap tracks every wall.*
-
-![Attract mode](docs/attract.webp)
-
-*This attract loop was recorded fully autonomously with `SNAKE_RECORD` +
-`make_demo.py` (241-frame animated WebP, under 0.5 MB).*
 
 ![Battle-report card](docs/report.png)
 
@@ -84,6 +89,7 @@ press `G` anytime mid-feeding too: an 800×450 card saved next to the binary,
 **✅ Already served**
 
 - True-3D six-way flight, panoramic orbit + first-person cameras
+- Spherical arena: the cube is gone; the snake body traces the shell
 - AI autopilot: BFS pathfinding + survival simulation, auto-restart
 - Feeding Lab: AI flies, you invent — 8 presets, free-form words,
   and a snake that learns to refuse your poisons
@@ -157,7 +163,7 @@ with PIL:
 
 ```bash
 SNAKE_RECORD=/tmp/shinake_rec ./shinake        # → /tmp/shinake_rec/frames/f0001.png…f0241.png
-python3 make_demo.py /tmp/shinake_rec/frames docs/attract.webp --fps 10
+python3 make_demo.py /tmp/shinake_rec/frames docs/sphere.webp --fps 10
 ```
 
 `make_demo.py`: tunable `--fps 10` `--width 512` `--quality 70`,
@@ -175,7 +181,7 @@ title screen; any key exits.
 | `B` | AI autopilot (works in every mode; in the Feeding Lab it hands you the wheel for a hardcore manual run) |
 | `M` | Modern tube / classic cube skin |
 | `V` | First-person / orbit camera |
-| `IJKL` / mouse drag | Rotate / orbit the cube, `U`/`O`/wheel zoom |
+| `IJKL` / mouse drag | Rotate / orbit the sphere, `U`/`O`/wheel zoom |
 | `-` / `=` | Slow down / speed up |
 | `P` / `Space` | Pause (`Q` back to title while paused) · `R` restart |
 | Game-over screen | `Enter` play again · `Esc` back to title (feeding deaths stop here too, report card included) |
