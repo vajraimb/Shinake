@@ -637,6 +637,8 @@ ai_dist    : [CELLS]i32
 // 安全模拟专用的独立工作区，避免覆盖食物的 BFS 距离场
 sim_blocked : [CELLS]bool
 sim_dist    : [CELLS]i32
+sim_mark    : [CELLS]i32 // 模拟身体占据戳（epoch 版本号，免整表清零）
+sim_epoch   : i32
 
 idx3 :: proc(c: IV3) -> int {
     return int(c.x) + GRID_N * (int(c.y) + GRID_N * int(c.z))
@@ -665,9 +667,9 @@ in_bounds :: proc(c: IV3) -> bool {
     return cell_in_world(c)
 }
 
-// 先走「头 + 朝向」——和 AI 的六向 BFS 同一张图，自动驾驶才不会算一套、走一套。
-// 只有这一格已经出球时才贴着球面滑到最近的合法邻格（玩家顶着边界会绕，而不是秒死）。
-advance_on_sphere :: proc(head, d: IV3) -> (next, new_dir: IV3, ok: bool) {
+// 先走「头 + 朝向」——只有这一格已经出球时才贴着球面滑到最近的合法邻格
+// （玩家顶着边界会绕，而不是秒死）。纯几何函数：只读球面，与地图无关。
+advance_on_sphere_raw :: proc(head, d: IV3) -> (next, new_dir: IV3, ok: bool) {
     n := IV3{head.x + d.x, head.y + d.y, head.z + d.z}
     if cell_in_world(n) do return n, d, true
 
@@ -715,7 +717,54 @@ advance_on_sphere :: proc(head, d: IV3) -> (next, new_dir: IV3, ok: bool) {
     return best, best_off, found
 }
 
-// breadth-first distance field from target over cells marked free in blocked
+// ---------------------------------------------------------------------------
+// 测地线转移表：geo_next[i*6+k] / geo_ndir[i*6+k] = 从格 i 请求 DIRS6[k] 一步
+// 的落格索引与落地新朝向下标（-1 = 无路）。advance_on_sphere 是纯几何函数，
+// 开机一次算清；step / BFS / AI / 路径提示全部查同一张表——规划图 == 执行图，
+// 自动驾驶不再"算一套、走一套"。
+// ---------------------------------------------------------------------------
+geo_next  : [CELLS * 6]int
+geo_ndir  : [CELLS * 6]int
+geo_ready := false
+
+dir_index :: proc(d: IV3) -> int {
+    dirs := DIRS6
+    for v, k in dirs do if v == d do return k
+    return -1
+}
+
+init_geo_table :: proc() {
+    dirs := DIRS6
+    for i in 0..<CELLS {
+        c := cell3(i)
+        for k in 0..<6 {
+            // 只为球内格建边：头永远在球内，球外行的滑行边无人消费还会破坏对称性
+            n, nd, ok := advance_on_sphere_raw(c, dirs[k])
+            if ok && in_bounds(c) && in_bounds(n) {
+                geo_next[i*6+k] = idx3(n)
+                geo_ndir[i*6+k] = dir_index(nd)
+            } else {
+                geo_next[i*6+k] = -1
+                geo_ndir[i*6+k] = -1
+            }
+        }
+    }
+    geo_ready = true
+}
+
+// 查表版：语义与 _raw 完全一致（含贴壳滑行与方向改写），O(1)。
+advance_on_sphere :: proc(head, d: IV3) -> (next, new_dir: IV3, ok: bool) {
+    if !geo_ready do init_geo_table() // 兜底：先于 main 初始化的入口也能用
+    di := dir_index(d)
+    if di < 0 do return head, d, false
+    e := idx3(head)*6 + di
+    if geo_next[e] < 0 do return IV3{head.x + d.x, head.y + d.y, head.z + d.z}, d, false
+    dirs := DIRS6
+    return cell3(geo_next[e]), dirs[geo_ndir[e]], true
+}
+
+// breadth-first distance field from target over cells marked free in blocked.
+// 扩边走测地线转移表：距离场与 step() 的实际落子同图（贴壳滑行边也在内）。
 bfs :: proc(target: IV3, dist: ^[CELLS]i32, blocked: ^[CELLS]bool) {
     for i in 0..<CELLS do dist[i] = -1
     if !in_bounds(target) || blocked[idx3(target)] do return
@@ -729,12 +778,10 @@ bfs :: proc(target: IV3, dist: ^[CELLS]i32, blocked: ^[CELLS]bool) {
     for head < tail {
         cur := q[head]
         head += 1
-        c := cell3(cur)
         d := dist[cur]
-        for off in DIRS6 {
-            n := IV3{c.x + off.x, c.y + off.y, c.z + off.z}
-            if !in_bounds(n) do continue
-            ni := idx3(n)
+        for k in 0..<6 {
+            ni := geo_next[cur*6 + k]
+            if ni < 0 do continue
             if blocked[ni] || dist[ni] >= 0 do continue
             dist[ni] = d + 1
             q[tail] = ni
@@ -743,54 +790,75 @@ bfs :: proc(target: IV3, dist: ^[CELLS]i32, blocked: ^[CELLS]bool) {
     }
 }
 
+// 身体占据 blocked，头/尾尖放行：这是 BFS 的远期图——尾巴终会让位，
+// 封了尾尖 bfs(尾) 会直接空场。下一拍的落子安全（生长中尾尖不让位）
+// 由 ai_choose 的候选检查单独处理。
 mark_body :: proc(body: []IV3, blocked: ^[CELLS]bool) {
     for i in 0..<CELLS do blocked[i] = false
     for s in body do blocked[idx3(s)] = true
-    blocked[idx3(body[len(body) - 1])] = false  // tail tip will vacate
+    blocked[idx3(body[len(body) - 1])] = false  // tail tip will (eventually) vacate
     blocked[idx3(body[0])] = false              // head moves out
 }
 
 // Take the candidate first move, then walk the target distance field to the
 // target while simulating the snake's body; afterwards check the head can
 // still reach its own tail (i.e. eating here doesn't trap us).
-safe_to_eat :: proc(first: IV3) -> bool {
+// 模拟全程与真实飞行同规则：每步查转移表（贴壳滑行、方向改写都在内），
+// 并同样不吃 180°——模拟的朝向 sd 随滑行一起被改写。
+// target 是模拟的终点（食物或尾尖），沿途逐拍做与 step() 一致的自咬检查。
+safe_to_eat :: proc(first, target: IV3, food: bool) -> bool {
     sim := make([dynamic]IV3, len(snake))
     defer delete(sim)
     copy(sim[:], snake[:])
     grow := pending_growth
 
     cur := snake[0]
+    sd := dir
     steps := 0
+    sim_epoch += 1
+    for s in sim do sim_mark[idx3(s)] = sim_epoch
     for {
         next := IV3{-1, -1, -1}
+        nd := sd
         if steps == 0 {
             stepped: bool
-            next, _, stepped = advance_on_sphere(cur, first)
+            next, nd, stepped = advance_on_sphere(cur, first)
             if !stepped || !in_bounds(next) || ai_dist[idx3(next)] < 0 do return false
         } else {
             dn := ai_dist[idx3(cur)]
             for off in DIRS6 {
-                n := IV3{cur.x + off.x, cur.y + off.y, cur.z + off.z}
-                if !in_bounds(n) do continue
+                if off.x == -sd.x && off.y == -sd.y && off.z == -sd.z do continue
+                n, nd2, ok := advance_on_sphere(cur, off)
+                if !ok || !in_bounds(n) do continue
                 if ai_dist[idx3(n)] == dn - 1 {
                     next = n
+                    nd = nd2
                     break
                 }
             }
             if next == (IV3{-1, -1, -1}) do return false
         }
+        // 模拟头落格同样要过自咬检查：不生长时尾尖这拍让位（与 step() 同判）
+        tail_vacates := grow == 0 && len(sim) > 0
+        if sim_mark[idx3(next)] == sim_epoch &&
+           !(tail_vacates && next == sim[len(sim) - 1]) {
+            return false
+        }
         cur = next
+        sd = nd
 
         inject_at(&sim, 0, cur)
-        if cur == ai_target do grow += 1
+        sim_mark[idx3(cur)] = sim_epoch
+        if food && cur == target do grow += 1
         if grow > 0 {
             grow -= 1
         } else {
-            _ = pop(&sim)
+            t := pop(&sim)
+            sim_mark[idx3(t)] = sim_epoch - 1
         }
 
         steps += 1
-        if cur == ai_target do break
+        if cur == target do break
         if steps > CELLS do return false   // paranoia
     }
 
@@ -798,9 +866,9 @@ safe_to_eat :: proc(first: IV3) -> bool {
     mark_body(sim[:], &sim_blocked)
     mark_map(&sim_blocked) // 障碍在生存模拟里是永久的墙
     bfs(sim[len(sim) - 1], &sim_dist, &sim_blocked)
-    for off in DIRS6 {
-        n := IV3{sim[0].x + off.x, sim[0].y + off.y, sim[0].z + off.z}
-        if in_bounds(n) && sim_dist[idx3(n)] >= 0 do return true
+    for k in 0..<6 {
+        ni := geo_next[idx3(sim[0])*6 + k]
+        if ni >= 0 && sim_dist[ni] >= 0 do return true
     }
     return false
 }
@@ -808,6 +876,7 @@ safe_to_eat :: proc(first: IV3) -> bool {
 ai_choose :: proc() -> IV3 {
     head := snake[0]
     tip := snake[len(snake) - 1]
+    tip_holds := pending_growth > 0 // 生长中尾尖下一拍不让位，落上去就是自咬
     found := false
     best_dir := dir
     best_d := i32(1 << 30)
@@ -818,10 +887,12 @@ ai_choose :: proc() -> IV3 {
         mark_map(&ai_blocked)
         bfs(ai_target, &ai_dist, &ai_blocked)
         for off in DIRS6 {
+            if off.x == -dir.x && off.y == -dir.y && off.z == -dir.z do continue // 180° 会被 apply_dir 静默吞掉，不选
             n, _, ok := advance_on_sphere(head, off)
             if !ok || !in_bounds(n) || ai_blocked[idx3(n)] do continue
+            if tip_holds && n == tip do continue
             d := ai_dist[idx3(n)]
-            if d >= 0 && d < best_d && safe_to_eat(off) {
+            if d >= 0 && d < best_d && safe_to_eat(off, ai_target, true) {
                 best_d = d
                 best_dir = off
                 found = true
@@ -830,14 +901,33 @@ ai_choose :: proc() -> IV3 {
         if found do return best_dir
     }
 
-    // 2. no safe route (or nothing edible) — chase our own tail to buy time
+    // 2. no safe route (or nothing edible) — chase our own tail to buy time.
+    //    同样过一遍到尾尖的安全模拟：追尾也不能一头扎进死胡同。
     mark_body(snake[:], &ai_blocked)
     mark_map(&ai_blocked)
     bfs(tip, &ai_dist, &ai_blocked)
     best_d = 1 << 30
     for off in DIRS6 {
+        if off.x == -dir.x && off.y == -dir.y && off.z == -dir.z do continue
         n, _, ok := advance_on_sphere(head, off)
         if !ok || !in_bounds(n) || ai_blocked[idx3(n)] do continue
+        if tip_holds && n == tip do continue
+        d := ai_dist[idx3(n)]
+        if d >= 0 && d < best_d && safe_to_eat(off, tip, false) {
+            best_d = d
+            best_dir = off
+            found = true
+        }
+    }
+    if found do return best_dir
+
+    // 追尾也无安全解：退回无保护的贪心（尽力而为）
+    best_d = 1 << 30
+    for off in DIRS6 {
+        if off.x == -dir.x && off.y == -dir.y && off.z == -dir.z do continue
+        n, _, ok := advance_on_sphere(head, off)
+        if !ok || !in_bounds(n) || ai_blocked[idx3(n)] do continue
+        if tip_holds && n == tip do continue
         d := ai_dist[idx3(n)]
         if d >= 0 && d < best_d {
             best_d = d
@@ -849,8 +939,9 @@ ai_choose :: proc() -> IV3 {
 
     // 3. doomed — pick any non-lethal move
     for off in DIRS6 {
+        if off.x == -dir.x && off.y == -dir.y && off.z == -dir.z do continue
         n, _, ok := advance_on_sphere(head, off)
-        if ok && in_bounds(n) && !ai_blocked[idx3(n)] do return off
+        if ok && in_bounds(n) && !ai_blocked[idx3(n)] && !(tip_holds && n == tip) do return off
     }
     return dir
 }
@@ -2850,12 +2941,12 @@ self_test :: proc() -> bool {
     raw, _ := json.marshal(extreme, allocator = context.temp_allocator)
     b64, _ := base64.encode(raw, base64.ENC_URL_TABLE, context.temp_allocator)
     code3 := strings.concatenate({SHARE_PREFIX, strings.trim_right(b64, "=")}, context.temp_allocator)
-    idx3, ok3 := import_share_code(code3)
+    kind_idx3, ok3 := import_share_code(code3)
     if !ok3 {
         fmt.println("SELFTEST FAIL: extreme recipe rejected")
         return false
     }
-    k3 := kinds[idx3]
+    k3 := kinds[kind_idx3]
     clamped := k3.hue == 5 && k3.shape == .GEM && k3.rarity == 2 &&
         k3.fx_speed == 2.0 && k3.fx_speed_t == 8 && k3.fx_growth == 6 &&
         k3.fx_score == -50 && k3.fx_shake == 1 && k3.fx_confuse == 6 &&
@@ -4336,6 +4427,77 @@ self_test :: proc() -> bool {
         fmt.println("mode round trip: PASS")
     }
 
+    // --- T40: 投喂 AI 长跑存活——球面滑行的移动图必须与 AI 规划图同图 ---
+    // 饲养员只投普通苹果（无干扰效果），蛇持续变长贴壳绕行，
+    // 规划图（BFS/safe_to_eat）与执行图（advance_on_sphere）一旦分叉就会自咬。
+    // CROSS 不进门禁：两堵墙的门错位把 x>6,z>6 卦限完全封死（食物/尾巴
+    // 都不可达），出生在该卦限的 AI 必死——这是地图设计缺陷，非 AI 回归
+    //（round-world 同样死于 CROSS）。
+    gated_maps := [4]MapID{.VOID, .PILLARS, .HIVE, .CAVE}
+    for m in gated_maps {
+        map_apply(m)
+        game_mode = .CLASSIC
+        autopilot = false
+        reset_game()
+        switch_to_feeding()
+        state = .PLAYING
+        // 快速拉长蛇贴壳绕行（40 ≈ 真实玩法里蓝图堆叠的增长上限量级）；
+        // 上限留半场，避免合法 WIN（填满场地）干扰判定
+        cap := map_free_cells() / 2
+        pending_growth += min(40, max(cap - len(snake) - 20, 0))
+        max_len := 0
+        for i in 0..<600 {
+            if len(foods) == 0 do spawn_kind(0)
+            step()
+            if state != .PLAYING {
+                landing, _, lok := advance_on_sphere(snake[0], dir)
+                seg := -1
+                if lok {
+                    for s, si in snake do if s == landing { seg = si }
+                }
+                fmt.println("SELFTEST FAIL: feeding AI died on", m, "at tick", i,
+                    "len", len(snake), "head", snake[0], "dir", dir,
+                    "landing", landing, "ok", lok, "segment", seg,
+                    "tail", snake[len(snake) - 1], "pending_growth", pending_growth)
+                return false
+            }
+            max_len = max(max_len, len(snake))
+            if max_len >= cap do break
+        }
+        fmt.println("feeding AI survival:", m, "PASS (max len", max_len, ")")
+    }
+
+    // --- T41: 转移表一致性与对称性——查表必须与现场计算同结果，图必须可回头 ---
+    {
+        init_geo_table()
+        dirs := DIRS6
+        for i in 0..<CELLS {
+            c := cell3(i)
+            for k in 0..<6 {
+                n, nd, ok := advance_on_sphere_raw(c, dirs[k])
+                // 建边条件：现场可行，且头/落格都在球内（球外行恒 -1）
+                want := ok && in_bounds(c) && in_bounds(n)
+                e := geo_next[i*6+k]
+                if want != (e >= 0) ||
+                   (want && (e != idx3(n) || geo_ndir[i*6+k] != dir_index(nd))) {
+                    fmt.println("SELFTEST FAIL: geo table mismatch", c, dirs[k], n, nd, ok, e)
+                    return false
+                }
+                // 对称性：边 c→n 必有直步反向边 n→c（两格都在球内）
+                if want {
+                    nc := cell3(e)
+                    back_dir := dir_index(IV3{c.x - nc.x, c.y - nc.y, c.z - nc.z})
+                    back := geo_next[e*6 + back_dir]
+                    if back != i {
+                        fmt.println("SELFTEST FAIL: geo table asymmetric", c, dirs[k], nc)
+                        return false
+                    }
+                }
+            }
+        }
+        fmt.println("geo transition table: PASS")
+    }
+
     // restore the map state + game shell exactly as found
     current_map = st_map
     map_id = st_id
@@ -4553,7 +4715,9 @@ random_safe_dir :: proc() -> IV3 {
         if !ok || !in_bounds(n) do continue
         if map_solid(n) do continue
         hit := false
-        for s in snake[:len(snake) - 1] do if s == n { hit = true; break }
+        // 正在生长时尾巴不让位，尾尖也算身体（与 step() 的自咬判定一致）
+        body := pending_growth > 0 ? snake[:] : snake[:len(snake) - 1]
+        for s in body do if s == n { hit = true; break }
         if !hit do return off
     }
     return dir
@@ -7494,6 +7658,7 @@ shot_inject_editor_blueprint :: proc() {
 
 main :: proc() {
     init_primitives() // effect-blueprint registry (needed by self-test too)
+    init_geo_table()  // 测地线转移表：BFS/AI/移动/路径提示共用的静态移动图
     // headless self-test: SNAKE_SELFTEST=1 ./snake3d
     if os.get_env("SNAKE_SELFTEST", context.allocator) == "1" {
         os.exit(self_test() ? 0 : 1)
