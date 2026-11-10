@@ -46,6 +46,11 @@ public struct DifficultyProfile: Equatable {
     public var graceCharges: Int
     /// Grace stops working after this many seconds of actual play.
     public var graceWindow: Double
+    /// Wall bumps before this many bites are turned aside and do not spend a charge.
+    /// Exploratory swipes during the opening lesson stay free.
+    public var freeRescuesUntilEaten: Int
+    /// While the grace window is open, each bite refills the shield back to `graceCharges`.
+    public var refillsGrace: Bool
     /// First foods of a classic run stay on the snake's Z layer, distance 2...4.
     public var planarOpeningFoods: Int
     /// Temporary interval multiplier while a chili is active. Lower is faster.
@@ -63,6 +68,8 @@ public struct DifficultyProfile: Equatable {
         minFoodDistance: Int,
         graceCharges: Int,
         graceWindow: Double,
+        freeRescuesUntilEaten: Int,
+        refillsGrace: Bool,
         planarOpeningFoods: Int,
         chiliMultiplier: Double,
         showsGuide: Bool,
@@ -76,24 +83,30 @@ public struct DifficultyProfile: Equatable {
         self.minFoodDistance = minFoodDistance
         self.graceCharges = graceCharges
         self.graceWindow = graceWindow
+        self.freeRescuesUntilEaten = freeRescuesUntilEaten
+        self.refillsGrace = refillsGrace
         self.planarOpeningFoods = planarOpeningFoods
         self.chiliMultiplier = chiliMultiplier
         self.showsGuide = showsGuide
         self.solids = solids
     }
 
-    /// Default. A careful player is still on a readable tempo past 90 seconds:
-    /// 0.58 − 0.010 × bites, never faster than 0.30s. Four forgiven crashes
-    /// in the first 90s. The first three apples sit on the same layer.
+    /// Default. Opening tempo is 0.64s, then −0.008s per bite, floor 0.32s.
+    /// Six charges for the first 90s. The first three apples are on the snake's
+    /// layer, and bumps before those three bites do not spend a charge.
+    /// Each later bite inside the window refills the shield to 6. A fatal move
+    /// during those 90s is still turned aside after the counter hits zero.
     public static let easy = DifficultyProfile(
         id: "easy",
         grid: 9,
-        startInterval: 0.58,
-        minInterval: 0.30,
-        speedStep: 0.010,
+        startInterval: 0.64,
+        minInterval: 0.32,
+        speedStep: 0.008,
         minFoodDistance: 2,
-        graceCharges: 4,
+        graceCharges: 6,
         graceWindow: 90,
+        freeRescuesUntilEaten: 3,
+        refillsGrace: true,
         planarOpeningFoods: 3,
         chiliMultiplier: 0.78,
         showsGuide: true
@@ -110,6 +123,8 @@ public struct DifficultyProfile: Equatable {
         minFoodDistance: 3,
         graceCharges: 1,
         graceWindow: 30,
+        freeRescuesUntilEaten: 0,
+        refillsGrace: false,
         planarOpeningFoods: 1,
         chiliMultiplier: 0.70,
         showsGuide: true
@@ -126,6 +141,8 @@ public struct DifficultyProfile: Equatable {
         minFoodDistance: LegacyTuning.minFoodDistance,
         graceCharges: LegacyTuning.graceCharges,
         graceWindow: LegacyTuning.graceWindow,
+        freeRescuesUntilEaten: 0,
+        refillsGrace: false,
         planarOpeningFoods: 0,
         chiliMultiplier: 0.65,
         showsGuide: false

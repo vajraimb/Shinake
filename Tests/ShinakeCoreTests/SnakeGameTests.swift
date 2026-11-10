@@ -60,7 +60,7 @@ final class SnakeGameTests: XCTestCase {
         XCTAssertEqual(game.score, 10)
         XCTAssertEqual(game.length, length + 1)
         XCTAssertEqual(game.eaten, 1)
-        XCTAssertEqual(game.currentStepDuration(), 0.57, accuracy: 0.0001)
+        XCTAssertEqual(game.currentStepDuration(), 0.632, accuracy: 0.0001)
         XCTAssertFalse(game.snake.contains(food) && game.foods.contains { $0.position == food })
         XCTAssertFalse(game.foods.isEmpty)
         XCTAssertFalse(game.snake.contains(game.foods[0].position))
@@ -100,6 +100,7 @@ final class SnakeGameTests: XCTestCase {
         let events = game.debugStep()
         XCTAssertTrue(events.contains(.died))
         XCTAssertEqual(game.phase, .over)
+        XCTAssertEqual(game.deathCause, .ownBody)
     }
 
     func testWallKillsImmediatelyOnHard() {
@@ -113,6 +114,7 @@ final class SnakeGameTests: XCTestCase {
         let events = game.debugStep()
         XCTAssertTrue(events.contains(.died))
         XCTAssertEqual(game.snake[0].x, edge)
+        XCTAssertEqual(game.deathCause, .wall)
     }
 
     func testEasyGraceTurnsAWallIntoASave() {
@@ -121,16 +123,47 @@ final class SnakeGameTests: XCTestCase {
         game.debugArrange(
             snake: [Vec3(edge, 4, 4), Vec3(edge - 1, 4, 4), Vec3(edge - 2, 4, 4)],
             direction: .xp,
-            foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(4, 4, 2))],
-            grace: 4
+            foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(4, 4, 2))]
         )
         let events = game.debugStep()
         XCTAssertFalse(events.contains(.died))
         XCTAssertEqual(game.phase, .playing)
-        XCTAssertEqual(game.graceLeft, 3)
-        XCTAssertTrue(events.contains(.graceUsed(remaining: 3)))
-        XCTAssertEqual(game.coachCue, .graceSaved(left: 3))
+        // The first three apples are a free lesson. The charge stays.
+        XCTAssertEqual(game.graceLeft, 6)
+        XCTAssertTrue(events.contains(.graceUsed(remaining: 6)))
+        XCTAssertEqual(game.coachCue, .practiceSaved)
         XCTAssertNotEqual(game.direction, .xp)
+    }
+
+    func testGraceIsSpentOnlyAfterTheOpeningApples() {
+        let game = classic(.easy)
+        let edge = game.grid - 1
+        game.debugArrange(
+            snake: [Vec3(edge, 4, 4), Vec3(edge - 1, 4, 4), Vec3(edge - 2, 4, 4)],
+            direction: .xp,
+            foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(4, 4, 2))],
+            grace: 6,
+            eaten: 3
+        )
+        let events = game.debugStep()
+        XCTAssertFalse(events.contains(.died))
+        XCTAssertEqual(game.graceLeft, 5)
+        XCTAssertTrue(events.contains(.graceUsed(remaining: 5)))
+        XCTAssertEqual(game.coachCue, .graceSaved(left: 5))
+    }
+
+    func testEatingRestoresASpentChargeOnEasy() {
+        let game = classic(.easy)
+        let food = Vec3(4, 4, 4)
+        game.debugArrange(
+            snake: [food + .xn, food + .xn + .xn, food + .xn + .xn + .xn],
+            direction: .xp,
+            foods: [FoodPellet(id: 1, kind: .apple, position: food)],
+            grace: 2,
+            eaten: 3
+        )
+        _ = game.debugStep()
+        XCTAssertEqual(game.graceLeft, 6)
     }
 
     func testGraceExpiresWithTheClock() {
@@ -140,11 +173,13 @@ final class SnakeGameTests: XCTestCase {
             snake: [Vec3(edge, 4, 4), Vec3(edge - 1, 4, 4), Vec3(edge - 2, 4, 4)],
             direction: .xp,
             foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(1, 1, 1))],
-            grace: 4
+            grace: 4,
+            eaten: 3
         )
         game.debugSetElapsed(90.01)
         let events = game.debugStep()
         XCTAssertTrue(events.contains(.died))
+        XCTAssertEqual(game.deathCause, .wall)
     }
 
     func testGraceCannotSaveASealedHead() {
@@ -210,7 +245,7 @@ final class SnakeGameTests: XCTestCase {
         XCTAssertEqual(game.best, 40)
         XCTAssertEqual(game.phase, .ready)
         XCTAssertEqual(game.length, 3)
-        XCTAssertEqual(game.graceLeft, 4)
+        XCTAssertEqual(game.graceLeft, 6)
     }
 
     func testNewBestFiresOnlyWhenBeatingARealRecord() {
@@ -222,7 +257,8 @@ final class SnakeGameTests: XCTestCase {
             foods: [FoodPellet(id: 1, kind: .apple, position: food)]
         )
         let first = fresh.debugStep()
-        XCTAssertFalse(first.contains(.newBest))
+        // A first score is a record even when nothing was saved before.
+        XCTAssertTrue(first.contains(.newBest))
         XCTAssertEqual(fresh.best, 10)
 
         let returning = classic(best: 10)
@@ -459,5 +495,94 @@ final class SnakeGameTests: XCTestCase {
         _ = game.debugStep()
         XCTAssertTrue(game.shieldActive)
         XCTAssertEqual(game.score, 36)
+    }
+
+    func testAimCueNamesTheSwipeTowardTheApple() {
+        let game = classic(.easy)
+        let head = Vec3(3, 4, 4)
+        game.debugArrange(
+            snake: [head, head + .xn, head + .xn + .xn],
+            direction: .xp,
+            foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(3, 7, 4))]
+        )
+        XCTAssertEqual(game.coachCue, .aim(.screen(.up)))
+        XCTAssertEqual(game.suggestedInput(), .screen(.up))
+    }
+
+    func testFourthAppleLeavesTheLayerAndLightsDepth() {
+        let game = classic(.easy, seed: 3)
+        var head = Vec3(3, 4, 4)
+        for _ in 0..<3 {
+            game.debugArrange(
+                snake: [head, head + .xn, head + .xn + .xn],
+                direction: .xp,
+                foods: [FoodPellet(id: 1, kind: .apple, position: head + .xp)],
+                grace: game.graceLeft,
+                eaten: game.eaten
+            )
+            let events = game.debugStep()
+            XCTAssertTrue(events.contains(.ate(.apple)))
+            head = game.snake[0]
+        }
+        XCTAssertEqual(game.eaten, 3)
+        XCTAssertNotEqual(game.foods[0].position.z, game.snake[0].z)
+        if case .useDepth = game.coachCue {
+        } else {
+            XCTFail("expected a depth cue, got \(game.coachCue)")
+        }
+    }
+
+    func testFeedingOpensInTheMiddleAndWaits() {
+        let game = SnakeGame(profile: .easy, mode: .feeding, seed: 4)
+        let head = game.snake[0]
+        let food = game.foods[0].position
+        XCTAssertEqual(food.z, head.z)
+        let distance = food.manhattan(to: head)
+        XCTAssertGreaterThanOrEqual(distance, 2)
+        XCTAssertLessThanOrEqual(distance, 4)
+        let limit = game.grid - 2
+        XCTAssertGreaterThan(food.x, 1)
+        XCTAssertLessThan(food.x, limit)
+        XCTAssertGreaterThan(food.y, 1)
+        XCTAssertLessThan(food.y, limit)
+        let start = game.snake
+        _ = game.update(dt: 0.2)
+        XCTAssertEqual(game.snake, start)
+    }
+
+    func testMessyThumbsReachTheDepthLessonAlive() {
+        // A casual thumb: often follows the arrow, sometimes swipes the wrong way.
+        for seed: UInt64 in [1, 7, 11, 21] {
+            var rng = SplitMix64(seed: seed &* 17 &+ 3)
+            let game = classic(.easy, seed: seed)
+            if let first = game.suggestedInput() {
+                game.input(first)
+            } else {
+                game.input(.screen(.right))
+            }
+            var time = 0.0
+            var ticks = 0
+            var sawDepth = false
+            let inputs: [ControlInput] = [
+                .screen(.up), .screen(.down), .screen(.left), .screen(.right), .depthIn, .depthOut,
+            ]
+            while time < 75 && game.phase == .playing {
+                if ticks % 8 == 0 {
+                    if rng.unit() < 0.62, let hint = game.suggestedInput() {
+                        game.input(hint)
+                    } else {
+                        game.input(inputs[rng.int(below: inputs.count)])
+                    }
+                }
+                if case .useDepth = game.coachCue { sawDepth = true }
+                _ = game.update(dt: 1.0 / 30.0)
+                time += 1.0 / 30.0
+                ticks += 1
+            }
+            XCTAssertEqual(game.phase, .playing, "seed \(seed) died at \(game.elapsed) eaten \(game.eaten) grace \(game.graceLeft) cause \(String(describing: game.deathCause))")
+            XCTAssertGreaterThanOrEqual(game.elapsed, 60, "seed \(seed)")
+            XCTAssertGreaterThanOrEqual(game.eaten, 3, "seed \(seed) eaten \(game.eaten)")
+            XCTAssertTrue(sawDepth, "seed \(seed) never saw the depth cue")
+        }
     }
 }

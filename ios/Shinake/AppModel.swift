@@ -50,6 +50,10 @@ final class AppModel: ObservableObject {
     @Published var toast: String?
     @Published var tutorial: TutorialIntent?
     @Published var showSettings = false
+    /// Off by default so the clock stays visible. The player can hide it.
+    @Published var statusBarHidden: Bool {
+        didSet { defaults.set(statusBarHidden, forKey: Key.statusBar) }
+    }
     @Published private(set) var runWasRecord = false
 
     private(set) var game: SnakeGame
@@ -66,10 +70,12 @@ final class AppModel: ObservableObject {
         let storedScheme = ControlScheme(rawValue: defaults.string(forKey: Key.scheme) ?? "") ?? .swipe
         let storedSound = defaults.object(forKey: Key.sound) as? Bool ?? true
         let storedHaptics = defaults.object(forKey: Key.haptics) as? Bool ?? true
+        let storedStatusBar = defaults.object(forKey: Key.statusBar) as? Bool ?? false
         difficulty = storedDifficulty
         scheme = storedScheme
         soundOn = storedSound
         hapticsOn = storedHaptics
+        statusBarHidden = storedStatusBar
         sound.enabled = storedSound
         haptics.enabled = storedHaptics
         game = SnakeGame(
@@ -82,7 +88,7 @@ final class AppModel: ObservableObject {
     }
 
     var showGuide: Bool {
-        game.mode == .classic && game.profile.showsGuide && game.eaten < 4 && game.phase != .over
+        game.mode == .classic && game.profile.showsGuide && game.eaten < 6 && game.phase != .over
     }
 
     var bestForSelected: Int { defaults.integer(forKey: Key.best(difficulty)) }
@@ -257,6 +263,7 @@ private enum Key {
     static let scheme = "shinake.scheme"
     static let difficulty = "shinake.difficulty"
     static let tutorial = "shinake.tutorialSeen"
+    static let statusBar = "shinake.statusBarHidden"
     static func best(_ difficulty: Difficulty) -> String { "shinake.best.\(difficulty.rawValue)" }
 }
 

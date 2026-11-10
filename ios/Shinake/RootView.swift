@@ -18,7 +18,7 @@ struct RootView: View {
             }
         }
         .preferredColorScheme(.dark)
-        .statusBarHidden(true)
+        .statusBarHidden(model.statusBarHidden)
         .onAppear { model.prepareFeedback() }
         .onChange(of: scenePhase) { phase in
             guard phase != .active, model.screen == .play else { return }

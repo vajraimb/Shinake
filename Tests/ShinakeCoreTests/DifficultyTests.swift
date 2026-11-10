@@ -19,11 +19,13 @@ final class DifficultyTests: XCTestCase {
         let easy = Difficulty.easy.profile
         XCTAssertEqual(easy, .easy)
         XCTAssertEqual(easy.grid, 9)
-        XCTAssertEqual(easy.startInterval, 0.58, accuracy: 0.0001)
-        XCTAssertEqual(easy.minInterval, 0.30, accuracy: 0.0001)
-        XCTAssertEqual(easy.speedStep, 0.010, accuracy: 0.0001)
-        XCTAssertEqual(easy.graceCharges, 4)
+        XCTAssertEqual(easy.startInterval, 0.64, accuracy: 0.0001)
+        XCTAssertEqual(easy.minInterval, 0.32, accuracy: 0.0001)
+        XCTAssertEqual(easy.speedStep, 0.008, accuracy: 0.0001)
+        XCTAssertEqual(easy.graceCharges, 6)
         XCTAssertEqual(easy.graceWindow, 90, accuracy: 0.0001)
+        XCTAssertEqual(easy.freeRescuesUntilEaten, 3)
+        XCTAssertTrue(easy.refillsGrace)
         XCTAssertEqual(easy.planarOpeningFoods, 3)
         XCTAssertEqual(easy.minFoodDistance, 2)
         XCTAssertTrue(easy.showsGuide)
@@ -47,15 +49,17 @@ final class DifficultyTests: XCTestCase {
         XCTAssertGreaterThan(normal.minInterval, LegacyTuning.minInterval)
         XCTAssertEqual(normal.graceCharges, 1)
         XCTAssertEqual(normal.graceWindow, 30, accuracy: 0.0001)
+        XCTAssertEqual(normal.freeRescuesUntilEaten, 0)
+        XCTAssertFalse(normal.refillsGrace)
     }
 
     func testIntervalRampsThenFloors() {
         let easy = DifficultyProfile.easy
-        XCTAssertEqual(moveInterval(eaten: 0, profile: easy), 0.58, accuracy: 0.0001)
-        XCTAssertEqual(moveInterval(eaten: 10, profile: easy), 0.48, accuracy: 0.0001)
-        // 0.58 - 28 * 0.010 = 0.30 exactly, then the floor holds.
-        XCTAssertEqual(moveInterval(eaten: 28, profile: easy), 0.30, accuracy: 0.0001)
-        XCTAssertEqual(moveInterval(eaten: 80, profile: easy), 0.30, accuracy: 0.0001)
+        XCTAssertEqual(moveInterval(eaten: 0, profile: easy), 0.64, accuracy: 0.0001)
+        XCTAssertEqual(moveInterval(eaten: 10, profile: easy), 0.56, accuracy: 0.0001)
+        // 0.64 - 40 * 0.008 = 0.32 exactly, then the floor holds.
+        XCTAssertEqual(moveInterval(eaten: 40, profile: easy), 0.32, accuracy: 0.0001)
+        XCTAssertEqual(moveInterval(eaten: 80, profile: easy), 0.32, accuracy: 0.0001)
 
         let hard = DifficultyProfile.hard
         XCTAssertEqual(moveInterval(eaten: 0, profile: hard), 0.27, accuracy: 0.0001)
@@ -66,9 +70,9 @@ final class DifficultyTests: XCTestCase {
 
     func testNinetySecondsOfEasyIsStillReadable() {
         // A player biting once every four seconds for a minute and a half
-        // has eaten ~22 times. That tempo must stay slower than a quarter-second.
+        // has eaten ~22 times. 0.64 − 22 × 0.008 = 0.464, still an easy read.
         let after = moveInterval(eaten: 22, profile: .easy)
-        XCTAssertGreaterThan(after, 0.25)
-        XCTAssertEqual(after, 0.36, accuracy: 0.0001)
+        XCTAssertGreaterThan(after, 0.40)
+        XCTAssertEqual(after, 0.464, accuracy: 0.0001)
     }
 }

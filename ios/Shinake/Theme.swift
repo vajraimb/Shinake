@@ -65,14 +65,37 @@ enum Copy {
         switch cue {
         case .swipeToStart:
             return "滑动开始 · 不能直接掉头"
+        case .aim(let input):
+            return aim(input)
         case .goEat:
             return "去吃那颗光"
         case .useDepth(let inward):
             return inward ? "果子在里面，点「深入」" : "果子朝你这边，点「拉近」"
+        case .practiceSaved:
+            return "先帮你拐回来，这次不扣护盾"
         case .graceSaved(let left):
-            return left > 0 ? "护盾帮你拐了弯 · 还剩 \(left) 次" : "护盾用完了，接下来要自己躲开"
+            return left > 0 ? "护盾帮你拐了弯 · 还剩 \(left) 次" : "护盾见底了，这一分钟里还会再帮你拐"
         case .none:
             return nil
+        }
+    }
+
+    static func aim(_ input: ControlInput) -> String {
+        switch input {
+        case .screen(.right): return "向右滑"
+        case .screen(.left): return "向左滑"
+        case .screen(.up): return "向上滑"
+        case .screen(.down): return "向下滑"
+        case .depthIn: return "果子在里面，点「深入」"
+        case .depthOut: return "果子朝你这边，点「拉近」"
+        }
+    }
+
+    static func death(_ cause: DeathCause?) -> String {
+        switch cause {
+        case .wall: return "撞到墙了"
+        case .ownBody: return "咬到自己了"
+        case nil: return "碰到了"
         }
     }
 }

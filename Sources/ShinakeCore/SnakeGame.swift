@@ -33,6 +33,11 @@ public struct FoodPellet: Equatable {
     }
 }
 
+public enum DeathCause: Equatable {
+    case wall
+    case ownBody
+}
+
 public enum GameEvent: Equatable {
     case ate(FoodKind)
     case graceUsed(remaining: Int)
@@ -47,8 +52,12 @@ public enum GameEvent: Equatable {
 /// What the play screen should be saying. Copy lives in the app, in Chinese.
 public enum CoachCue: Equatable {
     case swipeToStart
+    /// A specific thumb move that shortens the path to the food.
+    case aim(ControlInput)
     case goEat
     case useDepth(inward: Bool)
+    /// A wall bump during the opening lesson. The charge was not spent.
+    case practiceSaved
     case graceSaved(left: Int)
     case none
 }
@@ -81,6 +90,7 @@ public final class SnakeGame {
     public private(set) var eaten = 0
     public private(set) var phase: Phase = .ready
     public private(set) var graceLeft: Int
+    public private(set) var deathCause: DeathCause?
     public private(set) var elapsed: Double = 0
     public private(set) var fraction: Double = 0
     public private(set) var started = false
@@ -99,6 +109,8 @@ public final class SnakeGame {
     private var moveAccumulator: Double = 0
     private var nextFoodID = 0
     private var graceCueUntil: Double = 0
+    private var rescueWasFree = false
+    private var holdMovesUntil: Double = 0
     private var phaseBeforePause: Phase = .playing
     private var lastCue: CoachCue = .none
 
@@ -133,24 +145,32 @@ public final class SnakeGame {
 
     public var coachCue: CoachCue {
         if graceCueUntil > elapsed {
-            return .graceSaved(left: graceLeft)
+            return rescueWasFree ? .practiceSaved : .graceSaved(left: graceLeft)
         }
         if mode == .classic && phase == .ready {
             return .swipeToStart
         }
+        // Keep pointing at the food through the opening and the depth lesson.
+        // A stray depth tap must not dismiss the cue; it stays until the apple
+        // is on the snake's layer or the lesson window closes.
+        if mode == .classic && profile.showsGuide && eaten < 8
+            && (phase == .playing || phase == .ready), let food = foods.first {
+            if let depth = preferredDepthCue(toward: food.position) {
+                return depth
+            }
+            if let suggestion = suggestedInput() {
+                switch suggestion {
+                case .depthIn:
+                    return .useDepth(inward: true)
+                case .depthOut:
+                    return .useDepth(inward: false)
+                default:
+                    return .aim(suggestion)
+                }
+            }
+        }
         if mode == .classic && eaten == 0 && (phase == .playing || phase == .ready) {
             return .goEat
-        }
-        if profile.showsGuide && !usedDepth && eaten >= 2 && eaten < 6, let food = foods.first {
-            let delta = Vec3(
-                food.position.x - snake[0].x,
-                food.position.y - snake[0].y,
-                food.position.z - snake[0].z
-            )
-            let depthDelta = delta.dot(mapping.depthIn)
-            if depthDelta != 0 {
-                return .useDepth(inward: depthDelta > 0)
-            }
         }
         return .none
     }
@@ -189,7 +209,7 @@ public final class SnakeGame {
         guard mode == .feeding else { return false }
         guard phase == .playing || phase == .ready else { return false }
         guard foods.count < 3 else { return false }
-        let placed = spawn(kind: kind, openingBias: false)
+        let placed = spawn(kind: kind, bias: .interior)
         touchUI()
         return placed
     }
@@ -235,8 +255,13 @@ public final class SnakeGame {
         }
         elapsed += dt
         tickEffects(dt)
-        moveAccumulator += dt
         var events: [GameEvent] = []
+        if holdMovesUntil > 0 {
+            holdMovesUntil = max(0, holdMovesUntil - dt)
+            noteCueChange()
+            return events
+        }
+        moveAccumulator += dt
         var spins = 0
         while phase == .playing && spins < 4 {
             let duration = currentStepDuration()
@@ -271,6 +296,7 @@ public final class SnakeGame {
         direction: Vec3,
         foods pellets: [FoodPellet] = [],
         grace: Int? = nil,
+        eaten bites: Int? = nil,
         pendingGrowth: Int = 0,
         shield: Double = 0,
         phase: Phase = .playing,
@@ -282,6 +308,8 @@ public final class SnakeGame {
         self.direction = direction
         foods = pellets
         if let grace { graceLeft = grace }
+        if let bites { eaten = bites }
+        deathCause = nil
         self.pendingGrowth = pendingGrowth
         shieldRemaining = shield
         self.phase = phase
@@ -348,17 +376,21 @@ public final class SnakeGame {
         graceCueUntil = 0
         solids = profile.solids
         manualDrive = false
+        deathCause = nil
         if mode == .feeding {
             autopilot = true
             started = true
             phase = .playing
-            // Prime the clock so the AI takes its first step on the next frame.
-            moveAccumulator = currentStepDuration()
-            _ = spawn(kind: .apple, openingBias: false)
+            // Sit in the middle long enough for the first-entry hint to be read.
+            // The AI's first step is a full move after this hold, not immediately.
+            holdMovesUntil = 1.4
+            moveAccumulator = 0
+            _ = spawn(kind: .apple, bias: .interior)
         } else {
             autopilot = false
             phase = .ready
-            _ = spawn(kind: .apple, openingBias: profile.planarOpeningFoods > 0)
+            holdMovesUntil = 0
+            _ = spawn(kind: .apple, bias: profile.planarOpeningFoods > 0 ? .openingPlane : .standard)
         }
     }
 
@@ -413,7 +445,9 @@ public final class SnakeGame {
             if shieldRemaining > 0 {
                 events.append(.shielded)
             } else if let rescue = graceRescue() {
-                graceLeft -= 1
+                let free = inFreeOpening
+                if !free && graceLeft > 0 { graceLeft -= 1 }
+                rescueWasFree = free
                 direction = rescue
                 next = snake[0] + direction
                 graceCueUntil = elapsed + 1.7
@@ -421,6 +455,7 @@ public final class SnakeGame {
                 touchUI()
             } else {
                 phase = .over
+                deathCause = (!inBounds(next) || solids.contains(next)) ? .wall : .ownBody
                 events.append(.died)
                 touchUI()
                 return events
@@ -483,54 +518,80 @@ public final class SnakeGame {
             score += 6
             shieldRemaining = max(shieldRemaining, 7)
         }
-        let prior = best
         if score > best {
             best = score
-            if prior > 0 { events.append(.newBest) }
+            events.append(.newBest)
+        }
+        // A bite puts the shield back to full, so one apple undoes a clumsy stretch.
+        if profile.refillsGrace && !inFreeOpening && elapsed <= profile.graceWindow + 1e-6 {
+            graceLeft = profile.graceCharges
         }
         events.append(.ate(kind))
         if mode == .classic {
-            let stillOpening = eaten < profile.planarOpeningFoods
-            _ = spawn(kind: .apple, openingBias: stillOpening)
+            _ = spawn(kind: .apple, bias: classicBias)
         }
         return events
     }
 
+    private var classicBias: SpawnBias {
+        if eaten < profile.planarOpeningFoods { return .openingPlane }
+        if profile.showsGuide && eaten == profile.planarOpeningFoods { return .depthLesson }
+        return .standard
+    }
+
+    private enum SpawnBias {
+        case openingPlane
+        case depthLesson
+        case interior
+        case standard
+    }
+
     @discardableResult
-    private func spawn(kind: FoodKind, openingBias: Bool) -> Bool {
+    private func spawn(kind: FoodKind, bias: SpawnBias) -> Bool {
         let head = snake[0]
         var occupied = solids
         for cell in snake { occupied.insert(cell) }
         for pellet in foods { occupied.insert(pellet.position) }
 
-        var opening: [Vec3] = []
-        var far: [Vec3] = []
-        var any: [Vec3] = []
+        var preferred: [Vec3] = []
+        var fallback: [Vec3] = []
         let n = profile.grid
+        let margin = bias == .interior ? 2 : 1
         for z in 0..<n {
             for y in 0..<n {
                 for x in 0..<n {
                     let cell = Vec3(x, y, z)
                     if occupied.contains(cell) { continue }
-                    any.append(cell)
                     let distance = cell.manhattan(to: head)
-                    if distance >= profile.minFoodDistance {
-                        far.append(cell)
+                    let inset = x >= margin && y >= margin && z >= margin
+                        && x < n - margin && y < n - margin && z < n - margin
+                    switch bias {
+                    case .openingPlane:
+                        if cell.z == head.z && distance >= 2 && distance <= 4 && inset {
+                            preferred.append(cell)
+                        }
+                    case .depthLesson:
+                        let planar = abs(cell.x - head.x) + abs(cell.y - head.y)
+                        let depth = abs(cell.z - head.z)
+                        if depth >= 1 && planar <= 2 && distance >= 2 && distance <= 5 && inset {
+                            preferred.append(cell)
+                        }
+                    case .interior:
+                        if inset && cell.z == head.z && distance >= 2 && distance <= 4 {
+                            preferred.append(cell)
+                        } else if inset && distance >= profile.minFoodDistance {
+                            fallback.append(cell)
+                        }
+                    case .standard:
+                        if distance >= profile.minFoodDistance {
+                            preferred.append(cell)
+                        }
                     }
-                    if openingBias && cell.z == head.z && distance >= 2 && distance <= 4 {
-                        opening.append(cell)
-                    }
+                    if bias != .interior { fallback.append(cell) }
                 }
             }
         }
-        let pool: [Vec3]
-        if !opening.isEmpty {
-            pool = opening
-        } else if !far.isEmpty {
-            pool = far
-        } else {
-            pool = any
-        }
+        let pool = preferred.isEmpty ? fallback : preferred
         guard !pool.isEmpty else { return false }
         let index = rng.int(below: pool.count)
         nextFoodID += 1
@@ -558,8 +619,51 @@ public final class SnakeGame {
         return false
     }
 
+    /// Depth wins ties. Otherwise a same-length planar step hides the lesson.
+    private func preferredDepthCue(toward food: Vec3) -> CoachCue? {
+        guard food.z != snake[0].z else { return nil }
+        let growing = pendingGrowth > 0
+        func remaining(_ dir: Vec3) -> Int? {
+            if dir == -direction { return nil }
+            let next = snake[0] + dir
+            if isFatal(next, growing: growing) { return nil }
+            return next.manhattan(to: food)
+        }
+        let inward = remaining(mapping.depthIn)
+        let outward = remaining(mapping.depthOut)
+        let depth: (Vec3, Int)?
+        if let left = inward, left <= (outward ?? Int.max) {
+            depth = (mapping.depthIn, left)
+        } else if let right = outward {
+            depth = (mapping.depthOut, right)
+        } else {
+            depth = nil
+        }
+        guard let depth else { return nil }
+        let planar = [mapping.right, mapping.left, mapping.up, mapping.down]
+        var bestPlanar = Int.max
+        for dir in planar {
+            if let left = remaining(dir) { bestPlanar = min(bestPlanar, left) }
+        }
+        guard depth.1 <= bestPlanar else { return nil }
+        return .useDepth(inward: depth.0 == mapping.depthIn)
+    }
+
+    /// Opening bumps are free, so a player feeling out the cube is not punished
+    /// before the three on-layer apples and the depth lesson.
+    private var inFreeOpening: Bool {
+        profile.freeRescuesUntilEaten > 0 && eaten < profile.freeRescuesUntilEaten
+    }
+
+    /// Easy keeps turning a fatal move aside for the whole grace window, even
+    /// after the counter hits zero, so a clumsy first minute can finish the lesson.
+    private var windowKeepsYouAlive: Bool {
+        profile.refillsGrace && profile.graceWindow > 0 && elapsed <= profile.graceWindow + 1e-6
+    }
+
     private func graceRescue() -> Vec3? {
-        guard graceLeft > 0, elapsed <= profile.graceWindow + 1e-6 else { return nil }
+        let charged = graceLeft > 0 && elapsed <= profile.graceWindow + 1e-6
+        guard inFreeOpening || windowKeepsYouAlive || charged else { return nil }
         let growing = pendingGrowth > 0
         let options = Vec3.six.filter { dir in
             dir != -direction && !isFatal(snake[0] + dir, growing: growing)

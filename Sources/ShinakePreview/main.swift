@@ -21,8 +21,10 @@ struct Frame: Encodable {
 func cueName(_ cue: CoachCue) -> String {
     switch cue {
     case .swipeToStart: return "swipe"
+    case .aim(let input): return "aim-\(input)"
     case .goEat: return "eat"
     case .useDepth(let inward): return inward ? "depth-in" : "depth-out"
+    case .practiceSaved: return "practice"
     case .graceSaved(let left): return "grace-\(left)"
     case .none: return "none"
     }

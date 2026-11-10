@@ -15,6 +15,19 @@ struct PlayView: View {
                     if model.scheme == .swipe {
                         swipeCatcher
                     }
+                    if let arrow = aimArrow {
+                        VStack(spacing: 2) {
+                            Image(systemName: arrow.symbol)
+                                .font(.system(size: 40, weight: .bold))
+                            Text(arrow.caption)
+                                .font(.system(size: 16, weight: .bold, design: .rounded))
+                        }
+                        .foregroundColor(Theme.lime)
+                        .shadow(color: .black.opacity(0.55), radius: 8, y: 2)
+                        .padding(.top, 18)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .allowsHitTesting(false)
+                    }
                     VStack(spacing: 8) {
                         if let toast = model.toast {
                             toastBanner(toast)
@@ -51,6 +64,20 @@ struct PlayView: View {
                     }
                     .buttonStyle(.plain)
                 }
+                HStack {
+                    pauseButton
+                    Spacer(minLength: 8)
+                    if model.game.mode == .feeding && !model.game.manualDrive {
+                        Text("AI 在飞")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundColor(Theme.ink)
+                            .padding(.horizontal, 12)
+                            .frame(height: 32)
+                            .background(Theme.lime)
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(.horizontal, 16)
                 ControlPad(
                     model: model,
                     emphasizeDepthIn: depthHot(inward: true),
@@ -81,38 +108,60 @@ struct PlayView: View {
                     .lineLimit(2)
                     .minimumScaleFactor(0.75)
             }
-            Spacer()
-            Button(action: model.pause) {
-                Image(systemName: "pause.fill")
-                    .font(.system(size: 16, weight: .bold))
-                    .foregroundColor(.white)
-                    .frame(width: 44, height: 44)
-                    .background(Theme.card)
-                    .clipShape(Circle())
-            }
-            .buttonStyle(PressStyle())
-            .accessibilityLabel("暂停")
-            .disabled(model.game.phase != .playing && model.game.phase != .ready)
+            Spacer(minLength: 0)
         }
         .padding(.horizontal, 20)
         .padding(.top, 4)
     }
 
+    private var canPause: Bool {
+        model.game.phase == .playing || model.game.phase == .ready
+    }
+
+    private var pauseButton: some View {
+        Button(action: model.pause) {
+            Image(systemName: "pause.fill")
+                .font(.system(size: 16, weight: .bold))
+                .foregroundColor(.white)
+                .frame(width: 52, height: 52)
+                .background(Theme.card)
+                .clipShape(Circle())
+                .overlay(Circle().stroke(Theme.stroke, lineWidth: 1))
+        }
+        .buttonStyle(PressStyle())
+        .opacity(canPause ? 1 : 0.28)
+        .disabled(!canPause)
+        .accessibilityLabel("暂停")
+    }
+
     private var statusLine: String {
-        let speed = String(format: "速度 ×%.1f", model.game.speedMultiple)
-        let best = model.game.best > 0 ? "最佳 \(model.game.best)" : "最佳 —"
-        let length = "长度 \(model.game.length)"
-        var parts = [Copy.difficulty(model.difficulty), length, speed, best]
-        if model.game.graceLeft > 0 && model.game.elapsed <= model.game.profile.graceWindow && model.game.profile.graceCharges > 0 {
+        var parts = ["长度 \(model.game.length)"]
+        let profile = model.game.profile
+        let inWindow = profile.graceCharges > 0 && model.game.elapsed <= profile.graceWindow
+        let opening = profile.freeRescuesUntilEaten > 0 && model.game.eaten < profile.freeRescuesUntilEaten
+        if inWindow || opening {
             parts.append("护盾 \(model.game.graceLeft)")
         }
         if model.game.shieldActive {
             parts.append("金身")
         }
-        if model.game.mode == .feeding && !model.game.manualDrive {
-            parts.insert("AI 在飞", at: 0)
+        let speed = model.game.speedMultiple
+        if speed > 1.05 || speed < 0.95 {
+            parts.append(String(format: "×%.1f", speed))
         }
-        return parts.joined(separator: "  ")
+        return parts.joined(separator: " · ")
+    }
+
+    private var aimArrow: (symbol: String, caption: String)? {
+        switch model.game.coachCue {
+        case .aim(.screen(.right)): return ("arrow.right", "向右")
+        case .aim(.screen(.left)): return ("arrow.left", "向左")
+        case .aim(.screen(.up)): return ("arrow.up", "向上")
+        case .aim(.screen(.down)): return ("arrow.down", "向下")
+        case .aim(.depthIn), .useDepth(true): return ("arrow.down.right", "深入")
+        case .aim(.depthOut), .useDepth(false): return ("arrow.up.left", "拉近")
+        default: return nil
+        }
     }
 
     private var hintText: String? {
@@ -120,7 +169,7 @@ struct PlayView: View {
             return nil
         }
         if model.game.mode == .feeding && !model.game.manualDrive && model.game.eaten == 0 {
-            return "点下面的菜，看它扑过去"
+            return "点下面的菜，AI 会追。想自己开，点「我来开」"
         }
         if model.scheme == .buttons && model.game.coachCue == .swipeToStart {
             return "点方向键开始 · 不能直接掉头"
@@ -217,7 +266,7 @@ struct PlayView: View {
         ZStack {
             Color.black.opacity(0.62).ignoresSafeArea()
             card(
-                title: model.game.phase == .won ? "立方体满了" : "碰到了",
+                title: model.game.phase == .won ? "立方体满了" : Copy.death(model.game.deathCause),
                 subtitle: endSubtitle
             ) {
                 Text("\(model.game.score)")

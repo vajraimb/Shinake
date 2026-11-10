@@ -6,24 +6,15 @@ struct TutorialView: View {
 
     private let pages: [(title: String, body: String)] = [
         ("滑动转向", "手指在画面上滑。蛇顺着那个方向拐，但不能直接掉头，免得咬到自己。"),
-        ("先吃到光", "开局很慢，果子就在附近。吃到会变长，速度一点一点加上来。"),
-        ("还有一层深浅", "立方体有前后。底部「深入」往画面里面走，「拉近」往你这边退。简单难度开局有 4 次护盾，撞墙会帮你躲开。"),
+        ("先吃到光", "开局很慢，箭头会告诉你往哪滑。吃到会变长。\n投喂实验室里，你点菜，AI 替你追。"),
+        ("还有一层深浅", "立方体有前后。底部「深\u{2060}入」往画面里面走，「拉\u{2060}近」往你这边退。\n简单难度先送 6 次护\u{2060}盾。前三个苹果撞到了也不扣。"),
     ]
 
     var body: some View {
         ZStack {
             Theme.bg.ignoresSafeArea()
             VStack(spacing: 22) {
-                HStack {
-                    Spacer()
-                    Button(model.tutorial == .review ? "关闭" : "跳过") {
-                        model.finishTutorial(startPlaying: true)
-                    }
-                        .font(.system(size: 16, weight: .semibold, design: .rounded))
-                        .foregroundColor(Theme.dim)
-                        .frame(minWidth: 44, minHeight: 44)
-                }
-                Spacer()
+                Spacer(minLength: 12)
                 illustration
                     .frame(height: 180)
                 Text(pages[page].title)
@@ -35,6 +26,7 @@ struct TutorialView: View {
                     .multilineTextAlignment(.center)
                     .lineSpacing(4)
                     .padding(.horizontal, 8)
+                    .fixedSize(horizontal: false, vertical: true)
                 HStack(spacing: 8) {
                     ForEach(pages.indices, id: \.self) { index in
                         Circle()
@@ -43,6 +35,19 @@ struct TutorialView: View {
                     }
                 }
                 Spacer()
+                Button(model.tutorial == .review ? "关闭" : "跳过") {
+                    model.finishTutorial(startPlaying: true)
+                }
+                .font(.system(size: 17, weight: .semibold, design: .rounded))
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity)
+                .frame(height: 48)
+                .background(Theme.card)
+                .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                .overlay(
+                    RoundedRectangle(cornerRadius: 14, style: .continuous)
+                        .stroke(Theme.stroke, lineWidth: 1)
+                )
                 PrimaryButton(title: page == pages.count - 1 ? "开始玩" : "下一页") {
                     if page == pages.count - 1 {
                         model.finishTutorial(startPlaying: true)
@@ -120,9 +125,20 @@ struct SettingsSheet: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 18) {
-            Text("设置")
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-                .foregroundColor(.white)
+            HStack {
+                Text("设置")
+                    .font(.system(size: 28, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                Spacer()
+                Button("完成") { model.showSettings = false }
+                    .font(.system(size: 16, weight: .bold, design: .rounded))
+                    .foregroundColor(Theme.ink)
+                    .padding(.horizontal, 18)
+                    .frame(height: 40)
+                    .background(Theme.lime)
+                    .clipShape(Capsule())
+                    .accessibilityLabel("完成")
+            }
             Text("操作方式")
                 .font(.system(size: 14, weight: .semibold, design: .rounded))
                 .foregroundColor(Theme.dim)
@@ -151,8 +167,9 @@ struct SettingsSheet: View {
                 .fixedSize(horizontal: false, vertical: true)
             Toggle("音效", isOn: $model.soundOn)
             Toggle("震动", isOn: $model.hapticsOn)
+            Toggle("隐藏状态栏", isOn: $model.statusBarHidden)
                 .tint(Theme.lime)
-            Text("音效会跟着手机的静音开关。简单难度开局有 4 次护盾。")
+            Text("音效会跟着手机的静音开关。简单难度有 6 次护\u{2060}盾，前三个苹果不扣。")
                 .font(.system(size: 13, weight: .regular, design: .rounded))
                 .foregroundColor(Theme.faint)
             Button(action: model.reviewTutorial) {

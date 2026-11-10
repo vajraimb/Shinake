@@ -212,7 +212,7 @@ frames), `SNAKE_REPORT=1` (sample battle-report card).
 ## iPhone
 
 Portrait native app, SwiftUI + SceneKit. Bundle id `one.vajra.shinake`, iOS 16 and up.
-The six-direction cube is still the game; the feel is rebuilt for a phone. Default difficulty is Easy (a move every 0.58s, four forgiven crashes in the first 90 seconds). Swipe to turn. The two bottom buttons, 深入 and 拉近, move along the depth axis. All UI copy is Simplified Chinese.
+The six-direction cube is still the game; the feel is rebuilt for a phone. Default difficulty is Easy (a move every 0.64s, six shields for the first 90 seconds, and the first three apples do not spend a charge). Swipe to turn. The two bottom buttons, 深入 and 拉近, move along the depth axis. All UI copy is Simplified Chinese.
 
 On a Mac with Xcode and an **iPhone 17 Pro** simulator installed:
 

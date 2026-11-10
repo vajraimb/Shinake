@@ -18,6 +18,8 @@ final class GameSceneController {
     private var foodNodes: [Int: SCNNode] = [:]
     private var solidNodes: [SCNNode] = []
     private var guideNode: SCNNode?
+    private let snakeLayer = sliceNode(Theme.limeUI.withAlphaComponent(0.16))
+    private let foodLayer = sliceNode(UIColor(red: 1, green: 0.36, blue: 0.42, alpha: 0.22))
     private var builtGrid = -1
     private var time: Double = 0
     private let headMaterial = glossMaterial(UIColor(red: 0.82, green: 0.98, blue: 0.40, alpha: 1))
@@ -40,6 +42,10 @@ final class GameSceneController {
 
         scene.background.contents = Theme.bgUI
         scene.rootNode.addChildNode(world)
+        world.addChildNode(snakeLayer)
+        world.addChildNode(foodLayer)
+        snakeLayer.isHidden = true
+        foodLayer.isHidden = true
 
         let camera = SCNCamera()
         camera.fieldOfView = 32
@@ -82,6 +88,7 @@ final class GameSceneController {
             rebuildBoard(grid: snapshot.grid)
         }
         placeCamera(grid: snapshot.grid, shake: shake)
+        placeLayers(snapshot)
         placeSnake(snapshot)
         placeFoods(snapshot)
         placeSolids(snapshot)
@@ -150,7 +157,7 @@ final class GameSceneController {
 
     private func placeCamera(grid: Int, shake: Double) {
         let rig = CameraRig.standard.eyeOffset
-        let distance = Float(grid) * 2.35
+        let distance = Float(grid) * 2.55
         let base = SCNVector3(Float(rig.x) * distance, Float(rig.y) * distance, Float(rig.z) * distance)
         let amp = Float(shake) * 0.22
         cameraNode.position = SCNVector3(
@@ -164,7 +171,7 @@ final class GameSceneController {
     private func placeSnake(_ snapshot: RenderSnapshot) {
         let count = snapshot.snake.count
         while snakeNodes.count < count {
-            let sphere = SCNSphere(radius: 0.46)
+            let sphere = SCNSphere(radius: 0.40)
             sphere.segmentCount = 24
             let node = SCNNode(geometry: sphere)
             world.addChildNode(node)
@@ -178,7 +185,7 @@ final class GameSceneController {
             let node = snakeNodes[index]
             node.isHidden = false
             node.position = segmentPosition(index: index, snapshot: snapshot, alpha: alpha)
-            node.scale = index == 0 ? SCNVector3(1.12, 1.12, 1.12) : SCNVector3(1, 1, 1)
+            node.scale = index == 0 ? SCNVector3(1.08, 1.08, 1.08) : SCNVector3(1, 1, 1)
             if index == 0 {
                 node.geometry?.materials = [headMaterial]
             } else {
@@ -236,6 +243,10 @@ final class GameSceneController {
                 beacon.position = SCNVector3(0, -height * 0.5, 0)
                 (beacon.geometry as? SCNCylinder)?.height = CGFloat(height)
             }
+            if let shadow = node.childNode(withName: "shadow", recursively: false) {
+                let floorY = -half + 0.05
+                shadow.position = SCNVector3(0, floorY - node.position.y, 0)
+            }
         }
     }
 
@@ -246,7 +257,7 @@ final class GameSceneController {
         material.emission.contents = Theme.foodUI(kind).withAlphaComponent(0.85)
         sphere.materials = [material]
         let node = SCNNode(geometry: sphere)
-        let beacon = SCNCylinder(radius: 0.035, height: 1)
+        let beacon = SCNCylinder(radius: 0.07, height: 1)
         let beam = SCNMaterial()
         beam.lightingModel = .constant
         beam.diffuse.contents = Theme.foodUI(kind).withAlphaComponent(0.28)
@@ -255,6 +266,14 @@ final class GameSceneController {
         let beamNode = SCNNode(geometry: beacon)
         beamNode.name = "beacon"
         node.addChildNode(beamNode)
+        let disc = SCNCylinder(radius: 0.72, height: 0.06)
+        let discMaterial = SCNMaterial()
+        discMaterial.lightingModel = .constant
+        discMaterial.diffuse.contents = Theme.foodUI(kind).withAlphaComponent(0.9)
+        disc.materials = [discMaterial]
+        let discNode = SCNNode(geometry: disc)
+        discNode.name = "shadow"
+        node.addChildNode(discNode)
         let light = SCNLight()
         light.type = .omni
         light.intensity = 180
@@ -284,32 +303,41 @@ final class GameSceneController {
         }
     }
 
-    private func placeGuide(_ snapshot: RenderSnapshot, visible: Bool) {
-        guard visible, let food = snapshot.foods.first, let head = snapshot.snake.first else {
-            guideNode?.isHidden = true
+    private func placeLayers(_ snapshot: RenderSnapshot) {
+        let span = Float(max(snapshot.grid - 1, 1))
+        guard let head = snapshot.snake.first else {
+            snakeLayer.isHidden = true
+            foodLayer.isHidden = true
             return
         }
+        let headPoint = worldPoint(head, grid: snapshot.grid)
+        snakeLayer.isHidden = false
+        snakeLayer.position = SCNVector3(0, 0, headPoint.z)
+        snakeLayer.scale = SCNVector3(span, span, 1)
+        if let food = snapshot.foods.first, food.position.z != head.z {
+            let foodPoint = worldPoint(food.position, grid: snapshot.grid)
+            foodLayer.isHidden = false
+            foodLayer.position = SCNVector3(0, 0, foodPoint.z)
+            foodLayer.scale = SCNVector3(span, span, 1)
+        } else {
+            foodLayer.isHidden = true
+        }
+    }
+
+    private func placeGuide(_ snapshot: RenderSnapshot, visible: Bool) {
+        guideNode?.removeFromParentNode()
+        guideNode = nil
+        guard visible, let food = snapshot.foods.first, let head = snapshot.snake.first else { return }
         let from = worldPoint(head, grid: snapshot.grid)
         let to = worldPoint(food.position, grid: snapshot.grid)
-        let vertices = [from, to]
-        let source = SCNGeometrySource(vertices: vertices)
-        let indices: [Int32] = [0, 1]
-        let element = SCNGeometryElement(data: indices.withUnsafeBufferPointer { Data(buffer: $0) },
-                                          primitiveType: .line,
-                                          primitiveCount: 1,
-                                          bytesPerIndex: MemoryLayout<Int32>.size)
-        let geometry = SCNGeometry(sources: [source], elements: [element])
-        let material = SCNMaterial()
-        material.lightingModel = .constant
-        material.diffuse.contents = Theme.limeUI.withAlphaComponent(0.85)
-        geometry.materials = [material]
-        if guideNode == nil {
-            let node = SCNNode()
-            world.addChildNode(node)
-            guideNode = node
-        }
-        guideNode?.geometry = geometry
-        guideNode?.isHidden = false
+        let node = cylinder(
+            from: SIMD3<Float>(from.x, from.y, from.z),
+            to: SIMD3<Float>(to.x, to.y, to.z),
+            color: Theme.limeUI.withAlphaComponent(0.95),
+            radius: 0.04
+        )
+        world.addChildNode(node)
+        guideNode = node
     }
 
     private func segmentPosition(index: Int, snapshot: RenderSnapshot, alpha: Float) -> SCNVector3 {
@@ -332,10 +360,10 @@ final class GameSceneController {
         return SCNVector3(Float(cell.x) - half, Float(cell.y) - half, Float(cell.z) - half)
     }
 
-    private func cylinder(from start: SIMD3<Float>, to end: SIMD3<Float>, color: UIColor) -> SCNNode {
+    private func cylinder(from start: SIMD3<Float>, to end: SIMD3<Float>, color: UIColor, radius: Float = 0.045) -> SCNNode {
         let delta = end - start
         let length = simd_length(delta)
-        let cylinder = SCNCylinder(radius: 0.045, height: CGFloat(length))
+        let cylinder = SCNCylinder(radius: CGFloat(radius), height: CGFloat(max(length, 0.001)))
         let material = SCNMaterial()
         material.lightingModel = .constant
         material.diffuse.contents = color
@@ -355,6 +383,17 @@ final class GameSceneController {
 }
 
 /// Shared by the snake materials (created in property initializers) and food.
+private func sliceNode(_ color: UIColor) -> SCNNode {
+    let plane = SCNPlane(width: 1, height: 1)
+    let material = SCNMaterial()
+    material.lightingModel = .constant
+    material.diffuse.contents = color
+    material.isDoubleSided = true
+    material.writesToDepthBuffer = false
+    plane.materials = [material]
+    return SCNNode(geometry: plane)
+}
+
 private func glossMaterial(_ color: UIColor) -> SCNMaterial {
     let material = SCNMaterial()
     material.lightingModel = .blinn

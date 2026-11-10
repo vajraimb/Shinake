@@ -74,13 +74,14 @@ struct ControlPad: View {
             }
             .frame(maxWidth: .infinity)
             .frame(height: 68)
-            .background(hot ? Theme.blue.opacity(0.28) : Theme.card)
+            .background(hot ? Theme.blue.opacity(0.55) : Theme.card)
             .foregroundColor(.white)
             .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
             .overlay(
                 RoundedRectangle(cornerRadius: 18, style: .continuous)
-                    .stroke(hot ? Theme.blue : Theme.axisZColor, lineWidth: hot ? 2 : 1)
+                    .stroke(hot ? Theme.lime : Theme.axisZColor, lineWidth: hot ? 3 : 1)
             )
+            .scaleEffect(hot ? 1.03 : 1)
         }
         .buttonStyle(PressStyle())
         .accessibilityLabel("\(title)，\(subtitle)")
