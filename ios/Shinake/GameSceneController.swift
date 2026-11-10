@@ -2,6 +2,12 @@ import SceneKit
 import simd
 import UIKit
 
+/// Body diameter stays near half a cell so the grid reads. Food is a smaller
+/// apple, not another ball of the same size as the head.
+private enum SnakeFood {
+    static let radius: CGFloat = 0.275
+}
+
 /// The cube, the snake and the food. Nodes are reused across frames so a
 /// 60 fps tick on iPhone 13 Pro Max is a handful of position writes, not a
 /// rebuild. The camera matches `CameraRig.standard`, which is also what
@@ -13,8 +19,12 @@ final class GameSceneController {
     private let world = SCNNode()
     private var gridNode: SCNNode?
     private var edgeRoot = SCNNode()
-    private var snakeNodes: [SCNNode] = []
+    private var jointNodes: [SCNNode] = []
+    private var linkNodes: [SCNNode] = []
     private var eyeNodes: [SCNNode] = []
+    private var pupilNodes: [SCNNode] = []
+    private let tongueNode = SCNNode()
+    private var smoothedLook = SIMD3<Float>(0, 0, 0)
     private var foodNodes: [Int: SCNNode] = [:]
     private var solidNodes: [SCNNode] = []
     private var guideNode: SCNNode?
@@ -22,12 +32,7 @@ final class GameSceneController {
     private let foodLayer = sliceNode(UIColor(red: 1, green: 0.36, blue: 0.42, alpha: 0.22))
     private var builtGrid = -1
     private var time: Double = 0
-    private let headMaterial = glossMaterial(UIColor(red: 0.82, green: 0.98, blue: 0.40, alpha: 1))
-    private let bodyMaterials: [SCNMaterial] = [
-        glossMaterial(UIColor(red: 0.55, green: 0.86, blue: 0.32, alpha: 1)),
-        glossMaterial(UIColor(red: 0.28, green: 0.72, blue: 0.42, alpha: 1)),
-        glossMaterial(UIColor(red: 0.14, green: 0.55, blue: 0.42, alpha: 1)),
-    ]
+    private var snakeAlive = true
 
     init() {
         view = SCNView()
@@ -48,7 +53,7 @@ final class GameSceneController {
         foodLayer.isHidden = true
 
         let camera = SCNCamera()
-        camera.fieldOfView = 32
+        camera.fieldOfView = CGFloat(playCameraVerticalFOV)
         camera.zNear = 0.05
         camera.zFar = 400
         cameraNode.camera = camera
@@ -72,14 +77,31 @@ final class GameSceneController {
         scene.rootNode.addChildNode(keyNode)
 
         for _ in 0..<2 {
-            let eye = SCNNode(geometry: SCNSphere(radius: 0.09))
+            let eye = SCNNode(geometry: SCNSphere(radius: 0.055))
+            (eye.geometry as? SCNSphere)?.segmentCount = 12
             let material = SCNMaterial()
             material.lightingModel = .constant
             material.diffuse.contents = UIColor.white
             eye.geometry?.materials = [material]
             world.addChildNode(eye)
             eyeNodes.append(eye)
+
+            let pupil = SCNNode(geometry: SCNSphere(radius: 0.026))
+            (pupil.geometry as? SCNSphere)?.segmentCount = 8
+            let pupilMaterial = SCNMaterial()
+            pupilMaterial.lightingModel = .constant
+            pupilMaterial.diffuse.contents = UIColor(white: 0.08, alpha: 1)
+            pupil.geometry?.materials = [pupilMaterial]
+            world.addChildNode(pupil)
+            pupilNodes.append(pupil)
         }
+        let tongue = SCNBox(width: 0.045, height: 0.16, length: 0.02, chamferRadius: 0.008)
+        let tongueMaterial = SCNMaterial()
+        tongueMaterial.lightingModel = .constant
+        tongueMaterial.diffuse.contents = UIColor(red: 0.95, green: 0.25, blue: 0.38, alpha: 1)
+        tongue.materials = [tongueMaterial]
+        tongueNode.geometry = tongue
+        world.addChildNode(tongueNode)
     }
 
     func render(_ snapshot: RenderSnapshot, showGuide: Bool, shake: Double, dt: Double) {
@@ -87,7 +109,7 @@ final class GameSceneController {
         if snapshot.grid != builtGrid {
             rebuildBoard(grid: snapshot.grid)
         }
-        placeCamera(grid: snapshot.grid, shake: shake)
+        placeCamera(snapshot, shake: shake, dt: dt)
         placeLayers(snapshot)
         placeSnake(snapshot)
         placeFoods(snapshot)
@@ -155,66 +177,197 @@ final class GameSceneController {
         }
     }
 
-    private func placeCamera(grid: Int, shake: Double) {
-        let rig = CameraRig.standard.eyeOffset
-        let distance = Float(grid) * 2.55
-        let base = SCNVector3(Float(rig.x) * distance, Float(rig.y) * distance, Float(rig.z) * distance)
-        let amp = Float(shake) * 0.22
-        cameraNode.position = SCNVector3(
-            base.x + sin(Float(time) * 47) * amp,
-            base.y + cos(Float(time) * 53) * amp,
-            base.z
+    private func placeCamera(_ snapshot: RenderSnapshot, shake: Double, dt: Double) {
+        let bounds = view.bounds
+        let aspect: Double
+        if bounds.width > 2, bounds.height > 2 {
+            aspect = Double(bounds.width / bounds.height)
+        } else {
+            // Before layout, assume a tall portrait canvas so the first frame
+            // cannot be tighter than a 13 Pro Max play view.
+            aspect = 0.62
+        }
+        let headWorld: WorldPoint
+        if let head = snapshot.snake.first {
+            let point = worldPoint(head, grid: snapshot.grid)
+            headWorld = WorldPoint(Double(point.x), Double(point.y), Double(point.z))
+        } else {
+            headWorld = .zero
+        }
+        let target = cameraLookAt(headWorld: headWorld, grid: snapshot.grid)
+        let aim = SIMD3<Float>(Float(target.x), Float(target.y), Float(target.z))
+        let follow = Float(1 - exp(-dt * 2.8))
+        smoothedLook += (aim - smoothedLook) * min(1, max(0, follow))
+        let distance = cameraDistanceToFitCube(
+            grid: snapshot.grid,
+            aspect: aspect,
+            lookAt: WorldPoint(Double(smoothedLook.x), Double(smoothedLook.y), Double(smoothedLook.z))
         )
-        cameraNode.look(at: SCNVector3(0, 0.15, 0))
+        let eye = CameraRig.standard.eyeOffset
+        let rig = simd_normalize(SIMD3<Float>(Float(eye.x), Float(eye.y), Float(eye.z)))
+        let amp = Float(shake) * 0.12
+        let wobble = SIMD3<Float>(sin(Float(time) * 47) * amp, cos(Float(time) * 53) * amp, 0)
+        let position = smoothedLook + rig * Float(distance) + wobble
+        cameraNode.simdPosition = position
+        cameraNode.look(at: SCNVector3(smoothedLook.x, smoothedLook.y, smoothedLook.z))
     }
 
     private func placeSnake(_ snapshot: RenderSnapshot) {
+        snakeAlive = snapshot.alive
         let count = snapshot.snake.count
-        while snakeNodes.count < count {
-            let sphere = SCNSphere(radius: 0.40)
-            sphere.segmentCount = 24
-            let node = SCNNode(geometry: sphere)
-            world.addChildNode(node)
-            snakeNodes.append(node)
-        }
-        for index in count..<snakeNodes.count {
-            snakeNodes[index].isHidden = true
-        }
         let alpha = smooth(Float(snapshot.fraction))
+        var points: [SIMD3<Float>] = []
+        points.reserveCapacity(count)
         for index in 0..<count {
-            let node = snakeNodes[index]
-            node.isHidden = false
-            node.position = segmentPosition(index: index, snapshot: snapshot, alpha: alpha)
-            node.scale = index == 0 ? SCNVector3(1.08, 1.08, 1.08) : SCNVector3(1, 1, 1)
-            if index == 0 {
-                node.geometry?.materials = [headMaterial]
-            } else {
-                node.geometry?.materials = [bodyMaterials[min(index / 3, bodyMaterials.count - 1)]]
-            }
+            let point = segmentPosition(index: index, snapshot: snapshot, alpha: alpha)
+            points.append(SIMD3<Float>(point.x, point.y, point.z))
         }
-        placeEyes(snapshot, alpha: alpha)
+        while jointNodes.count < count {
+            jointNodes.append(makeJoint())
+        }
+        for index in count..<jointNodes.count {
+            jointNodes[index].isHidden = true
+        }
+        let linkCount = max(0, count - 1)
+        while linkNodes.count < linkCount {
+            linkNodes.append(makeLink())
+        }
+        for index in linkCount..<linkNodes.count {
+            linkNodes[index].isHidden = true
+        }
+        for index in 0..<count {
+            let radius = bodyRadius(index: index, count: count)
+            let node = jointNodes[index]
+            node.isHidden = false
+            node.simdPosition = points[index]
+            node.simdScale = SIMD3<Float>(repeating: radius)
+            tint(node, index: index, count: count, head: index == 0)
+        }
+        for index in 0..<linkCount {
+            let start = points[index]
+            let end = points[index + 1]
+            let delta = end - start
+            let length = simd_length(delta)
+            let node = linkNodes[index]
+            guard length > 0.001, let cone = node.geometry as? SCNCone else {
+                node.isHidden = true
+                continue
+            }
+            node.isHidden = false
+            cone.bottomRadius = CGFloat(bodyRadius(index: index, count: count))
+            cone.topRadius = CGFloat(bodyRadius(index: index + 1, count: count))
+            cone.height = CGFloat(length)
+            node.simdPosition = (start + end) * 0.5
+            orient(node, along: delta)
+            tint(node, index: index, count: count, head: false)
+        }
+        placeFace(snapshot, points: points)
     }
 
-    private func placeEyes(_ snapshot: RenderSnapshot, alpha: Float) {
-        guard snapshot.snake.first != nil else { return }
-        let head = segmentPosition(index: 0, snapshot: snapshot, alpha: alpha)
-        let direction = snapshot.direction
-        let forward = SIMD3<Float>(Float(direction.x), Float(direction.y), Float(direction.z))
+    private func makeJoint() -> SCNNode {
+        let sphere = SCNSphere(radius: 1)
+        sphere.segmentCount = 18
+        let material = glossMaterial(Theme.limeUI)
+        material.emission.contents = Theme.limeUI.withAlphaComponent(0.16)
+        sphere.materials = [material]
+        let node = SCNNode(geometry: sphere)
+        let glint = SCNSphere(radius: 0.28)
+        glint.segmentCount = 8
+        let shine = SCNMaterial()
+        shine.lightingModel = .constant
+        shine.diffuse.contents = UIColor(white: 1, alpha: 0.42)
+        glint.materials = [shine]
+        let glintNode = SCNNode(geometry: glint)
+        glintNode.simdPosition = SIMD3<Float>(0.34, 0.42, 0.22)
+        node.addChildNode(glintNode)
+        world.addChildNode(node)
+        return node
+    }
+
+    private func makeLink() -> SCNNode {
+        let cone = SCNCone(topRadius: 0.2, bottomRadius: 0.2, height: 1)
+        cone.radialSegmentCount = 12
+        let material = glossMaterial(Theme.limeUI)
+        material.emission.contents = Theme.limeUI.withAlphaComponent(0.16)
+        cone.materials = [material]
+        let node = SCNNode(geometry: cone)
+        world.addChildNode(node)
+        return node
+    }
+
+    /// Head diameter 0.60 of a cell. The body starts at 0.54 and tapers to 0.28.
+    private func bodyRadius(index: Int, count: Int) -> Float {
+        let wave = 1 + 0.025 * sin(Float(time) * 3 + Float(index) * 0.55)
+        if index == 0 { return 0.30 * wave }
+        let t = Float(index) / Float(max(count - 1, 1))
+        return (0.27 + (0.14 - 0.27) * t) * wave
+    }
+
+    private func tint(_ node: SCNNode, index: Int, count: Int, head: Bool) {
+        let t = CGFloat(index) / CGFloat(max(count - 1, 1))
+        let band: CGFloat = index % 3 == 2 ? 0.78 : 1
+        let color = UIColor(
+            red: (0.62 - 0.34 * t) * band,
+            green: (0.94 - 0.40 * t) * band,
+            blue: (0.38 + 0.22 * t) * band,
+            alpha: 1
+        )
+        let material = node.geometry?.materials.first ?? glossMaterial(color)
+        if head {
+            material.diffuse.contents = UIColor(red: 0.78, green: 0.96, blue: 0.48, alpha: 1)
+            material.emission.contents = snapshotAliveEmission()
+        } else {
+            material.diffuse.contents = color
+            material.emission.contents = color.withAlphaComponent(0.14)
+        }
+        node.geometry?.materials = [material]
+    }
+
+    private func snapshotAliveEmission() -> UIColor {
+        if snakeAlive {
+            return Theme.limeUI.withAlphaComponent(0.28)
+        }
+        return UIColor(red: 1, green: 0.28, blue: 0.28, alpha: 1)
+    }
+
+    private func placeFace(_ snapshot: RenderSnapshot, points: [SIMD3<Float>]) {
+        guard let head = points.first else {
+            for node in eyeNodes + pupilNodes { node.isHidden = true }
+            tongueNode.isHidden = true
+            return
+        }
+        let forward = facing(snapshot)
         var up = SIMD3<Float>(0, 1, 0)
-        if abs(direction.y) == 1 { up = SIMD3<Float>(1, 0, 0) }
+        if abs(forward.y) > 0.95 { up = SIMD3<Float>(1, 0, 0) }
         let side = simd_normalize(simd_cross(forward, up))
         let lift = simd_normalize(simd_cross(side, forward))
-        let offsets = [forward * 0.22 + side * 0.13 + lift * 0.10,
-                       forward * 0.22 - side * 0.13 + lift * 0.10]
-        for (eye, offset) in zip(eyeNodes, offsets) {
-            eye.isHidden = false
-            eye.position = SCNVector3(head.x + offset.x, head.y + offset.y, head.z + offset.z)
+        let sockets = [
+            forward * 0.20 + side * 0.105 + lift * 0.055,
+            forward * 0.20 - side * 0.105 + lift * 0.055,
+        ]
+        for (index, socket) in sockets.enumerated() where index < eyeNodes.count && index < pupilNodes.count {
+            eyeNodes[index].isHidden = false
+            pupilNodes[index].isHidden = false
+            eyeNodes[index].simdPosition = head + socket
+            pupilNodes[index].simdPosition = head + socket + forward * 0.04
         }
-        if !snapshot.alive {
-            headMaterial.emission.contents = UIColor(red: 1, green: 0.25, blue: 0.25, alpha: 1)
-        } else {
-            headMaterial.emission.contents = Theme.limeUI.withAlphaComponent(0.55)
+        let flick = 0.04 + 0.14 * max(0, sin(Float(time) * 5.2))
+        tongueNode.isHidden = !snapshot.alive
+        tongueNode.simdPosition = head + forward * (0.30 + flick * 0.5)
+        orient(tongueNode, along: forward)
+        tongueNode.simdScale = SIMD3<Float>(1, max(0.35, flick / 0.16), 1)
+    }
+
+    private func facing(_ snapshot: RenderSnapshot) -> SIMD3<Float> {
+        let current = worldPoint(snapshot.snake[0], grid: snapshot.grid)
+        let fromCell = snapshot.previous.first ?? snapshot.snake[0]
+        let from = worldPoint(fromCell, grid: snapshot.grid)
+        let travel = SIMD3<Float>(current.x - from.x, current.y - from.y, current.z - from.z)
+        if simd_length(travel) > 0.05 {
+            return simd_normalize(travel)
         }
+        let direction = snapshot.direction
+        return SIMD3<Float>(Float(direction.x), Float(direction.y), Float(direction.z))
     }
 
     private func placeFoods(_ snapshot: RenderSnapshot) {
@@ -237,7 +390,8 @@ final class GameSceneController {
                 foodNodes[pellet.id] = node
             }
             node.position = worldPoint(pellet.position, grid: snapshot.grid)
-            node.scale = SCNVector3(pulse, pulse, pulse)
+            let squash: Float = pellet.kind == .apple ? 0.88 : 1
+            node.scale = SCNVector3(pulse, pulse * squash, pulse)
             if let beacon = node.childNode(withName: "beacon", recursively: false) {
                 let height = max(0.2, node.position.y + half)
                 beacon.position = SCNVector3(0, -height * 0.5, 0)
@@ -251,13 +405,13 @@ final class GameSceneController {
     }
 
     private func makeFood(_ kind: FoodKind) -> SCNNode {
-        let sphere = SCNSphere(radius: kind == .star ? 0.42 : 0.36)
+        let sphere = SCNSphere(radius: kind == .star ? 0.30 : SnakeFood.radius)
         sphere.segmentCount = 24
         let material = glossMaterial(Theme.foodUI(kind))
-        material.emission.contents = Theme.foodUI(kind).withAlphaComponent(0.85)
+        material.emission.contents = Theme.foodUI(kind).withAlphaComponent(0.35)
         sphere.materials = [material]
         let node = SCNNode(geometry: sphere)
-        let beacon = SCNCylinder(radius: 0.07, height: 1)
+        let beacon = SCNCylinder(radius: 0.04, height: 1)
         let beam = SCNMaterial()
         beam.lightingModel = .constant
         beam.diffuse.contents = Theme.foodUI(kind).withAlphaComponent(0.28)
@@ -266,7 +420,7 @@ final class GameSceneController {
         let beamNode = SCNNode(geometry: beacon)
         beamNode.name = "beacon"
         node.addChildNode(beamNode)
-        let disc = SCNCylinder(radius: 0.72, height: 0.06)
+        let disc = SCNCylinder(radius: 0.36, height: 0.04)
         let discMaterial = SCNMaterial()
         discMaterial.lightingModel = .constant
         discMaterial.diffuse.contents = Theme.foodUI(kind).withAlphaComponent(0.9)
@@ -276,10 +430,33 @@ final class GameSceneController {
         node.addChildNode(discNode)
         let light = SCNLight()
         light.type = .omni
-        light.intensity = 180
+        light.intensity = 70
         light.color = Theme.foodUI(kind)
-        light.attenuationEndDistance = 6
+        light.attenuationEndDistance = 3.5
         node.light = light
+        if kind == .apple {
+            node.addChildNode(appleStem())
+        }
+        return node
+    }
+
+    private func appleStem() -> SCNNode {
+        let stem = SCNCylinder(radius: 0.025, height: 0.14)
+        stem.radialSegmentCount = 8
+        let bark = SCNMaterial()
+        bark.lightingModel = .lambert
+        bark.diffuse.contents = UIColor(red: 0.35, green: 0.22, blue: 0.12, alpha: 1)
+        stem.materials = [bark]
+        let node = SCNNode(geometry: stem)
+        node.simdPosition = SIMD3<Float>(0, 0.30, 0)
+        let leaf = SCNBox(width: 0.10, height: 0.018, length: 0.06, chamferRadius: 0.006)
+        let green = SCNMaterial()
+        green.lightingModel = .lambert
+        green.diffuse.contents = UIColor(red: 0.25, green: 0.62, blue: 0.28, alpha: 1)
+        leaf.materials = [green]
+        let leafNode = SCNNode(geometry: leaf)
+        leafNode.simdPosition = SIMD3<Float>(0.05, 0.04, 0)
+        node.addChildNode(leafNode)
         return node
     }
 
@@ -334,7 +511,7 @@ final class GameSceneController {
             from: SIMD3<Float>(from.x, from.y, from.z),
             to: SIMD3<Float>(to.x, to.y, to.z),
             color: Theme.limeUI.withAlphaComponent(0.95),
-            radius: 0.04
+            radius: 0.02
         )
         world.addChildNode(node)
         guideNode = node
@@ -371,14 +548,21 @@ final class GameSceneController {
         cylinder.materials = [material]
         let node = SCNNode(geometry: cylinder)
         node.simdPosition = (start + end) * 0.5
-        let target = simd_normalize(delta)
+        orient(node, along: delta)
+        return node
+    }
+
+    /// Points local +Y along `delta`. Cones and the tongue are built on that axis.
+    private func orient(_ node: SCNNode, along delta: SIMD3<Float>) {
+        let length = simd_length(delta)
+        guard length > 1e-5 else { return }
+        let target = delta / length
         let up = SIMD3<Float>(0, 1, 0)
         if simd_dot(up, target) < -0.999 {
             node.simdOrientation = simd_quatf(angle: .pi, axis: SIMD3<Float>(1, 0, 0))
         } else {
             node.simdOrientation = simd_quatf(from: up, to: target)
         }
-        return node
     }
 }
 
