@@ -181,6 +181,31 @@ odin build . -out:shinake -o:speed
 `SNAKE_REPORT=1`（生成示例战报 report_sample.png）。
 </details>
 
+## iPhone
+
+竖屏原生 App，SwiftUI + SceneKit，包名 `one.vajra.shinake`，iOS 16 起。
+桌面版的六向立方体还在，手感按手机重做了：默认「简单」（0.58 秒一格，前 90 秒 4 次护盾），滑动转向，底部「深入 / 拉近」走第三维。文字是简体中文。
+
+在装了 Xcode、模拟器里有 **iPhone 17 Pro** 的 Mac 上：
+
+```bash
+ios/build-simulator.sh
+```
+
+等价命令：
+
+```bash
+xcodebuild -project ios/Shinake.xcodeproj -scheme Shinake \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -configuration Debug build
+xcodebuild -project ios/Shinake.xcodeproj -scheme Shinake \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -configuration Debug test
+```
+
+不装模拟器也能跑逻辑测试（macOS 或 Linux）：`swift test`。
+打开 `ios/Shinake.xcodeproj`，运行目标选 iPhone 17 Pro。模拟器构建不签名；真机用团队 `A5VCS5XD6R`。
+
 ## 📦 下载
 
 [Releases](../../releases) · `Shinake-macos-arm64.zip`（macOS Apple Silicon，

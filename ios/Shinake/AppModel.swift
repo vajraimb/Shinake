@@ -1,0 +1,273 @@
+import SwiftUI
+
+enum ControlScheme: String, CaseIterable, Identifiable {
+    case swipe
+    case buttons
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .swipe: return "滑动"
+        case .buttons: return "按键"
+        }
+    }
+}
+
+enum AppScreen: Equatable {
+    case title
+    case play
+}
+
+enum TutorialIntent: Equatable {
+    case gate(PlayMode)
+    case review
+}
+
+/// Owns the run, the saved settings, and the phone-only juice (sound, haptics).
+/// The cube itself is `SnakeGame`; this type only translates that into a screen.
+final class AppModel: ObservableObject {
+    @Published var screen: AppScreen = .title
+    @Published var difficulty: Difficulty {
+        didSet { defaults.set(difficulty.rawValue, forKey: Key.difficulty) }
+    }
+    @Published var scheme: ControlScheme {
+        didSet { defaults.set(scheme.rawValue, forKey: Key.scheme) }
+    }
+    @Published var soundOn: Bool {
+        didSet {
+            defaults.set(soundOn, forKey: Key.sound)
+            sound.enabled = soundOn
+        }
+    }
+    @Published var hapticsOn: Bool {
+        didSet {
+            defaults.set(hapticsOn, forKey: Key.haptics)
+            haptics.enabled = hapticsOn
+        }
+    }
+    @Published var hudTick = 0
+    @Published var toast: String?
+    @Published var tutorial: TutorialIntent?
+    @Published var showSettings = false
+    @Published private(set) var runWasRecord = false
+
+    private(set) var game: SnakeGame
+    private(set) var shake: Double = 0
+    private var toastSerial = 0
+    private var seenToken = 0
+    private let defaults: UserDefaults
+    private let sound = SoundBank()
+    private let haptics = HapticBank()
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let storedDifficulty = Difficulty(rawValue: defaults.string(forKey: Key.difficulty) ?? "") ?? .easy
+        let storedScheme = ControlScheme(rawValue: defaults.string(forKey: Key.scheme) ?? "") ?? .swipe
+        let storedSound = defaults.object(forKey: Key.sound) as? Bool ?? true
+        let storedHaptics = defaults.object(forKey: Key.haptics) as? Bool ?? true
+        difficulty = storedDifficulty
+        scheme = storedScheme
+        soundOn = storedSound
+        hapticsOn = storedHaptics
+        sound.enabled = storedSound
+        haptics.enabled = storedHaptics
+        game = SnakeGame(
+            profile: storedDifficulty.profile,
+            mode: .classic,
+            seed: AppModel.seed(),
+            best: defaults.integer(forKey: Key.best(storedDifficulty))
+        )
+        seenToken = game.uiToken
+    }
+
+    var showGuide: Bool {
+        game.mode == .classic && game.profile.showsGuide && game.eaten < 4 && game.phase != .over
+    }
+
+    var bestForSelected: Int { defaults.integer(forKey: Key.best(difficulty)) }
+
+    func prepareFeedback() {
+        sound.prepare()
+        haptics.prepare()
+    }
+
+    func requestPlay(_ mode: PlayMode) {
+        if defaults.bool(forKey: Key.tutorial) {
+            begin(mode)
+        } else {
+            tutorial = .gate(mode)
+        }
+    }
+
+    func reviewTutorial() {
+        showSettings = false
+        tutorial = .review
+    }
+
+    func finishTutorial(startPlaying: Bool) {
+        defaults.set(true, forKey: Key.tutorial)
+        let intent = tutorial
+        tutorial = nil
+        guard startPlaying, case .gate(let mode) = intent else { return }
+        begin(mode)
+    }
+
+    func begin(_ mode: PlayMode) {
+        runWasRecord = false
+        shake = 0
+        game = SnakeGame(
+            profile: difficulty.profile,
+            mode: mode,
+            seed: AppModel.seed(),
+            best: defaults.integer(forKey: Key.best(difficulty))
+        )
+        seenToken = game.uiToken
+        screen = .play
+        hudTick += 1
+        sound.play("ui")
+    }
+
+    func restart() {
+        begin(game.mode)
+    }
+
+    func backToTitle() {
+        screen = .title
+        hudTick += 1
+    }
+
+    func pause() {
+        game.pause()
+        refresh()
+    }
+
+    func resume() {
+        game.resume()
+        sound.play("ui")
+        refresh()
+    }
+
+    func steer(_ input: ControlInput) {
+        let before = game.uiToken
+        game.input(input)
+        if game.uiToken != before {
+            haptics.tap()
+            refresh()
+        }
+    }
+
+    func cast(_ kind: FoodKind) {
+        if game.foods.count >= 3 {
+            showToast("场上已经有三样了")
+            haptics.tap()
+            return
+        }
+        if game.cast(kind) {
+            showToast(Copy.flavor(kind))
+            haptics.tap()
+            sound.play("ui")
+        } else {
+            showToast("这一下没放进去")
+        }
+        refresh()
+    }
+
+    func toggleManual() {
+        game.setManualDrive(!game.manualDrive)
+        haptics.tap()
+        sound.play("ui")
+        showToast(game.manualDrive ? "方向盘给你了" : "交给 AI 了")
+        refresh()
+    }
+
+    /// Called from the display link. Does not publish unless the HUD changed.
+    func advance(dt: Double) -> RenderSnapshot {
+        let events = game.update(dt: dt)
+        if shake > 0 {
+            shake = max(0, shake - dt / 0.42)
+        }
+        for event in events {
+            respond(to: event)
+        }
+        if game.best > defaults.integer(forKey: Key.best(game.profile.idDifficulty)) {
+            defaults.set(game.best, forKey: Key.best(game.profile.idDifficulty))
+        }
+        if game.uiToken != seenToken {
+            seenToken = game.uiToken
+            hudTick += 1
+        }
+        return game.snapshot()
+    }
+
+    private func respond(to event: GameEvent) {
+        switch event {
+        case .ate:
+            haptics.eat()
+            sound.play("eat")
+        case .graceUsed:
+            haptics.save()
+            sound.play("save")
+        case .shielded:
+            haptics.save()
+            sound.play("save")
+            showToast("护盾挡住了")
+        case .died:
+            shake = 1
+            haptics.die()
+            sound.play("die")
+            refresh()
+        case .won:
+            haptics.record()
+            sound.play("record")
+            refresh()
+        case .newBest:
+            runWasRecord = true
+            haptics.record()
+            sound.play("record")
+            showToast("新纪录")
+        case .turned, .castFull:
+            break
+        }
+    }
+
+    private func refresh() {
+        seenToken = game.uiToken
+        hudTick += 1
+    }
+
+    private func showToast(_ text: String) {
+        toastSerial += 1
+        toast = text
+        let serial = toastSerial
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5) { [weak self] in
+            guard let self, self.toastSerial == serial else { return }
+            self.toast = nil
+        }
+    }
+
+    private static func seed() -> UInt64 {
+        UInt64(Date().timeIntervalSince1970 * 1000) ^ 0x9E3779B97F4A7C15
+    }
+}
+
+private enum Key {
+    static let sound = "shinake.sound"
+    static let haptics = "shinake.haptics"
+    static let scheme = "shinake.scheme"
+    static let difficulty = "shinake.difficulty"
+    static let tutorial = "shinake.tutorialSeen"
+    static func best(_ difficulty: Difficulty) -> String { "shinake.best.\(difficulty.rawValue)" }
+}
+
+private extension DifficultyProfile {
+    /// Maps a profile id back to the saved-score bucket. Custom test profiles
+    /// fall through to easy, which the app never constructs.
+    var idDifficulty: Difficulty {
+        switch id {
+        case "normal": return .normal
+        case "hard": return .hard
+        default: return .easy
+        }
+    }
+}

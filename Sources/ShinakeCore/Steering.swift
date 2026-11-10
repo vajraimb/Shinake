@@ -1,0 +1,115 @@
+import Foundation
+
+/// Fixed orbit used by both the logic (which way a swipe goes) and SceneKit.
+///
+/// Yaw 0 is a camera sitting on +Z looking at the origin. These angles keep
+/// screen-right on +X, screen-up on +Y, and the depth axis on Z, while still
+/// showing three faces of the cube. The mapping is asserted in tests — if the
+/// angle changes, the depth buttons and the hints have to change with it.
+public struct CameraRig: Equatable {
+    public var yaw: Double
+    public var pitch: Double
+
+    public static let standard = CameraRig(yaw: 0.62, pitch: 0.48)
+
+    /// Unit vector from the look-at target out to the eye.
+    public var eyeOffset: (x: Double, y: Double, z: Double) {
+        let cy = cos(pitch)
+        return (sin(yaw) * cy, sin(pitch), cos(yaw) * cy)
+    }
+
+    /// Camera basis. `forward` points from the eye into the scene.
+    /// `right` / `up` are screen axes (positive x right, positive y up).
+    public func basis() -> (right: (Double, Double, Double), up: (Double, Double, Double), forward: (Double, Double, Double)) {
+        let eye = eyeOffset
+        let forward = normalize((-eye.x, -eye.y, -eye.z))
+        let worldUp = (0.0, 1.0, 0.0)
+        let right = normalize(cross(forward, worldUp))
+        let up = normalize(cross(right, forward))
+        return (right, up, forward)
+    }
+}
+
+public enum ScreenAxis: String, Equatable, CaseIterable {
+    case left
+    case right
+    case up
+    case down
+}
+
+public enum ControlInput: Equatable {
+    case screen(ScreenAxis)
+    case depthIn
+    case depthOut
+}
+
+public struct SteerMapping: Equatable {
+    public var right: Vec3
+    public var left: Vec3
+    public var up: Vec3
+    public var down: Vec3
+    public var depthIn: Vec3
+    public var depthOut: Vec3
+
+    public func direction(for input: ControlInput) -> Vec3 {
+        switch input {
+        case .screen(.right): return right
+        case .screen(.left): return left
+        case .screen(.up): return up
+        case .screen(.down): return down
+        case .depthIn: return depthIn
+        case .depthOut: return depthOut
+        }
+    }
+}
+
+public func steerMapping(rig: CameraRig) -> SteerMapping {
+    let basis = rig.basis()
+    func screenX(_ axis: Vec3) -> Double { dot(axis, basis.right) }
+    func screenY(_ axis: Vec3) -> Double { dot(axis, basis.up) }
+    func into(_ axis: Vec3) -> Double { dot(axis, basis.forward) }
+
+    let right = Vec3.six.max { screenX($0) < screenX($1) } ?? .xp
+    let upChoices = Vec3.six.filter { $0 != right && $0 != -right }
+    let up = upChoices.max { screenY($0) < screenY($1) } ?? .yp
+    let depthChoices = Vec3.six.filter { $0 != right && $0 != -right && $0 != up && $0 != -up }
+    let depthIn = depthChoices.max { into($0) < into($1) } ?? .zn
+    return SteerMapping(
+        right: right,
+        left: -right,
+        up: up,
+        down: -up,
+        depthIn: depthIn,
+        depthOut: -depthIn
+    )
+}
+
+/// UIKit drag: positive `dx` is right, positive `dy` is down.
+/// Returns nil for taps and for motions shorter than `threshold` points.
+public func classifySwipe(dx: Double, dy: Double, threshold: Double = 30) -> ScreenAxis? {
+    let adx = abs(dx)
+    let ady = abs(dy)
+    guard max(adx, ady) >= threshold else { return nil }
+    if adx >= ady {
+        return dx >= 0 ? .right : .left
+    }
+    return dy >= 0 ? .down : .up
+}
+
+private func dot(_ axis: Vec3, _ vector: (Double, Double, Double)) -> Double {
+    Double(axis.x) * vector.0 + Double(axis.y) * vector.1 + Double(axis.z) * vector.2
+}
+
+private func cross(_ a: (Double, Double, Double), _ b: (Double, Double, Double)) -> (Double, Double, Double) {
+    (
+        a.1 * b.2 - a.2 * b.1,
+        a.2 * b.0 - a.0 * b.2,
+        a.0 * b.1 - a.1 * b.0
+    )
+}
+
+private func normalize(_ value: (Double, Double, Double)) -> (Double, Double, Double) {
+    let length = (value.0 * value.0 + value.1 * value.1 + value.2 * value.2).squareRoot()
+    guard length > 1e-8 else { return (0, 0, 0) }
+    return (value.0 / length, value.1 / length, value.2 / length)
+}
