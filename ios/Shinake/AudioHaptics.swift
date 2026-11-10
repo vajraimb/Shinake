@@ -1,4 +1,5 @@
 import AVFoundation
+import Foundation
 import UIKit
 
 /// Short synthesized cues. No asset files. `.ambient` follows the mute switch.
@@ -132,12 +133,15 @@ private func wav(samples: [Int16], rate: Int) -> Data {
 
 private extension Data {
     mutating func append(uint16 value: UInt16) {
-        var little = value.littleEndian
-        Swift.withUnsafeBytes(of: &little) { append(contentsOf: $0) }
+        append(contentsOf: littleEndianBytes(of: value))
     }
 
     mutating func append(uint32 value: UInt32) {
-        var little = value.littleEndian
-        Swift.withUnsafeBytes(of: &little) { append(contentsOf: $0) }
+        append(contentsOf: littleEndianBytes(of: value))
     }
+}
+
+private func littleEndianBytes<T: FixedWidthInteger>(of value: T) -> [UInt8] {
+    var little = value.littleEndian
+    return Swift.withUnsafeBytes(of: &little) { Array($0) }
 }

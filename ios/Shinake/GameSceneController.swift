@@ -20,11 +20,11 @@ final class GameSceneController {
     private var guideNode: SCNNode?
     private var builtGrid = -1
     private var time: Double = 0
-    private let headMaterial = Self.gloss(UIColor(red: 0.82, green: 0.98, blue: 0.40, alpha: 1))
+    private let headMaterial = glossMaterial(UIColor(red: 0.82, green: 0.98, blue: 0.40, alpha: 1))
     private let bodyMaterials: [SCNMaterial] = [
-        Self.gloss(UIColor(red: 0.55, green: 0.86, blue: 0.32, alpha: 1)),
-        Self.gloss(UIColor(red: 0.28, green: 0.72, blue: 0.42, alpha: 1)),
-        Self.gloss(UIColor(red: 0.14, green: 0.55, blue: 0.42, alpha: 1)),
+        glossMaterial(UIColor(red: 0.55, green: 0.86, blue: 0.32, alpha: 1)),
+        glossMaterial(UIColor(red: 0.28, green: 0.72, blue: 0.42, alpha: 1)),
+        glossMaterial(UIColor(red: 0.14, green: 0.55, blue: 0.42, alpha: 1)),
     ]
 
     init() {
@@ -242,7 +242,7 @@ final class GameSceneController {
     private func makeFood(_ kind: FoodKind) -> SCNNode {
         let sphere = SCNSphere(radius: kind == .star ? 0.42 : 0.36)
         sphere.segmentCount = 24
-        let material = Self.gloss(Theme.foodUI(kind))
+        let material = glossMaterial(Theme.foodUI(kind))
         material.emission.contents = Theme.foodUI(kind).withAlphaComponent(0.85)
         sphere.materials = [material]
         let node = SCNNode(geometry: sphere)
@@ -352,16 +352,17 @@ final class GameSceneController {
         }
         return node
     }
+}
 
-    private static func gloss(_ color: UIColor) -> SCNMaterial {
-        let material = SCNMaterial()
-        material.lightingModel = .blinn
-        material.diffuse.contents = color
-        material.specular.contents = UIColor.white
-        material.shininess = 0.45
-        material.emission.contents = color.withAlphaComponent(0.45)
-        return material
-    }
+/// Shared by the snake materials (created in property initializers) and food.
+private func glossMaterial(_ color: UIColor) -> SCNMaterial {
+    let material = SCNMaterial()
+    material.lightingModel = .blinn
+    material.diffuse.contents = color
+    material.specular.contents = UIColor.white
+    material.shininess = 0.45
+    material.emission.contents = color.withAlphaComponent(0.45)
+    return material
 }
 
 private func mix(_ a: SCNVector3, _ b: SCNVector3, _ t: Float) -> SCNVector3 {
