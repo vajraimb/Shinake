@@ -124,6 +124,15 @@ struct SettingsSheet: View {
     @ObservedObject var model: AppModel
 
     var body: some View {
+        ScrollView {
+            settingsBody
+        }
+        .background(Theme.bg)
+        .tint(Theme.lime)
+        .foregroundColor(.white)
+    }
+
+    private var settingsBody: some View {
         VStack(alignment: .leading, spacing: 18) {
             HStack {
                 Text("设置")
@@ -172,6 +181,8 @@ struct SettingsSheet: View {
             Text("音效会跟着手机的静音开关。简单难度有 6 次护\u{2060}盾，前三个苹果不扣。")
                 .font(.system(size: 13, weight: .regular, design: .rounded))
                 .foregroundColor(Theme.faint)
+                .fixedSize(horizontal: false, vertical: true)
+                .multilineTextAlignment(.leading)
             Button(action: model.reviewTutorial) {
                 Text("再看一遍教程")
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
@@ -182,11 +193,8 @@ struct SettingsSheet: View {
                     .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
             }
             .buttonStyle(PressStyle())
-            Spacer(minLength: 0)
         }
         .padding(24)
-        .background(Theme.bg)
-        .tint(Theme.lime)
-        .foregroundColor(.white)
+        .frame(maxWidth: .infinity, alignment: .leading)
     }
 }

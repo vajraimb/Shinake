@@ -585,4 +585,97 @@ final class SnakeGameTests: XCTestCase {
             XCTAssertTrue(sawDepth, "seed \(seed) never saw the depth cue")
         }
     }
+
+    func testHintLeavesABlockedAxisAndDoesNotStayThere() {
+        let game = classic(.easy)
+        let edge = game.grid - 1
+        let head = Vec3(edge, 4, 4)
+        // Facing the right wall. The apple is purely to the left, so a left
+        // swipe would be a U-turn and the wall blocks going further right.
+        game.debugArrange(
+            snake: [head, head + .xn, head + .xn + .xn],
+            direction: .xp,
+            foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(2, 4, 4))]
+        )
+        XCTAssertEqual(game.suggestedInput(), .screen(.up))
+        XCTAssertNotEqual(game.coachCue, .useDepth(inward: true))
+        XCTAssertNotEqual(game.coachCue, .useDepth(inward: false))
+        // A beat later the snake is still jammed, so the arrow has to move.
+        game.debugSetElapsed(game.profile.startInterval)
+        XCTAssertEqual(game.suggestedInput(), .screen(.down))
+        if case .aim(let input) = game.coachCue {
+            XCTAssertEqual(input, .screen(.down))
+        } else {
+            XCTFail("expected an aim cue, got \(game.coachCue)")
+        }
+
+        // Facing the ceiling, apple to the left. Up is a wall, so the arrow
+        // has to name the axis that still closes in.
+        let top = Vec3(4, edge, 4)
+        game.debugArrange(
+            snake: [top, top + .yn, top + .yn + .yn],
+            direction: .yp,
+            foods: [FoodPellet(id: 2, kind: .apple, position: Vec3(1, edge, 4))]
+        )
+        XCTAssertEqual(game.suggestedInput(), .screen(.left))
+    }
+
+    func testHintSwitchesToTheOtherClosingAxisWhenIgnored() {
+        let game = classic(.easy)
+        let head = Vec3(4, 4, 4)
+        // Facing into the screen, so both up and left are legal. Up closes more.
+        game.debugArrange(
+            snake: [head, head + .zn, head + .zn + .zn],
+            direction: .zp,
+            foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(1, 8, 4))]
+        )
+        XCTAssertEqual(game.suggestedInput(), .screen(.up))
+        game.debugSetElapsed(game.profile.startInterval)
+        XCTAssertEqual(game.suggestedInput(), .screen(.left))
+    }
+
+    func testOpeningAppleStaysOnLayerAfterADepthRescue() {
+        let game = classic(.easy)
+        let head = Vec3(8, 8, 4)
+        // Right and up are the wall. Left is the neck. Down is the tail, and
+        // growth keeps that cell occupied, so the only safe turn leaves the layer.
+        game.debugArrange(
+            snake: [head, head + .xn, Vec3(7, 7, 4), Vec3(8, 7, 4)],
+            direction: .xp,
+            foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(3, 8, 4))],
+            pendingGrowth: 1
+        )
+        XCTAssertEqual(game.foods[0].position.z, head.z)
+        let events = game.debugStep()
+        XCTAssertTrue(events.contains(.graceUsed(remaining: 6)))
+        XCTAssertEqual(game.eaten, 0)
+        XCTAssertNotEqual(game.snake[0].z, head.z)
+        XCTAssertEqual(game.foods[0].position.z, game.snake[0].z)
+        if case .useDepth = game.coachCue {
+            XCTFail("depth cue during the planar opening: \(game.coachCue)")
+        }
+        let hint = game.suggestedInput()
+        XCTAssertNotEqual(hint, .depthIn)
+        XCTAssertNotEqual(hint, .depthOut)
+    }
+
+    func testStallNudgeBringsTheFirstAppleCloser() {
+        let game = classic(.easy)
+        let head = Vec3(4, 4, 4)
+        game.debugArrange(
+            snake: [head, head + .xn, head + .xn + .xn],
+            direction: .xp,
+            foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(4, 8, 4))]
+        )
+        let calm = game.currentStepDuration()
+        XCTAssertFalse(game.hintUrgent)
+        game.debugSetElapsed(15)
+        XCTAssertTrue(game.hintUrgent)
+        XCTAssertGreaterThan(game.currentStepDuration(), calm + 0.1)
+        let distance = game.foods[0].position.manhattan(to: game.snake[0])
+        XCTAssertGreaterThanOrEqual(distance, 2)
+        XCTAssertLessThan(distance, 4)
+        XCTAssertEqual(game.foods[0].position.z, game.snake[0].z)
+        XCTAssertEqual(game.eaten, 0)
+    }
 }

@@ -101,6 +101,9 @@ public final class SnakeGame {
     public private(set) var shieldRemaining: Double = 0
     public private(set) var boostRemaining: Double = 0
     public private(set) var confuseRemaining: Double = 0
+    /// The opening lesson has gone 15s without a bite. The apple steps closer
+    /// and the snake eases off so a lost thumb can catch the arrow.
+    public private(set) var hintUrgent = false
 
     private var rng: SplitMix64
     private var queue: [Vec3] = []
@@ -113,6 +116,12 @@ public final class SnakeGame {
     private var holdMovesUntil: Double = 0
     private var phaseBeforePause: Phase = .playing
     private var lastCue: CoachCue = .none
+    /// Which useful hint to show when the best one is blocked or ignored.
+    private var hintShift = 0
+    private var hintWatchElapsed = 0.0
+    private var hintWatchDistance = 0
+    private var lastProgressElapsed = 0.0
+    private var nudgesIssued = 0
 
     public init(profile: DifficultyProfile, mode: PlayMode, seed: UInt64, best: Int = 0) {
         self.profile = profile
@@ -132,15 +141,17 @@ public final class SnakeGame {
 
     /// How fast the snake is versus the opening tempo. Starts at 1.
     public var speedMultiple: Double {
-        let step = currentStepDuration()
-        guard step > 0 else { return 1 }
+        let base = moveInterval(eaten: eaten, profile: profile)
+        let multiplier = boostRemaining > 0 ? profile.chiliMultiplier : 1
+        let step = max(0.05, base * multiplier)
         return profile.startInterval / step
     }
 
     public func currentStepDuration() -> Double {
         let base = moveInterval(eaten: eaten, profile: profile)
         let multiplier = boostRemaining > 0 ? profile.chiliMultiplier : 1
-        return max(0.05, base * multiplier)
+        let crawl = hintUrgent ? 1.35 : 1
+        return max(0.05, base * multiplier * crawl)
     }
 
     public var coachCue: CoachCue {
@@ -155,7 +166,8 @@ public final class SnakeGame {
         // is on the snake's layer or the lesson window closes.
         if mode == .classic && profile.showsGuide && eaten < 8
             && (phase == .playing || phase == .ready), let food = foods.first {
-            if let depth = preferredDepthCue(toward: food.position) {
+            // The first three apples stay on this layer, so depth is not a hint yet.
+            if !keepsFoodPlanar, let depth = preferredDepthCue(toward: food.position) {
                 return depth
             }
             if let suggestion = suggestedInput() {
@@ -255,6 +267,7 @@ public final class SnakeGame {
         }
         elapsed += dt
         tickEffects(dt)
+        refreshCoachAssist()
         var events: [GameEvent] = []
         if holdMovesUntil > 0 {
             holdMovesUntil = max(0, holdMovesUntil - dt)
@@ -288,6 +301,7 @@ public final class SnakeGame {
 
     public func debugSetElapsed(_ seconds: Double) {
         elapsed = seconds
+        refreshCoachAssist()
         noteCueChange()
     }
 
@@ -318,33 +332,24 @@ public final class SnakeGame {
         extraChop = 0
         moveAccumulator = 0
         fraction = 0
+        hintShift = 0
+        hintWatchElapsed = elapsed
+        hintWatchDistance = foods.first.map { snake[0].manhattan(to: $0.position) } ?? 0
+        lastProgressElapsed = elapsed
+        nudgesIssued = 0
+        hintUrgent = false
+        keepOpeningFoodPlanar()
         touchUI()
     }
 
-    /// Greedy "which control aims at the apple", skipping fatal and 180° turns.
-    /// The coach uses the same choice a careful thumb would make.
+    /// The control that still closes in on the apple.
+    /// A wall, the body, or a forbidden U-turn drops that axis, and the next
+    /// useful direction takes over. Ignoring the same hint for a step rotates
+    /// to another direction that still helps.
     public func suggestedInput() -> ControlInput? {
-        guard let food = foods.first else { return nil }
-        let options: [(ControlInput, Vec3)] = [
-            (.screen(.right), mapping.right),
-            (.screen(.left), mapping.left),
-            (.screen(.up), mapping.up),
-            (.screen(.down), mapping.down),
-            (.depthIn, mapping.depthIn),
-            (.depthOut, mapping.depthOut),
-        ]
-        var best: (ControlInput, Int)?
-        let growing = pendingGrowth > 0
-        for (control, dir) in options {
-            if dir == -direction { continue }
-            let next = snake[0] + dir
-            if isFatal(next, growing: growing) { continue }
-            let remaining = next.manhattan(to: food.position)
-            if best == nil || remaining < best!.1 {
-                best = (control, remaining)
-            }
-        }
-        return best?.0
+        let plans = hintPlans()
+        guard !plans.isEmpty else { return nil }
+        return plans[hintShift % plans.count].control
     }
 
     // MARK: Board
@@ -377,6 +382,11 @@ public final class SnakeGame {
         solids = profile.solids
         manualDrive = false
         deathCause = nil
+        hintShift = 0
+        hintWatchElapsed = 0
+        hintUrgent = false
+        lastProgressElapsed = 0
+        nudgesIssued = 0
         if mode == .feeding {
             autopilot = true
             started = true
@@ -391,6 +401,7 @@ public final class SnakeGame {
             phase = .ready
             holdMovesUntil = 0
             _ = spawn(kind: .apple, bias: profile.planarOpeningFoods > 0 ? .openingPlane : .standard)
+            hintWatchDistance = foods.first.map { snake[0].manhattan(to: $0.position) } ?? 0
         }
     }
 
@@ -415,6 +426,9 @@ public final class SnakeGame {
         phase = .playing
         // The first move happens on the next frame, not after a full wait.
         moveAccumulator = currentStepDuration()
+        hintShift = 0
+        hintWatchElapsed = elapsed
+        hintWatchDistance = foods.first.map { snake[0].manhattan(to: $0.position) } ?? 0
         touchUI()
     }
 
@@ -479,6 +493,7 @@ public final class SnakeGame {
                 snake.removeLast()
             }
         }
+        keepOpeningFoodPlanar()
         let boardCleared = mode == .classic && foods.isEmpty
         if phase == .playing && (snake.count >= freeCellCount || boardCleared) {
             phase = .won
@@ -522,6 +537,11 @@ public final class SnakeGame {
             best = score
             events.append(.newBest)
         }
+        lastProgressElapsed = elapsed
+        nudgesIssued = 0
+        hintUrgent = false
+        hintShift = 0
+        hintWatchElapsed = elapsed
         // A bite puts the shield back to full, so one apple undoes a clumsy stretch.
         if profile.refillsGrace && !inFreeOpening && elapsed <= profile.graceWindow + 1e-6 {
             graceLeft = profile.graceCharges
@@ -569,6 +589,8 @@ public final class SnakeGame {
                     case .openingPlane:
                         if cell.z == head.z && distance >= 2 && distance <= 4 && inset {
                             preferred.append(cell)
+                        } else if cell.z == head.z && distance >= 2 {
+                            fallback.append(cell)
                         }
                     case .depthLesson:
                         let planar = abs(cell.x - head.x) + abs(cell.y - head.y)
@@ -587,7 +609,7 @@ public final class SnakeGame {
                             preferred.append(cell)
                         }
                     }
-                    if bias != .interior { fallback.append(cell) }
+                    if bias != .interior && bias != .openingPlane { fallback.append(cell) }
                 }
             }
         }
@@ -610,17 +632,220 @@ public final class SnakeGame {
 
     /// `growing` means the tail cell does not vacate this move.
     private func isFatal(_ cell: Vec3, growing: Bool) -> Bool {
+        isFatal(cell, growing: growing, snake: snake)
+    }
+
+    private func isFatal(_ cell: Vec3, growing: Bool, snake body: [Vec3]) -> Bool {
         if !inBounds(cell) || solids.contains(cell) { return true }
-        let bodyCount = growing ? snake.count : max(0, snake.count - 1)
+        let bodyCount = growing ? body.count : max(0, body.count - 1)
         if bodyCount == 0 { return false }
-        for index in 0..<bodyCount where snake[index] == cell {
+        for index in 0..<bodyCount where body[index] == cell {
             return true
         }
         return false
     }
 
+    /// First three classic apples stay on the head's Z, including after a rescue
+    /// that had to leave the layer.
+    private var keepsFoodPlanar: Bool {
+        mode == .classic && profile.planarOpeningFoods > 0 && eaten < profile.planarOpeningFoods
+    }
+
+    private func controlOptions() -> [(ControlInput, Vec3)] {
+        [
+            (.screen(.right), mapping.right),
+            (.screen(.left), mapping.left),
+            (.screen(.up), mapping.up),
+            (.screen(.down), mapping.down),
+            (.depthIn, mapping.depthIn),
+            (.depthOut, mapping.depthOut),
+        ]
+    }
+
+    private struct HintPlan {
+        var control: ControlInput
+        var direction: Vec3
+        var closesNow: Bool
+        var gap: Int
+    }
+
+    /// Closing moves first, largest gap first. If every closing move is a wall,
+    /// the body, or a U-turn, the list is the turns that unlock one.
+    private func hintPlans() -> [HintPlan] {
+        guard let food = foods.first else { return [] }
+        let growing = pendingGrowth > 0
+        let head = snake[0]
+        let target = food.position
+        let options = controlOptions().filter { control, _ in
+            if keepsFoodPlanar && (control == .depthIn || control == .depthOut) { return false }
+            return true
+        }
+        var closing: [HintPlan] = []
+        var setups: [HintPlan] = []
+        for (control, dir) in options {
+            if dir == -direction { continue }
+            let next = head + dir
+            if isFatal(next, growing: growing) { continue }
+            let gap = axisGap(dir, from: head, to: target)
+            if gap > 0 {
+                closing.append(HintPlan(control: control, direction: dir, closesNow: true, gap: gap))
+                continue
+            }
+            let unlocked = unlockedGap(after: dir, next: next, target: target, growing: growing)
+            if unlocked > 0 {
+                setups.append(HintPlan(control: control, direction: dir, closesNow: false, gap: unlocked))
+            }
+        }
+        let ranked: (HintPlan, HintPlan) -> Bool = { lhs, rhs in
+            if lhs.gap != rhs.gap { return lhs.gap > rhs.gap }
+            return axisOrder(lhs.direction) < axisOrder(rhs.direction)
+        }
+        if !closing.isEmpty { return closing.sorted(by: ranked) }
+        if !setups.isEmpty { return setups.sorted(by: ranked) }
+        return options.compactMap { control, dir in
+            if dir == -direction || isFatal(head + dir, growing: growing) { return nil }
+            return HintPlan(control: control, direction: dir, closesNow: false, gap: 0)
+        }
+    }
+
+    private func axisGap(_ dir: Vec3, from cell: Vec3, to target: Vec3) -> Int {
+        dir.x * (target.x - cell.x) + dir.y * (target.y - cell.y) + dir.z * (target.z - cell.z)
+    }
+
+    /// How much of the gap a follow-up step can close after turning `dir`.
+    private func unlockedGap(after dir: Vec3, next: Vec3, target: Vec3, growing: Bool) -> Int {
+        let moved = bodyAfterStep(nextHead: next, growing: growing)
+        let secondGrowing = pendingGrowth > 1
+        var best = 0
+        for dir2 in Vec3.six {
+            if keepsFoodPlanar && dir2.z != 0 { continue }
+            if dir2 == -dir { continue }
+            let gap = axisGap(dir2, from: next, to: target)
+            if gap <= 0 { continue }
+            if isFatal(next + dir2, growing: secondGrowing, snake: moved) { continue }
+            best = max(best, gap)
+        }
+        return best
+    }
+
+    private func bodyAfterStep(nextHead: Vec3, growing: Bool) -> [Vec3] {
+        var body = snake
+        body.insert(nextHead, at: 0)
+        if !growing, body.count > 1 { body.removeLast() }
+        return body
+    }
+
+    private func refreshCoachAssist() {
+        keepOpeningFoodPlanar()
+        let lesson = keepsFoodPlanar && profile.freeRescuesUntilEaten > 0 && started
+            && (phase == .playing || phase == .ready)
+        let stalled = elapsed - lastProgressElapsed
+        let wasUrgent = hintUrgent
+        hintUrgent = lesson && stalled >= 15
+        if hintUrgent {
+            let due = Int(stalled / 15)
+            if due > nudgesIssued {
+                nudgesIssued = due
+                nudgeFoodCloser()
+            }
+        }
+        let shiftBefore = hintShift
+        advanceHintIfStuck()
+        if hintUrgent != wasUrgent || hintShift != shiftBefore {
+            touchUI()
+        }
+    }
+
+    /// After 15s with no bite in the opening, put the apple two or three cells
+    /// along a direction the hint can actually use.
+    private func nudgeFoodCloser() {
+        guard !foods.isEmpty else { return }
+        let head = snake[0]
+        let hintDir = hintPlans().first?.direction ?? direction
+        var best: Vec3?
+        var bestScore = Int.min
+        for y in 0..<grid {
+            for x in 0..<grid {
+                let cell = Vec3(x, y, head.z)
+                let distance = cell.manhattan(to: head)
+                if distance < 2 || distance > 3 { continue }
+                if solids.contains(cell) || snake.contains(cell) { continue }
+                let align = hintDir.x * (cell.x - head.x) + hintDir.y * (cell.y - head.y)
+                let score = align * 10 - distance * 20
+                if score > bestScore {
+                    bestScore = score
+                    best = cell
+                }
+            }
+        }
+        if let best {
+            foods[0].position = best
+            hintShift = 0
+            hintWatchElapsed = elapsed
+            hintWatchDistance = head.manhattan(to: best)
+            touchUI()
+        }
+    }
+
+    private func advanceHintIfStuck() {
+        guard mode == .classic, phase == .playing || phase == .ready else { return }
+        guard let food = foods.first else { return }
+        let plans = hintPlans()
+        let distance = snake[0].manhattan(to: food.position)
+        if distance < hintWatchDistance {
+            hintShift = 0
+            hintWatchDistance = distance
+            hintWatchElapsed = elapsed
+            return
+        }
+        if !plans.isEmpty {
+            let current = plans[hintShift % plans.count]
+            if direction == current.direction && phase == .playing {
+                hintShift = 0
+                hintWatchElapsed = elapsed
+                hintWatchDistance = distance
+                return
+            }
+        }
+        guard phase == .playing, started, plans.count > 1 else { return }
+        let beat = max(0.35, moveInterval(eaten: eaten, profile: profile))
+        if elapsed - hintWatchElapsed + 1e-9 >= beat {
+            hintShift = (hintShift + 1) % plans.count
+            hintWatchElapsed = elapsed
+        }
+    }
+
+    private func keepOpeningFoodPlanar() {
+        guard keepsFoodPlanar, !foods.isEmpty else { return }
+        let head = snake[0]
+        let food = foods[0].position
+        guard food.z != head.z else { return }
+        var occupied = solids
+        for cell in snake { occupied.insert(cell) }
+        var best: Vec3?
+        var bestScore = Int.max
+        for y in 0..<grid {
+            for x in 0..<grid {
+                let cell = Vec3(x, y, head.z)
+                if occupied.contains(cell) { continue }
+                let distance = cell.manhattan(to: head)
+                if distance < 2 { continue }
+                let drift = abs(cell.x - food.x) + abs(cell.y - food.y)
+                let score = drift * 10 + distance
+                if score < bestScore {
+                    bestScore = score
+                    best = cell
+                }
+            }
+        }
+        if let best {
+            foods[0].position = best
+        }
+    }
+
     /// Depth wins ties. Otherwise a same-length planar step hides the lesson.
     private func preferredDepthCue(toward food: Vec3) -> CoachCue? {
+        guard !keepsFoodPlanar else { return nil }
         guard food.z != snake[0].z else { return nil }
         let growing = pendingGrowth > 0
         func remaining(_ dir: Vec3) -> Int? {
@@ -665,8 +890,12 @@ public final class SnakeGame {
         let charged = graceLeft > 0 && elapsed <= profile.graceWindow + 1e-6
         guard inFreeOpening || windowKeepsYouAlive || charged else { return nil }
         let growing = pendingGrowth > 0
-        let options = Vec3.six.filter { dir in
+        var options = Vec3.six.filter { dir in
             dir != -direction && !isFatal(snake[0] + dir, growing: growing)
+        }
+        if keepsFoodPlanar {
+            let planar = options.filter { $0.z == 0 }
+            if !planar.isEmpty { options = planar }
         }
         guard !options.isEmpty else { return nil }
         let target = foods.first?.position

@@ -16,17 +16,10 @@ struct PlayView: View {
                         swipeCatcher
                     }
                     if let arrow = aimArrow {
-                        VStack(spacing: 2) {
-                            Image(systemName: arrow.symbol)
-                                .font(.system(size: 40, weight: .bold))
-                            Text(arrow.caption)
-                                .font(.system(size: 16, weight: .bold, design: .rounded))
-                        }
-                        .foregroundColor(Theme.lime)
-                        .shadow(color: .black.opacity(0.55), radius: 8, y: 2)
-                        .padding(.top, 18)
-                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                        .allowsHitTesting(false)
+                        AimArrow(symbol: arrow.symbol, caption: arrow.caption, urgent: model.game.hintUrgent)
+                            .padding(.top, 18)
+                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                            .allowsHitTesting(false)
                     }
                     VStack(spacing: 8) {
                         if let toast = model.toast {
@@ -64,25 +57,27 @@ struct PlayView: View {
                     }
                     .buttonStyle(.plain)
                 }
-                HStack {
-                    pauseButton
-                    Spacer(minLength: 8)
-                    if model.game.mode == .feeding && !model.game.manualDrive {
-                        Text("AI 在飞")
-                            .font(.system(size: 13, weight: .semibold, design: .rounded))
-                            .foregroundColor(Theme.ink)
-                            .padding(.horizontal, 12)
-                            .frame(height: 32)
-                            .background(Theme.lime)
-                            .clipShape(Capsule())
+                if !runEnded {
+                    HStack {
+                        pauseButton
+                        Spacer(minLength: 8)
+                        if model.game.mode == .feeding && !model.game.manualDrive {
+                            Text("AI 在飞")
+                                .font(.system(size: 13, weight: .semibold, design: .rounded))
+                                .foregroundColor(Theme.ink)
+                                .padding(.horizontal, 12)
+                                .frame(height: 32)
+                                .background(Theme.lime)
+                                .clipShape(Capsule())
+                        }
                     }
+                    .padding(.horizontal, 16)
+                    ControlPad(
+                        model: model,
+                        emphasizeDepthIn: depthHot(inward: true),
+                        emphasizeDepthOut: depthHot(inward: false)
+                    )
                 }
-                .padding(.horizontal, 16)
-                ControlPad(
-                    model: model,
-                    emphasizeDepthIn: depthHot(inward: true),
-                    emphasizeDepthOut: depthHot(inward: false)
-                )
             }
             .padding(.bottom, 6)
 
@@ -112,6 +107,10 @@ struct PlayView: View {
         }
         .padding(.horizontal, 20)
         .padding(.top, 4)
+    }
+
+    private var runEnded: Bool {
+        model.game.phase == .over || model.game.phase == .won
     }
 
     private var canPause: Bool {
@@ -170,6 +169,14 @@ struct PlayView: View {
         }
         if model.game.mode == .feeding && !model.game.manualDrive && model.game.eaten == 0 {
             return "点下面的菜，AI 会追。想自己开，点「我来开」"
+        }
+        if model.game.hintUrgent {
+            switch model.game.coachCue {
+            case .practiceSaved, .graceSaved, .swipeToStart:
+                break
+            default:
+                return "顺着箭头滑"
+            }
         }
         if model.scheme == .buttons && model.game.coachCue == .swipeToStart {
             return "点方向键开始 · 不能直接掉头"
@@ -322,5 +329,38 @@ struct PlayView: View {
     private func clock(_ seconds: Double) -> String {
         let total = max(0, Int(seconds))
         return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
+/// Lime arrow over the cube. Pulses once the opening has gone quiet.
+private struct AimArrow: View {
+    var symbol: String
+    var caption: String
+    var urgent: Bool
+    @State private var pulse = false
+
+    var body: some View {
+        VStack(spacing: 2) {
+            Image(systemName: symbol)
+                .font(.system(size: 40, weight: .bold))
+                .scaleEffect(urgent && pulse ? 1.22 : 1)
+            Text(caption)
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+        }
+        .foregroundColor(Theme.lime)
+        .shadow(color: .black.opacity(0.55), radius: 8, y: 2)
+        .onAppear { startPulse() }
+        .onChange(of: urgent) { _ in startPulse() }
+    }
+
+    private func startPulse() {
+        guard urgent else {
+            pulse = false
+            return
+        }
+        pulse = false
+        withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) {
+            pulse = true
+        }
     }
 }
