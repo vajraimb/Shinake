@@ -32,6 +32,23 @@ final class SnakeGameTests: XCTestCase {
         XCTAssertFalse(game.started)
     }
 
+    func testQueuedTurnFacesTheHeadBeforeTheNextStep() {
+        let game = classic()
+        XCTAssertEqual(game.direction, .xp)
+        game.input(.screen(.up))
+        XCTAssertEqual(game.pendingTurn, .yp)
+        XCTAssertEqual(game.direction, .xp)
+        XCTAssertEqual(game.snapshot().pendingTurn, .yp)
+        game.input(.screen(.right))
+        XCTAssertEqual(game.pendingTurn, .yp, "the next step is still the first swipe")
+        _ = game.debugStep()
+        XCTAssertEqual(game.direction, .yp)
+        XCTAssertEqual(game.pendingTurn, .xp)
+        _ = game.debugStep()
+        XCTAssertEqual(game.direction, .xp)
+        XCTAssertNil(game.pendingTurn)
+    }
+
     func testQueueDropsOneEightiesAndCapsAtTwo() {
         let game = classic()
         game.input(.screen(.up))

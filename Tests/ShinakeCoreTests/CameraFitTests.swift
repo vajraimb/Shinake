@@ -38,6 +38,28 @@ final class CameraFitTests: XCTestCase {
         XCTAssertTrue(playCubeFits(grid: grid, aspect: 0.66, distance: fitted))
     }
 
+    func testTighterMarginPullsTheCameraCloser() {
+        let roomy = cameraDistanceToFitCube(grid: 9, aspect: 0.66, margin: 0.12, pad: 0.55)
+        let tight = cameraDistanceToFitCube(grid: 9, aspect: 0.66)
+        XCTAssertEqual(playCameraMargin, 0.045, accuracy: 0.0001)
+        XCTAssertLessThan(playCameraPad, 0.5)
+        XCTAssertLessThan(tight, roomy * 0.92)
+        XCTAssertTrue(playCubeFits(grid: 9, aspect: 0.66, distance: tight))
+    }
+
+    func testCornerHeadSphereStaysInsideTheFrame() {
+        let grid = 9
+        let half = cubeHalfExtent(grid: grid)
+        let headSurface = WorldPoint(-(half + 0.30), half, -half)
+        let distance = cameraDistanceToFitCube(grid: grid, aspect: 0.62)
+        let ndc = cameraNDC(point: headSurface, lookAt: .zero, distance: distance, aspect: 0.62)
+        XCTAssertNotNil(ndc)
+        if let ndc {
+            XCTAssertLessThan(abs(ndc.x), 1 - playCameraMargin + 1e-4)
+            XCTAssertLessThan(abs(ndc.y), 1 - playCameraMargin + 1e-4)
+        }
+    }
+
     func testNarrowerCanvasNeedsAtLeastAsMuchDistance() {
         let wide = cameraDistanceToFitCube(grid: 9, aspect: 1.2)
         let narrow = cameraDistanceToFitCube(grid: 9, aspect: 0.62)

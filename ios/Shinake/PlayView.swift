@@ -1,4 +1,5 @@
 import SwiftUI
+import UIKit
 
 struct PlayView: View {
     @ObservedObject var model: AppModel
@@ -12,9 +13,15 @@ struct PlayView: View {
                 ZStack(alignment: .bottom) {
                     GameCanvas(model: model)
                         .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
-                    if model.scheme == .swipe {
-                        swipeCatcher
-                    }
+                    BoardGestures(
+                        swipes: model.scheme == .swipe,
+                        pinch: model.pinchDepth,
+                        onSwipe: { model.steer(.screen($0)) },
+                        onPinch: { depth in
+                            model.steer(depth == .inward ? .depthIn : .depthOut)
+                        }
+                    )
+                    .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if let arrow = aimArrow {
                         AimArrow(symbol: arrow.symbol, caption: arrow.caption, urgent: model.game.hintUrgent)
                             .padding(.top, 18)
@@ -181,6 +188,9 @@ struct PlayView: View {
         if model.scheme == .buttons && model.game.coachCue == .swipeToStart {
             return "点方向键开始 · 不能直接掉头"
         }
+        if model.pinchDepth, case .useDepth(let inward) = model.game.coachCue {
+            return inward ? "果子在里面 · 双指捏合＝深入" : "果子朝你这边 · 双指张开＝拉近"
+        }
         return Copy.cue(model.game.coachCue)
     }
 
@@ -189,25 +199,6 @@ struct PlayView: View {
             return flag == inward
         }
         return false
-    }
-
-    @ViewBuilder
-    private var swipeCatcher: some View {
-        Color.clear
-            .contentShape(Rectangle())
-            .gesture(
-                DragGesture(minimumDistance: 30)
-                    .onEnded { value in
-                        let axis = classifySwipe(
-                            dx: Double(value.translation.width),
-                            dy: Double(value.translation.height)
-                        )
-                        if let axis {
-                            model.steer(.screen(axis))
-                        }
-                    }
-            )
-            .accessibilityLabel("滑动转向区域")
     }
 
     private var feedTray: some View {
@@ -362,5 +353,92 @@ private struct AimArrow: View {
         withAnimation(.easeInOut(duration: 0.55).repeatForever(autoreverses: true)) {
             pulse = true
         }
+    }
+}
+
+/// One-finger pans and two-finger pinches, recognized on the way down.
+/// A pinch uses two touches, so it cannot also be a swipe, and nothing here
+/// changes the camera.
+private struct BoardGestures: UIViewRepresentable {
+    var swipes: Bool
+    var pinch: Bool
+    var onSwipe: (ScreenAxis) -> Void
+    var onPinch: (DepthPinch) -> Void
+
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> BoardGestureView {
+        let view = BoardGestureView()
+        context.coordinator.attach(view)
+        return view
+    }
+
+    func updateUIView(_ uiView: BoardGestureView, context: Context) {
+        context.coordinator.onSwipe = onSwipe
+        context.coordinator.onPinch = onPinch
+        uiView.pan.isEnabled = swipes
+        uiView.pinch.isEnabled = pinch
+    }
+
+    final class Coordinator: NSObject {
+        var lock = GestureLock()
+        var onSwipe: (ScreenAxis) -> Void = { _ in }
+        var onPinch: (DepthPinch) -> Void = { _ in }
+
+        func attach(_ view: BoardGestureView) {
+            view.pan.addTarget(self, action: #selector(panned(_:)))
+            view.pinch.addTarget(self, action: #selector(pinched(_:)))
+        }
+
+        @objc func panned(_ pan: UIPanGestureRecognizer) {
+            switch pan.state {
+            case .began, .changed:
+                let translation = pan.translation(in: pan.view)
+                if let axis = lock.swipe(dx: Double(translation.x), dy: Double(translation.y)) {
+                    onSwipe(axis)
+                }
+            case .ended, .cancelled, .failed:
+                lock.endSwipe()
+            default:
+                break
+            }
+        }
+
+        @objc func pinched(_ pinch: UIPinchGestureRecognizer) {
+            switch pinch.state {
+            case .began:
+                lock.endPinch()
+                lock.cancelSwipe()
+            case .changed:
+                if let depth = lock.pinch(scale: Double(pinch.scale)) {
+                    onPinch(depth)
+                }
+            case .ended, .cancelled, .failed:
+                lock.endPinch()
+            default:
+                break
+            }
+        }
+    }
+}
+
+private final class BoardGestureView: UIView {
+    let pan = UIPanGestureRecognizer()
+    let pinch = UIPinchGestureRecognizer()
+
+    override init(frame: CGRect) {
+        super.init(frame: frame)
+        backgroundColor = .clear
+        isMultipleTouchEnabled = true
+        isAccessibilityElement = true
+        accessibilityLabel = "滑动转向区域"
+        pan.minimumNumberOfTouches = 1
+        pan.maximumNumberOfTouches = 1
+        addGestureRecognizer(pan)
+        addGestureRecognizer(pinch)
+    }
+
+    required init?(coder: NSCoder) {
+        nil
     }
 }

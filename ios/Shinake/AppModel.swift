@@ -54,6 +54,10 @@ final class AppModel: ObservableObject {
     @Published var statusBarHidden: Bool {
         didSet { defaults.set(statusBarHidden, forKey: Key.statusBar) }
     }
+    /// Two-finger pinch changes depth. On by default; the buttons stay either way.
+    @Published var pinchDepth: Bool {
+        didSet { defaults.set(pinchDepth, forKey: Key.pinch) }
+    }
     @Published private(set) var runWasRecord = false
 
     private(set) var game: SnakeGame
@@ -71,11 +75,13 @@ final class AppModel: ObservableObject {
         let storedSound = defaults.object(forKey: Key.sound) as? Bool ?? true
         let storedHaptics = defaults.object(forKey: Key.haptics) as? Bool ?? true
         let storedStatusBar = defaults.object(forKey: Key.statusBar) as? Bool ?? false
+        let storedPinch = defaults.object(forKey: Key.pinch) as? Bool ?? true
         difficulty = storedDifficulty
         scheme = storedScheme
         soundOn = storedSound
         hapticsOn = storedHaptics
         statusBarHidden = storedStatusBar
+        pinchDepth = storedPinch
         sound.enabled = storedSound
         haptics.enabled = storedHaptics
         game = SnakeGame(
@@ -264,6 +270,7 @@ private enum Key {
     static let difficulty = "shinake.difficulty"
     static let tutorial = "shinake.tutorialSeen"
     static let statusBar = "shinake.statusBarHidden"
+    static let pinch = "shinake.pinchDepth"
     static func best(_ difficulty: Difficulty) -> String { "shinake.best.\(difficulty.rawValue)" }
 }
 

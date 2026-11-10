@@ -71,6 +71,8 @@ public struct RenderSnapshot: Equatable {
     public var solids: [Vec3]
     public var grid: Int
     public var alive: Bool
+    /// Queued turn the head should face before the body steps.
+    public var pendingTurn: Vec3?
 }
 
 /// The whole playable game, with no UIKit and no clock of its own.
@@ -135,6 +137,8 @@ public final class SnakeGame {
     }
 
     public var grid: Int { profile.grid }
+    /// The turn that will apply on the next step, if the player already swiped.
+    public var pendingTurn: Vec3? { queue.first }
     public var length: Int { snake.count }
     public var shieldActive: Bool { shieldRemaining > 0 }
     public var boostActive: Bool { boostRemaining > 0 }
@@ -200,7 +204,8 @@ public final class SnakeGame {
                 return lhs.x < rhs.x
             },
             grid: grid,
-            alive: phase != .over
+            alive: phase != .over,
+            pendingTurn: queue.first
         )
     }
 

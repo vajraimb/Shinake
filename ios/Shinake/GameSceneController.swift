@@ -359,6 +359,9 @@ final class GameSceneController {
     }
 
     private func facing(_ snapshot: RenderSnapshot) -> SIMD3<Float> {
+        if let turn = snapshot.pendingTurn {
+            return SIMD3<Float>(Float(turn.x), Float(turn.y), Float(turn.z))
+        }
         let current = worldPoint(snapshot.snake[0], grid: snapshot.grid)
         let fromCell = snapshot.previous.first ?? snapshot.snake[0]
         let from = worldPoint(fromCell, grid: snapshot.grid)

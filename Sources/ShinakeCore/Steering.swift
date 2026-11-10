@@ -84,9 +84,58 @@ public func steerMapping(rig: CameraRig) -> SteerMapping {
     )
 }
 
+/// Points of finger travel before a swipe counts. Small so the turn is
+/// chosen while the finger is still moving, not after it lifts.
+public let swipeThreshold = 15.0
+
+/// One pinch, one depth turn. Spread past 1.15 is 拉近; gather inside 0.85 is 深入.
+public let pinchInScale = 0.85
+public let pinchOutScale = 1.15
+
+public enum DepthPinch: Equatable {
+    /// Fingers together: 深入, −Z, into the screen.
+    case inward
+    /// Fingers spread: 拉近, +Z, toward the viewer.
+    case outward
+}
+
+/// Fires a swipe or a pinch once per gesture, then ignores the rest until
+/// the fingers lift. A second swipe needs a new touch.
+public struct GestureLock {
+    public private(set) var swipeArmed = true
+    public private(set) var pinchArmed = true
+
+    public init() {}
+
+    public mutating func swipe(dx: Double, dy: Double) -> ScreenAxis? {
+        guard swipeArmed else { return nil }
+        guard let axis = classifySwipe(dx: dx, dy: dy, threshold: swipeThreshold) else { return nil }
+        swipeArmed = false
+        return axis
+    }
+
+    public mutating func pinch(scale: Double) -> DepthPinch? {
+        guard pinchArmed else { return nil }
+        if scale <= pinchInScale {
+            pinchArmed = false
+            return .inward
+        }
+        if scale >= pinchOutScale {
+            pinchArmed = false
+            return .outward
+        }
+        return nil
+    }
+
+    public mutating func endSwipe() { swipeArmed = true }
+    public mutating func endPinch() { pinchArmed = true }
+    /// A pinch that starts mid-drag must not also become a swipe.
+    public mutating func cancelSwipe() { swipeArmed = false }
+}
+
 /// UIKit drag: positive `dx` is right, positive `dy` is down.
 /// Returns nil for taps and for motions shorter than `threshold` points.
-public func classifySwipe(dx: Double, dy: Double, threshold: Double = 30) -> ScreenAxis? {
+public func classifySwipe(dx: Double, dy: Double, threshold: Double = swipeThreshold) -> ScreenAxis? {
     let adx = abs(dx)
     let ady = abs(dy)
     guard max(adx, ady) >= threshold else { return nil }

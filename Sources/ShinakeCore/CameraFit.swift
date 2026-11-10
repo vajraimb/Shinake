@@ -4,13 +4,13 @@ import Foundation
 /// doesn't get a fisheye view; distance is what changes to fit the cube.
 public let playCameraVerticalFOV = 32.0
 
-/// Empty fraction of each screen edge. 0.12 leaves a margin so the cube
-/// frame, a corner head, and the rounded canvas clip all stay visible.
-public let playCameraMargin = 0.12
+/// Empty fraction of each screen edge. Tight enough that the cube fills the
+/// canvas, with a few percent left so a corner head is not shaved off.
+public let playCameraMargin = 0.045
 
-/// Extra world units around the grid so a head or apple sitting on a corner
-/// cell is still inside the fitted frame.
-public let playCameraPad = 0.55
+/// Extra world units around the grid. Covers the head radius (0.30) and the
+/// cube's edge tube without the old loose halo.
+public let playCameraPad = 0.38
 
 public struct WorldPoint: Equatable {
     public var x: Double
@@ -33,7 +33,7 @@ public func cubeHalfExtent(grid: Int) -> Double {
 
 /// A small shift of the look-at point toward the head. The shift is capped
 /// so the cube stays near the middle of the frame while the head eases inward.
-public func cameraLookAt(headWorld: WorldPoint, grid: Int, bias: Double = 0.18) -> WorldPoint {
+public func cameraLookAt(headWorld: WorldPoint, grid: Int, bias: Double = 0.08) -> WorldPoint {
     let limit = cubeHalfExtent(grid: grid) * 0.35
     func pull(_ value: Double) -> Double {
         min(limit, max(-limit, value * bias))
