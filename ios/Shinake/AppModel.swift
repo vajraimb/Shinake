@@ -54,7 +54,8 @@ final class AppModel: ObservableObject {
     @Published var statusBarHidden: Bool {
         didSet { defaults.set(statusBarHidden, forKey: Key.statusBar) }
     }
-    /// Two-finger pinch changes depth. On by default; the buttons stay either way.
+    /// Two-finger pinch changes depth. Spread is 深入, pinch-in is 拉近.
+    /// On by default; the buttons stay either way.
     @Published var pinchDepth: Bool {
         didSet { defaults.set(pinchDepth, forKey: Key.pinch) }
     }

@@ -7,7 +7,7 @@ struct TutorialView: View {
     private let pages: [(title: String, body: String)] = [
         ("滑动转向", "手指在画面上滑。蛇顺着那个方向拐，但不能直接掉头，免得咬到自己。"),
         ("先吃到光", "开局很慢，箭头会告诉你往哪滑。吃到会变长。\n投喂实验室里，你点菜，AI 替你追。"),
-        ("还有一层深浅", "立方体有前后。底部「深\u{2060}入」往画面里面走，「拉\u{2060}近」往你这边退。每按一次，或每捏一次，只走一层。\n双指捏合＝深\u{2060}入 · 张开＝拉\u{2060}近。\n简单难度先送 6 次护\u{2060}盾。前三个苹果撞到了也不扣。"),
+        ("还有一层深浅", "立方体有前后。底部「深\u{2060}入」往画面里面走，「拉\u{2060}近」往你这边退。每按一次，或每捏一次，只走一层。\n双指张开＝深\u{2060}入 · 捏合＝拉\u{2060}近。\n简单难度先送 6 次护\u{2060}盾。前三个苹果撞到了也不扣。"),
     ]
 
     var body: some View {
@@ -179,6 +179,10 @@ struct SettingsSheet: View {
             Toggle("隐藏状态栏", isOn: $model.statusBarHidden)
             Toggle("双指深浅", isOn: $model.pinchDepth)
                 .tint(Theme.lime)
+            Text("张开＝深\u{2060}入 · 捏合＝拉\u{2060}近。一次只走一层。")
+                .font(.system(size: 13, weight: .regular, design: .rounded))
+                .foregroundColor(Theme.faint)
+                .fixedSize(horizontal: false, vertical: true)
             Text("音效会跟着手机的静音开关。简单难度有 6 次护\u{2060}盾，前三个苹果不扣。")
                 .font(.system(size: 13, weight: .regular, design: .rounded))
                 .foregroundColor(Theme.faint)

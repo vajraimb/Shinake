@@ -17,9 +17,7 @@ struct PlayView: View {
                         swipes: model.scheme == .swipe,
                         pinch: model.pinchDepth,
                         onSwipe: { model.steer(.screen($0)) },
-                        onPinch: { depth in
-                            model.steer(depth == .inward ? .depthIn : .depthOut)
-                        }
+                        onPinch: { model.steer(depthControl(for: $0)) }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if let arrow = aimArrow {
@@ -195,7 +193,7 @@ struct PlayView: View {
         if case .useDepth(let inward, let layers) = model.game.coachCue {
             let name = inward ? "深入" : "拉近"
             if model.pinchDepth {
-                let how = inward ? "捏合" : "张开"
+                let how = inward ? "张开" : "捏合"
                 return "还差 \(layers) 层 · \(how)或点「\(name)」"
             }
             return "还差 \(layers) 层 · 点「\(name)」"

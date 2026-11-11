@@ -88,15 +88,24 @@ public func steerMapping(rig: CameraRig) -> SteerMapping {
 /// chosen while the finger is still moving, not after it lifts.
 public let swipeThreshold = 15.0
 
-/// One pinch, one depth turn. Spread past 1.15 is 拉近; gather inside 0.85 is 深入.
+/// One pinch, one depth turn. Spread past 1.15 is 深入; gather inside 0.85 is 拉近.
 public let pinchInScale = 0.85
 public let pinchOutScale = 1.15
 
 public enum DepthPinch: Equatable {
-    /// Fingers together: 深入, −Z, into the screen.
+    /// Fingers together. 拉近, +Z, toward the viewer.
     case inward
-    /// Fingers spread: 拉近, +Z, toward the viewer.
+    /// Fingers spread. 深入, −Z, into the screen.
     case outward
+}
+
+/// Pinch out goes into the screen. Pinch in comes toward the viewer.
+/// The 深入 and 拉近 buttons are not affected.
+public func depthControl(for pinch: DepthPinch) -> ControlInput {
+    switch pinch {
+    case .outward: return .depthIn
+    case .inward: return .depthOut
+    }
 }
 
 /// Fires a swipe or a pinch once per gesture, then ignores the rest until

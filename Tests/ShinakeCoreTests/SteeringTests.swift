@@ -76,4 +76,20 @@ final class SteeringTests: XCTestCase {
         XCTAssertEqual(mapping.direction(for: .depthIn), .zn)
         XCTAssertEqual(mapping.direction(for: .depthOut), .zp)
     }
+
+    func testPinchOutGoesIntoTheScreen() {
+        let mapping = steerMapping(rig: .standard)
+        var lock = GestureLock()
+        let spread = lock.pinch(scale: pinchOutScale)
+        XCTAssertEqual(spread, .outward)
+        XCTAssertEqual(depthControl(for: .outward), .depthIn)
+        XCTAssertEqual(mapping.direction(for: depthControl(for: .outward)), .zn)
+        XCTAssertNil(lock.pinch(scale: 1.4), "one spread is one layer")
+
+        lock.endPinch()
+        let gather = lock.pinch(scale: pinchInScale)
+        XCTAssertEqual(gather, .inward)
+        XCTAssertEqual(depthControl(for: .inward), .depthOut)
+        XCTAssertEqual(mapping.direction(for: depthControl(for: .inward)), .zp)
+    }
 }
