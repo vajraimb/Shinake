@@ -60,7 +60,7 @@ final class SnakeGameTests: XCTestCase {
         _ = game.debugStep()
         XCTAssertEqual(game.direction, .zn)
         _ = game.debugStep()
-        XCTAssertEqual(game.direction, .zn)
+        XCTAssertEqual(game.direction, .yp, "a depth step is one layer, then the planar heading returns")
     }
 
     func testEatingGrowsScoresAndSpeedsUp() {
@@ -470,8 +470,9 @@ final class SnakeGameTests: XCTestCase {
             direction: game.direction,
             foods: [FoodPellet(id: 9, kind: .apple, position: buried)]
         )
-        if case .useDepth(let inward) = game.coachCue {
+        if case .useDepth(let inward, let layers) = game.coachCue {
             XCTAssertTrue(inward)
+            XCTAssertEqual(layers, 2)
         } else {
             XCTFail("expected a depth cue, got \(game.coachCue)")
         }
@@ -615,8 +616,9 @@ final class SnakeGameTests: XCTestCase {
             foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(2, 4, 4))]
         )
         XCTAssertEqual(game.suggestedInput(), .screen(.up))
-        XCTAssertNotEqual(game.coachCue, .useDepth(inward: true))
-        XCTAssertNotEqual(game.coachCue, .useDepth(inward: false))
+        if case .useDepth = game.coachCue {
+            XCTFail("depth cue while the apple is on this layer")
+        }
         // A beat later the snake is still jammed, so the arrow has to move.
         game.debugSetElapsed(game.profile.startInterval)
         XCTAssertEqual(game.suggestedInput(), .screen(.down))
@@ -694,5 +696,89 @@ final class SnakeGameTests: XCTestCase {
         XCTAssertLessThan(distance, 4)
         XCTAssertEqual(game.foods[0].position.z, game.snake[0].z)
         XCTAssertEqual(game.eaten, 0)
+    }
+
+    func testOneDepthInputMovesOneLayerThenResumesPlanar() {
+        let game = classic()
+        let head = game.snake[0]
+        game.input(.depthIn)
+        _ = game.debugStep()
+        XCTAssertEqual(game.snake[0], head + .zn)
+        XCTAssertEqual(game.direction, .zn)
+        _ = game.debugStep()
+        XCTAssertEqual(game.direction, .xp)
+        XCTAssertEqual(game.snake[0], head + .zn + .xp)
+        _ = game.debugStep()
+        XCTAssertEqual(game.snake[0].z, head.z - 1, "the snake must not keep climbing")
+        XCTAssertEqual(game.direction, .xp)
+
+        // Already heading in Z: one more press is still a single layer, then the old planar heading.
+        let buried = Vec3(4, 4, 4)
+        game.debugArrange(
+            snake: [buried, buried + .zp, buried + .zp + .yn],
+            direction: .zn,
+            foods: [FoodPellet(id: 1, kind: .apple, position: buried + .zn + .zn)],
+            eaten: 3
+        )
+        game.input(.depthIn)
+        _ = game.debugStep()
+        XCTAssertEqual(game.snake[0], buried + .zn)
+        _ = game.debugStep()
+        XCTAssertEqual(game.snake[0], buried + .zn + .yp)
+        XCTAssertEqual(game.direction, .yp)
+        _ = game.debugStep()
+        XCTAssertEqual(game.snake[0].z, buried.z - 1)
+    }
+
+    func testTwoDepthInputsMoveTwoLayers() {
+        let game = classic()
+        let head = game.snake[0]
+        game.input(.depthIn)
+        _ = game.debugStep()
+        game.input(.depthIn)
+        _ = game.debugStep()
+        XCTAssertEqual(game.snake[0], head + .zn + .zn)
+        _ = game.debugStep()
+        XCTAssertEqual(game.direction, .xp)
+        XCTAssertEqual(game.snake[0].z, head.z - 2)
+        _ = game.debugStep()
+        XCTAssertEqual(game.snake[0].z, head.z - 2)
+    }
+
+    func testDuplicateDepthInTheSameTickIsDeduped() {
+        let game = classic()
+        let head = game.snake[0]
+        game.input(.depthIn)
+        game.input(.depthIn)
+        _ = game.debugStep()
+        XCTAssertEqual(game.snake[0], head + .zn)
+        _ = game.debugStep()
+        XCTAssertEqual(game.direction, .xp)
+        XCTAssertEqual(game.snake[0].z, head.z - 1)
+    }
+
+    func testDepthHintCountsPressesLeft() {
+        let game = classic(.easy)
+        let head = Vec3(4, 4, 4)
+        game.debugArrange(
+            snake: [head, head + .xn, head + .xn + .xn],
+            direction: .xp,
+            foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(4, 4, 1))],
+            eaten: 3
+        )
+        if case .useDepth(let inward, let layers) = game.coachCue {
+            XCTAssertTrue(inward)
+            XCTAssertEqual(layers, 3)
+        } else {
+            XCTFail("expected a depth cue, got \(game.coachCue)")
+        }
+        game.input(.depthIn)
+        _ = game.debugStep()
+        if case .useDepth(let inward, let layers) = game.coachCue {
+            XCTAssertTrue(inward)
+            XCTAssertEqual(layers, 2)
+        } else {
+            XCTFail("expected the count to fall by one, got \(game.coachCue)")
+        }
     }
 }

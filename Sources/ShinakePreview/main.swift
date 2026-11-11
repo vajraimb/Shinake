@@ -23,7 +23,7 @@ func cueName(_ cue: CoachCue) -> String {
     case .swipeToStart: return "swipe"
     case .aim(let input): return "aim-\(input)"
     case .goEat: return "eat"
-    case .useDepth(let inward): return inward ? "depth-in" : "depth-out"
+    case .useDepth(let inward, let layers): return inward ? "depth-in-\(layers)" : "depth-out-\(layers)"
     case .practiceSaved: return "practice"
     case .graceSaved(let left): return "grace-\(left)"
     case .none: return "none"

@@ -55,7 +55,8 @@ public enum CoachCue: Equatable {
     /// A specific thumb move that shortens the path to the food.
     case aim(ControlInput)
     case goEat
-    case useDepth(inward: Bool)
+    /// One press or pinch changes a single layer. `layers` is how many are left.
+    case useDepth(inward: Bool, layers: Int)
     /// A wall bump during the opening lesson. The charge was not spent.
     case practiceSaved
     case graceSaved(left: Int)
@@ -108,7 +109,13 @@ public final class SnakeGame {
     public private(set) var hintUrgent = false
 
     private var rng: SplitMix64
-    private var queue: [Vec3] = []
+    private var queue: [QueuedTurn] = []
+    /// Last X/Y heading. A depth press borrows ±Z for one step, then comes back here.
+    private var planarHeading: Vec3 = .xp
+    /// The next step should leave Z and restore `planarHeading`.
+    private var resumePlanar = false
+    /// Depth direction already accepted since the last tick. A second copy is a double-fire.
+    private var depthThisTick: Vec3?
     private var pendingGrowth = 0
     private var extraChop = 0
     private var moveAccumulator: Double = 0
@@ -138,7 +145,7 @@ public final class SnakeGame {
 
     public var grid: Int { profile.grid }
     /// The turn that will apply on the next step, if the player already swiped.
-    public var pendingTurn: Vec3? { queue.first }
+    public var pendingTurn: Vec3? { queue.first?.vector }
     public var length: Int { snake.count }
     public var shieldActive: Bool { shieldRemaining > 0 }
     public var boostActive: Bool { boostRemaining > 0 }
@@ -177,9 +184,9 @@ public final class SnakeGame {
             if let suggestion = suggestedInput() {
                 switch suggestion {
                 case .depthIn:
-                    return .useDepth(inward: true)
+                    return depthCue(inward: true)
                 case .depthOut:
-                    return .useDepth(inward: false)
+                    return depthCue(inward: false)
                 default:
                     return .aim(suggestion)
                 }
@@ -205,7 +212,7 @@ public final class SnakeGame {
             },
             grid: grid,
             alive: phase != .over,
-            pendingTurn: queue.first
+            pendingTurn: queue.first?.vector
         )
     }
 
@@ -214,10 +221,16 @@ public final class SnakeGame {
     public func input(_ input: ControlInput) {
         guard phase == .ready || phase == .playing else { return }
         if mode == .feeding && autopilot && !manualDrive { return }
+        let dir = mapping.direction(for: input)
         if input == .depthIn || input == .depthOut {
+            // Touch-down plus touch-up, or a button and a pinch, land in one tick.
+            if depthThisTick == dir { return }
+            depthThisTick = dir
             usedDepth = true
+            enqueueDepth(dir)
+            return
         }
-        enqueue(mapping.direction(for: input))
+        enqueuePlanar(dir)
     }
 
     /// Feeding lab only. Up to three dishes on the board.
@@ -237,6 +250,7 @@ public final class SnakeGame {
         autopilot = !enabled
         if !enabled {
             queue.removeAll()
+            resumePlanar = false
         }
         touchUI()
     }
@@ -265,6 +279,7 @@ public final class SnakeGame {
     /// across the cube. Returns events that happened this call.
     @discardableResult
     public func update(dt raw: Double) -> [GameEvent] {
+        depthThisTick = nil
         let dt = min(max(raw, 0), 1.0 / 20.0)
         guard phase == .playing, started else {
             noteCueChange()
@@ -297,6 +312,7 @@ public final class SnakeGame {
     /// One logic move, ignoring the clock. Used by tests and not by the renderer.
     @discardableResult
     public func debugStep() -> [GameEvent] {
+        depthThisTick = nil
         guard phase == .playing, started else { return [] }
         let events = step()
         fraction = 0
@@ -325,6 +341,13 @@ public final class SnakeGame {
         snake = body
         previous = body
         self.direction = direction
+        if direction.z == 0 {
+            planarHeading = direction
+        } else if let earlier = planarFromBody(body) {
+            planarHeading = earlier
+        }
+        resumePlanar = false
+        depthThisTick = nil
         foods = pellets
         if let grace { graceLeft = grace }
         if let bites { eaten = bites }
@@ -368,6 +391,9 @@ public final class SnakeGame {
         ]
         previous = snake
         direction = .xp
+        planarHeading = .xp
+        resumePlanar = false
+        depthThisTick = nil
         queue.removeAll()
         foods.removeAll()
         pendingGrowth = 0
@@ -410,9 +436,18 @@ public final class SnakeGame {
         }
     }
 
-    private func enqueue(_ direction: Vec3) {
-        guard direction.isUnitAxis else { return }
-        let last = queue.last ?? self.direction
+    /// X/Y heading the snake is committed to, ignoring a one-shot depth step.
+    private func committedPlanar() -> Vec3 {
+        for turn in queue.reversed() {
+            if case .planar(let dir) = turn { return dir }
+        }
+        if direction.z == 0 { return direction }
+        return planarHeading
+    }
+
+    private func enqueuePlanar(_ direction: Vec3) {
+        guard direction.isUnitAxis, direction.z == 0 else { return }
+        let last = committedPlanar()
         if direction == -last { return }
         if direction == last {
             // A forward swipe still counts as "I'm here" and starts the run.
@@ -420,7 +455,18 @@ public final class SnakeGame {
             return
         }
         guard queue.count < 2 else { return }
-        queue.append(direction)
+        queue.append(.planar(direction))
+        beginIfNeeded()
+        touchUI()
+    }
+
+    /// One queued depth turn moves one cell, then the planar heading resumes.
+    private func enqueueDepth(_ direction: Vec3) {
+        guard direction.isUnitAxis, direction.z != 0 else { return }
+        let upcoming = queue.last?.vector ?? self.direction
+        if direction == -upcoming { return }
+        guard queue.count < 2 else { return }
+        queue.append(.depth(direction))
         beginIfNeeded()
         touchUI()
     }
@@ -448,9 +494,24 @@ public final class SnakeGame {
         previous = snake
 
         if autopilot && !manualDrive {
-            apply(chooseAI(), events: &events)
+            let chosen = chooseAI()
+            if chosen.z == 0 { planarHeading = chosen }
+            resumePlanar = false
+            apply(chosen, events: &events)
         } else if !queue.isEmpty {
-            apply(queue.removeFirst(), events: &events)
+            switch queue.removeFirst() {
+            case .planar(let dir):
+                planarHeading = dir
+                resumePlanar = false
+                apply(dir, events: &events)
+            case .depth(let dir):
+                if self.direction.z == 0 { planarHeading = self.direction }
+                apply(dir, events: &events)
+                resumePlanar = true
+            }
+        } else if resumePlanar {
+            resumePlanar = false
+            apply(planarHeading, events: &events)
         }
 
         var next = snake[0] + direction
@@ -468,6 +529,8 @@ public final class SnakeGame {
                 if !free && graceLeft > 0 { graceLeft -= 1 }
                 rescueWasFree = free
                 direction = rescue
+                if rescue.z == 0 { planarHeading = rescue }
+                resumePlanar = false
                 next = snake[0] + direction
                 graceCueUntil = elapsed + 1.7
                 events.append(.graceUsed(remaining: graceLeft))
@@ -766,7 +829,9 @@ public final class SnakeGame {
     private func nudgeFoodCloser() {
         guard !foods.isEmpty else { return }
         let head = snake[0]
-        let hintDir = hintPlans().first?.direction ?? direction
+        let rawHint = hintPlans().first?.direction ?? planarHeading
+        // A depth hint is one layer per press, so the nudge stays on this Z.
+        let hintDir = rawHint.z == 0 ? rawHint : planarHeading
         var best: Vec3?
         var bestScore = Int.min
         for y in 0..<grid {
@@ -805,6 +870,11 @@ public final class SnakeGame {
         }
         if !plans.isEmpty {
             let current = plans[hintShift % plans.count]
+            if current.direction.z != 0, food.position.z != snake[0].z {
+                // One press buys one layer. Leave the hint on depth and let the
+                // count fall, instead of treating the Z heading as a full run.
+                return
+            }
             if direction == current.direction && phase == .playing {
                 hintShift = 0
                 hintWatchElapsed = elapsed
@@ -876,7 +946,35 @@ public final class SnakeGame {
             if let left = remaining(dir) { bestPlanar = min(bestPlanar, left) }
         }
         guard depth.1 <= bestPlanar else { return nil }
-        return .useDepth(inward: depth.0 == mapping.depthIn)
+        let presses = depthPressesRemaining(depth.0)
+        guard presses > 0 else { return nil }
+        return .useDepth(inward: depth.0 == mapping.depthIn, layers: presses)
+    }
+
+    /// Presses still required in `dir`. Queued depth turns already count.
+    private func depthPressesRemaining(_ dir: Vec3) -> Int {
+        guard let food = foods.first, dir.z != 0 else { return 0 }
+        let gap = food.position.z - snake[0].z
+        guard gap != 0, gap.signum() == dir.z.signum() else { return 0 }
+        var queued = 0
+        for turn in queue {
+            if case .depth(let queuedDir) = turn, queuedDir == dir { queued += 1 }
+        }
+        return max(0, abs(gap) - queued)
+    }
+
+    private func depthCue(inward: Bool) -> CoachCue {
+        let dir = inward ? mapping.depthIn : mapping.depthOut
+        return .useDepth(inward: inward, layers: max(1, depthPressesRemaining(dir)))
+    }
+
+    /// Latest X/Y segment, walking back from the head. Nil when the body is a Z line.
+    private func planarFromBody(_ body: [Vec3]) -> Vec3? {
+        for index in 0..<(body.count - 1) {
+            let step = Vec3(body[index].x - body[index + 1].x, body[index].y - body[index + 1].y, 0)
+            if step.isUnitAxis { return step }
+        }
+        return nil
     }
 
     /// Opening bumps are free, so a player feeling out the cube is not punished
@@ -1063,6 +1161,19 @@ public final class SnakeGame {
             if tailField[next] != nil { return true }
         }
         return false
+    }
+}
+
+/// A swipe changes the heading. A depth press is spent on the next step only.
+private enum QueuedTurn: Equatable {
+    case planar(Vec3)
+    case depth(Vec3)
+
+    var vector: Vec3 {
+        switch self {
+        case .planar(let dir), .depth(let dir):
+            return dir
+        }
     }
 }
 

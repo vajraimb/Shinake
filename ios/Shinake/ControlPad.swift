@@ -62,6 +62,8 @@ struct ControlPad: View {
     }
 
     private func depthButton(_ title: String, subtitle: String, input: ControlInput, hot: Bool) -> some View {
+        // Touch-up fires once. Holding the key does not repeat, and the game
+        // drops a second copy of the same depth input in one tick.
         Button {
             model.steer(input)
         } label: {

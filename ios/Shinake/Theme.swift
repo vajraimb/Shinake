@@ -69,8 +69,9 @@ enum Copy {
             return aim(input)
         case .goEat:
             return "去吃那颗光"
-        case .useDepth(let inward):
-            return inward ? "果子在里面，点「深入」" : "果子朝你这边，点「拉近」"
+        case .useDepth(let inward, let layers):
+            let name = inward ? "深入" : "拉近"
+            return "还差 \(layers) 层 · 点「\(name)」"
         case .practiceSaved:
             return "先帮你拐回来，这次不扣护盾"
         case .graceSaved(let left):

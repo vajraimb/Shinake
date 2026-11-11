@@ -164,8 +164,12 @@ struct PlayView: View {
         case .aim(.screen(.left)): return ("arrow.left", "向左")
         case .aim(.screen(.up)): return ("arrow.up", "向上")
         case .aim(.screen(.down)): return ("arrow.down", "向下")
-        case .aim(.depthIn), .useDepth(true): return ("arrow.down.right", "深入")
-        case .aim(.depthOut), .useDepth(false): return ("arrow.up.left", "拉近")
+        case .aim(.depthIn): return ("arrow.down.right", "深入")
+        case .aim(.depthOut): return ("arrow.up.left", "拉近")
+        case .useDepth(true, let layers):
+            return ("arrow.down.right", layers > 1 ? "深入 ×\(layers)" : "深入")
+        case .useDepth(false, let layers):
+            return ("arrow.up.left", layers > 1 ? "拉近 ×\(layers)" : "拉近")
         default: return nil
         }
     }
@@ -188,14 +192,19 @@ struct PlayView: View {
         if model.scheme == .buttons && model.game.coachCue == .swipeToStart {
             return "点方向键开始 · 不能直接掉头"
         }
-        if model.pinchDepth, case .useDepth(let inward) = model.game.coachCue {
-            return inward ? "果子在里面 · 双指捏合＝深入" : "果子朝你这边 · 双指张开＝拉近"
+        if case .useDepth(let inward, let layers) = model.game.coachCue {
+            let name = inward ? "深入" : "拉近"
+            if model.pinchDepth {
+                let how = inward ? "捏合" : "张开"
+                return "还差 \(layers) 层 · \(how)或点「\(name)」"
+            }
+            return "还差 \(layers) 层 · 点「\(name)」"
         }
         return Copy.cue(model.game.coachCue)
     }
 
     private func depthHot(inward: Bool) -> Bool {
-        if case .useDepth(let flag) = model.game.coachCue {
+        if case .useDepth(let flag, _) = model.game.coachCue {
             return flag == inward
         }
         return false
