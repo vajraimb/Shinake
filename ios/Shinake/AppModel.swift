@@ -16,6 +16,7 @@ enum ControlScheme: String, CaseIterable, Identifiable {
 
 enum AppScreen: Equatable {
     case title
+    case lab
     case play
 }
 
@@ -61,16 +62,19 @@ final class AppModel: ObservableObject {
     }
     @Published private(set) var runWasRecord = false
 
+    let library: FeedLibrary
     private(set) var game: SnakeGame
     private(set) var shake: Double = 0
     private var toastSerial = 0
     private var seenToken = 0
+    private var loggedFeedResult = false
     private let defaults: UserDefaults
     private let sound = SoundBank()
     private let haptics = HapticBank()
 
     init(defaults: UserDefaults = .standard) {
         self.defaults = defaults
+        library = FeedLibrary(defaults: defaults)
         let storedDifficulty = Difficulty(rawValue: defaults.string(forKey: Key.difficulty) ?? "") ?? .easy
         let storedScheme = ControlScheme(rawValue: defaults.string(forKey: Key.scheme) ?? "") ?? .swipe
         let storedSound = defaults.object(forKey: Key.sound) as? Bool ?? true
@@ -105,6 +109,11 @@ final class AppModel: ObservableObject {
         haptics.prepare()
     }
 
+    func openLab() {
+        screen = .lab
+        hudTick += 1
+    }
+
     func requestPlay(_ mode: PlayMode) {
         if defaults.bool(forKey: Key.tutorial) {
             begin(mode)
@@ -128,6 +137,7 @@ final class AppModel: ObservableObject {
 
     func begin(_ mode: PlayMode) {
         runWasRecord = false
+        loggedFeedResult = false
         shake = 0
         game = SnakeGame(
             profile: difficulty.profile,
@@ -136,6 +146,9 @@ final class AppModel: ObservableObject {
             best: defaults.integer(forKey: Key.best(difficulty))
         )
         seenToken = game.uiToken
+        if mode == .feeding, let first = library.loadoutDesigns.first {
+            game.serve(first)
+        }
         screen = .play
         hudTick += 1
         sound.play("ui")
@@ -146,7 +159,7 @@ final class AppModel: ObservableObject {
     }
 
     func backToTitle() {
-        screen = .title
+        screen = game.mode == .feeding ? .lab : .title
         hudTick += 1
     }
 
@@ -186,6 +199,22 @@ final class AppModel: ObservableObject {
         refresh()
     }
 
+    func cast(_ design: FeedDesign) {
+        if game.foods.count >= 3 {
+            showToast("场上已经有三样了")
+            haptics.tap()
+            return
+        }
+        if game.cast(design) {
+            showToast("投出「\(design.name)」")
+            haptics.tap()
+            sound.play("ui")
+        } else {
+            showToast("这一下没放进去")
+        }
+        refresh()
+    }
+
     func toggleManual() {
         game.setManualDrive(!game.manualDrive)
         haptics.tap()
@@ -210,11 +239,17 @@ final class AppModel: ObservableObject {
             seenToken = game.uiToken
             hudTick += 1
         }
+        if !loggedFeedResult && game.mode == .feeding && (game.phase == .over || game.phase == .won) {
+            loggedFeedResult = true
+            library.finishRun(score: game.score, recipes: game.eatenRecipes)
+        }
         return game.snapshot()
     }
 
     private func respond(to event: GameEvent) {
         switch event {
+        case .recipeEaten(let id):
+            library.noteEaten(id)
         case .ate:
             haptics.eat()
             sound.play("eat")

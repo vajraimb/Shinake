@@ -25,11 +25,14 @@ public struct FoodPellet: Equatable {
     public var id: Int
     public var kind: FoodKind
     public var position: Vec3
+    /// Set when the pellet is a player-designed feed. Classic foods leave this nil.
+    public var recipe: FeedDesign?
 
-    public init(id: Int, kind: FoodKind, position: Vec3) {
+    public init(id: Int, kind: FoodKind, position: Vec3, recipe: FeedDesign? = nil) {
         self.id = id
         self.kind = kind
         self.position = position
+        self.recipe = recipe
     }
 }
 
@@ -40,6 +43,8 @@ public enum DeathCause: Equatable {
 
 public enum GameEvent: Equatable {
     case ate(FoodKind)
+    /// A designed feed was eaten. The id is the player's recipe.
+    case recipeEaten(String)
     case graceUsed(remaining: Int)
     case shielded
     case died
@@ -74,6 +79,9 @@ public struct RenderSnapshot: Equatable {
     public var alive: Bool
     /// Queued turn the head should face before the body steps.
     public var pendingTurn: Vec3?
+    /// 1 is the normal body. Grow and shrink feeds push it for a few seconds.
+    public var snakeScale: Double
+    public var colorShift: Bool
 }
 
 /// The whole playable game, with no UIKit and no clock of its own.
@@ -104,6 +112,8 @@ public final class SnakeGame {
     public private(set) var shieldRemaining: Double = 0
     public private(set) var boostRemaining: Double = 0
     public private(set) var confuseRemaining: Double = 0
+    /// Recipes eaten during this run, in order, for the feed-card stats.
+    public private(set) var eatenRecipes: [String] = []
     /// The opening lesson has gone 15s without a bite. The apple steps closer
     /// and the snake eases off so a lost thumb can catch the arrow.
     public private(set) var hintUrgent = false
@@ -131,6 +141,14 @@ public final class SnakeGame {
     private var hintWatchDistance = 0
     private var lastProgressElapsed = 0.0
     private var nudgesIssued = 0
+    private var slowRemaining = 0.0
+    private var magnetRemaining = 0.0
+    private var reverseRemaining = 0.0
+    private var ghostRemaining = 0.0
+    private var tintRemaining = 0.0
+    private var growScaleRemaining = 0.0
+    private var shrinkScaleRemaining = 0.0
+    private var scoreMultiplierRemaining = 0.0
 
     public init(profile: DifficultyProfile, mode: PlayMode, seed: UInt64, best: Int = 0) {
         self.profile = profile
@@ -149,6 +167,13 @@ public final class SnakeGame {
     public var length: Int { snake.count }
     public var shieldActive: Bool { shieldRemaining > 0 }
     public var boostActive: Bool { boostRemaining > 0 }
+    public var controlsReversed: Bool { reverseRemaining > 0 }
+    public var ghosting: Bool { ghostRemaining > 0 }
+    public var snakeScale: Double {
+        if growScaleRemaining > 0 { return 1.28 }
+        if shrinkScaleRemaining > 0 { return 0.72 }
+        return 1
+    }
 
     /// How fast the snake is versus the opening tempo. Starts at 1.
     public var speedMultiple: Double {
@@ -162,7 +187,8 @@ public final class SnakeGame {
         let base = moveInterval(eaten: eaten, profile: profile)
         let multiplier = boostRemaining > 0 ? profile.chiliMultiplier : 1
         let crawl = hintUrgent ? 1.35 : 1
-        return max(0.05, base * multiplier * crawl)
+        let drag = slowRemaining > 0 ? 1.55 : 1
+        return max(0.05, base * multiplier * crawl * drag)
     }
 
     public var coachCue: CoachCue {
@@ -212,7 +238,9 @@ public final class SnakeGame {
             },
             grid: grid,
             alive: phase != .over,
-            pendingTurn: queue.first?.vector
+            pendingTurn: queue.first?.vector,
+            snakeScale: snakeScale,
+            colorShift: tintRemaining > 0
         )
     }
 
@@ -221,7 +249,8 @@ public final class SnakeGame {
     public func input(_ input: ControlInput) {
         guard phase == .ready || phase == .playing else { return }
         if mode == .feeding && autopilot && !manualDrive { return }
-        let dir = mapping.direction(for: input)
+        let raw = mapping.direction(for: input)
+        let dir = reverseRemaining > 0 ? -raw : raw
         if input == .depthIn || input == .depthOut {
             // Touch-down plus touch-up, or a button and a pinch, land in one tick.
             if depthThisTick == dir { return }
@@ -242,6 +271,26 @@ public final class SnakeGame {
         let placed = spawn(kind: kind, bias: .interior)
         touchUI()
         return placed
+    }
+
+    /// Feeding lab only. A designed feed has to fit the effect budget.
+    @discardableResult
+    public func cast(_ design: FeedDesign) -> Bool {
+        guard design.withinBudget else { return false }
+        guard mode == .feeding else { return false }
+        guard phase == .playing || phase == .ready else { return false }
+        guard foods.count < 3 else { return false }
+        let placed = spawn(kind: .apple, bias: .interior, recipe: design)
+        touchUI()
+        return placed
+    }
+
+    /// Swap the opening dish for the first feed in the player's loadout.
+    public func serve(_ design: FeedDesign) {
+        guard mode == .feeding, design.withinBudget, !foods.isEmpty else { return }
+        foods[0].recipe = design
+        foods[0].kind = .apple
+        touchUI()
     }
 
     public func setManualDrive(_ enabled: Bool) {
@@ -366,6 +415,7 @@ public final class SnakeGame {
         lastProgressElapsed = elapsed
         nudgesIssued = 0
         hintUrgent = false
+        clearRecipeTimers()
         keepOpeningFoodPlanar()
         touchUI()
     }
@@ -413,6 +463,7 @@ public final class SnakeGame {
         solids = profile.solids
         manualDrive = false
         deathCause = nil
+        clearRecipeTimers()
         hintShift = 0
         hintWatchElapsed = 0
         hintUrgent = false
@@ -487,6 +538,26 @@ public final class SnakeGame {
         if boostRemaining > 0 { boostRemaining = max(0, boostRemaining - dt) }
         if shieldRemaining > 0 { shieldRemaining = max(0, shieldRemaining - dt) }
         if confuseRemaining > 0 { confuseRemaining = max(0, confuseRemaining - dt) }
+        if slowRemaining > 0 { slowRemaining = max(0, slowRemaining - dt) }
+        if magnetRemaining > 0 { magnetRemaining = max(0, magnetRemaining - dt) }
+        if reverseRemaining > 0 { reverseRemaining = max(0, reverseRemaining - dt) }
+        if ghostRemaining > 0 { ghostRemaining = max(0, ghostRemaining - dt) }
+        if tintRemaining > 0 { tintRemaining = max(0, tintRemaining - dt) }
+        if growScaleRemaining > 0 { growScaleRemaining = max(0, growScaleRemaining - dt) }
+        if shrinkScaleRemaining > 0 { shrinkScaleRemaining = max(0, shrinkScaleRemaining - dt) }
+        if scoreMultiplierRemaining > 0 { scoreMultiplierRemaining = max(0, scoreMultiplierRemaining - dt) }
+    }
+
+    private func clearRecipeTimers() {
+        slowRemaining = 0
+        magnetRemaining = 0
+        reverseRemaining = 0
+        ghostRemaining = 0
+        tintRemaining = 0
+        growScaleRemaining = 0
+        shrinkScaleRemaining = 0
+        scoreMultiplierRemaining = 0
+        eatenRecipes = []
     }
 
     private func step() -> [GameEvent] {
@@ -547,7 +618,7 @@ public final class SnakeGame {
         snake.insert(next, at: 0)
         if let index = foods.firstIndex(where: { $0.position == next }) {
             let pellet = foods.remove(at: index)
-            events.append(contentsOf: applyEat(pellet.kind))
+            events.append(contentsOf: applyEat(pellet))
         }
         if pendingGrowth > 0 {
             pendingGrowth -= 1
@@ -562,6 +633,7 @@ public final class SnakeGame {
             }
         }
         keepOpeningFoodPlanar()
+        pullFoodsTowardHead()
         let boardCleared = mode == .classic && foods.isEmpty
         if phase == .playing && (snake.count >= freeCellCount || boardCleared) {
             phase = .won
@@ -578,28 +650,32 @@ public final class SnakeGame {
         events.append(.turned)
     }
 
-    private func applyEat(_ kind: FoodKind) -> [GameEvent] {
+    private func applyEat(_ pellet: FoodPellet) -> [GameEvent] {
         var events: [GameEvent] = []
         eaten += 1
-        switch kind {
-        case .apple:
-            score += 10
-            pendingGrowth += 1
-        case .star:
-            score += 30
-            pendingGrowth += 1
-        case .chili:
-            score += 8
-            pendingGrowth += 1
-            boostRemaining = 5
-        case .mushroom:
-            score += 5
-            confuseRemaining = 2.4
-            // Head is already inserted, so count is one above the pre-bite length.
-            if snake.count > 9 { extraChop = 2 }
-        case .shield:
-            score += 6
-            shieldRemaining = max(shieldRemaining, 7)
+        if let recipe = pellet.recipe {
+            applyRecipe(recipe, events: &events)
+        } else {
+            switch pellet.kind {
+            case .apple:
+                score += 10
+                pendingGrowth += 1
+            case .star:
+                score += 30
+                pendingGrowth += 1
+            case .chili:
+                score += 8
+                pendingGrowth += 1
+                boostRemaining = 5
+            case .mushroom:
+                score += 5
+                confuseRemaining = 2.4
+                // Head is already inserted, so count is one above the pre-bite length.
+                if snake.count > 9 { extraChop = 2 }
+            case .shield:
+                score += 6
+                shieldRemaining = max(shieldRemaining, 7)
+            }
         }
         if score > best {
             best = score
@@ -614,7 +690,7 @@ public final class SnakeGame {
         if profile.refillsGrace && !inFreeOpening && elapsed <= profile.graceWindow + 1e-6 {
             graceLeft = profile.graceCharges
         }
-        events.append(.ate(kind))
+        events.append(.ate(pellet.recipe == nil ? pellet.kind : .apple))
         if mode == .classic {
             _ = spawn(kind: .apple, bias: classicBias)
         }
@@ -634,8 +710,85 @@ public final class SnakeGame {
         case standard
     }
 
-    @discardableResult
-    private func spawn(kind: FoodKind, bias: SpawnBias) -> Bool {
+    private func applyRecipe(_ recipe: FeedDesign, events: inout [GameEvent]) {
+        let doubled = scoreMultiplierRemaining > 0 || recipe.effects.contains(.scoreMultiplier)
+        var points = doubled ? 24 : 12
+        if recipe.effects.contains(.golden) { points += 20 }
+        score += points
+        pendingGrowth += 1
+        for effect in recipe.effects {
+            switch effect {
+            case .speedBoost:
+                boostRemaining = max(boostRemaining, 5)
+            case .slowMo:
+                slowRemaining = max(slowRemaining, 4)
+            case .split:
+                pendingGrowth += 2
+            case .colorShift, .rainbow:
+                tintRemaining = max(tintRemaining, effect == .rainbow ? 6 : 4)
+            case .magnet:
+                magnetRemaining = max(magnetRemaining, 4)
+            case .reverseControls:
+                reverseRemaining = max(reverseRemaining, 3)
+            case .burst:
+                for _ in 0..<3 where foods.count < 6 {
+                    _ = spawn(kind: .apple, bias: .interior)
+                }
+            case .ghost:
+                ghostRemaining = max(ghostRemaining, 3)
+            case .grow:
+                pendingGrowth += 2
+                growScaleRemaining = max(growScaleRemaining, 4)
+                shrinkScaleRemaining = 0
+            case .shrink:
+                extraChop += 2
+                shrinkScaleRemaining = max(shrinkScaleRemaining, 4)
+                growScaleRemaining = 0
+            case .scoreMultiplier:
+                scoreMultiplierRemaining = max(scoreMultiplierRemaining, 8)
+            case .timeFreeze:
+                holdMovesUntil = max(holdMovesUntil, 1.2)
+                slowRemaining = max(slowRemaining, 2)
+            case .golden:
+                break
+            case .phantomTrail:
+                ghostRemaining = max(ghostRemaining, 2)
+                tintRemaining = max(tintRemaining, 2)
+            }
+        }
+        eatenRecipes.append(recipe.id)
+        events.append(.recipeEaten(recipe.id))
+    }
+
+    private func pullFoodsTowardHead() {
+        guard magnetRemaining > 0, let head = snake.first else { return }
+        var occupied = solids
+        for cell in snake { occupied.insert(cell) }
+        for index in foods.indices {
+            let pos = foods[index].position
+            let dx = head.x - pos.x
+            let dy = head.y - pos.y
+            let dz = head.z - pos.z
+            let step: Vec3
+            if abs(dx) >= abs(dy) && abs(dx) >= abs(dz) && dx != 0 {
+                step = Vec3(dx > 0 ? 1 : -1, 0, 0)
+            } else if abs(dy) >= abs(dz) && dy != 0 {
+                step = Vec3(0, dy > 0 ? 1 : -1, 0)
+            } else if dz != 0 {
+                step = Vec3(0, 0, dz > 0 ? 1 : -1)
+            } else {
+                continue
+            }
+            let next = pos + step
+            if !inBounds(next) || occupied.contains(next) || foods.contains(where: { $0.position == next }) {
+                continue
+            }
+            foods[index].position = next
+            occupied.insert(next)
+        }
+    }
+
+    private func spawn(kind: FoodKind, bias: SpawnBias, recipe: FeedDesign? = nil) -> Bool {
         let head = snake[0]
         var occupied = solids
         for cell in snake { occupied.insert(cell) }
@@ -685,7 +838,7 @@ public final class SnakeGame {
         guard !pool.isEmpty else { return false }
         let index = rng.int(below: pool.count)
         nextFoodID += 1
-        foods.append(FoodPellet(id: nextFoodID, kind: kind, position: pool[index]))
+        foods.append(FoodPellet(id: nextFoodID, kind: kind, position: pool[index], recipe: recipe))
         return true
     }
 
@@ -705,6 +858,7 @@ public final class SnakeGame {
 
     private func isFatal(_ cell: Vec3, growing: Bool, snake body: [Vec3]) -> Bool {
         if !inBounds(cell) || solids.contains(cell) { return true }
+        if ghostRemaining > 0 { return false }
         let bodyCount = growing ? body.count : max(0, body.count - 1)
         if bodyCount == 0 { return false }
         for index in 0..<bodyCount where body[index] == cell {

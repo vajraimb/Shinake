@@ -33,6 +33,8 @@ final class GameSceneController {
     private var builtGrid = -1
     private var time: Double = 0
     private var snakeAlive = true
+    private var bodyScale: Float = 1
+    private var hueShift = false
 
     init() {
         view = SCNView()
@@ -106,6 +108,8 @@ final class GameSceneController {
 
     func render(_ snapshot: RenderSnapshot, showGuide: Bool, shake: Double, dt: Double) {
         time += dt
+        bodyScale = Float(snapshot.snakeScale)
+        hueShift = snapshot.colorShift
         if snapshot.grid != builtGrid {
             rebuildBoard(grid: snapshot.grid)
         }
@@ -298,20 +302,34 @@ final class GameSceneController {
     /// Head diameter 0.60 of a cell. The body starts at 0.54 and tapers to 0.28.
     private func bodyRadius(index: Int, count: Int) -> Float {
         let wave = 1 + 0.025 * sin(Float(time) * 3 + Float(index) * 0.55)
-        if index == 0 { return 0.30 * wave }
-        let t = Float(index) / Float(max(count - 1, 1))
-        return (0.27 + (0.14 - 0.27) * t) * wave
+        let base: Float
+        if index == 0 {
+            base = 0.30
+        } else {
+            let t = Float(index) / Float(max(count - 1, 1))
+            base = 0.27 + (0.14 - 0.27) * t
+        }
+        return base * wave * bodyScale
     }
 
     private func tint(_ node: SCNNode, index: Int, count: Int, head: Bool) {
         let t = CGFloat(index) / CGFloat(max(count - 1, 1))
         let band: CGFloat = index % 3 == 2 ? 0.78 : 1
-        let color = UIColor(
+        var color = UIColor(
             red: (0.62 - 0.34 * t) * band,
             green: (0.94 - 0.40 * t) * band,
             blue: (0.38 + 0.22 * t) * band,
             alpha: 1
         )
+        if hueShift {
+            let wobble = CGFloat(sin(time * 5 + Double(index) * 0.4))
+            color = UIColor(
+                red: min(1, 0.55 + 0.40 * wobble),
+                green: (0.70 - 0.20 * t) * band,
+                blue: min(1, 0.85 - 0.30 * wobble),
+                alpha: 1
+            )
+        }
         let material = node.geometry?.materials.first ?? glossMaterial(color)
         if head {
             material.diffuse.contents = UIColor(red: 0.78, green: 0.96, blue: 0.48, alpha: 1)
@@ -382,15 +400,21 @@ final class GameSceneController {
         let half = Float(snapshot.grid - 1) * 0.5
         let pulse = 1 + 0.07 * sin(Float(time) * 3.2)
         for pellet in snapshot.foods {
+            let nodeKey = pellet.recipe.map { "recipe-\($0.id)-\($0.look.shape.rawValue)" } ?? pellet.kind.rawValue
             let node: SCNNode
-            if let existing = foodNodes[pellet.id], existing.name == pellet.kind.rawValue {
+            if let existing = foodNodes[pellet.id], existing.name == nodeKey {
                 node = existing
             } else {
                 foodNodes[pellet.id]?.removeFromParentNode()
-                node = makeFood(pellet.kind)
-                node.name = pellet.kind.rawValue
+                node = pellet.recipe.map(makeRecipe) ?? makeFood(pellet.kind)
+                node.name = nodeKey
                 world.addChildNode(node)
                 foodNodes[pellet.id] = node
+            }
+            let sparks = node.childNodes.filter { $0.name == "spark" }
+            for (index, spark) in sparks.enumerated() {
+                let angle = Float(time) * 2.4 + Float(index) * 1.57
+                spark.simdPosition = SIMD3<Float>(cos(angle) * 0.40, sin(angle * 1.4) * 0.12, sin(angle) * 0.40)
             }
             node.position = worldPoint(pellet.position, grid: snapshot.grid)
             let squash: Float = pellet.kind == .apple ? 0.88 : 1
@@ -441,6 +465,72 @@ final class GameSceneController {
             node.addChildNode(appleStem())
         }
         return node
+    }
+
+    private func makeRecipe(_ design: FeedDesign) -> SCNNode {
+        let primary = uiColor(design.look.primary)
+        let secondary = uiColor(design.look.secondary)
+        let geometry: SCNGeometry
+        switch design.look.shape {
+        case .sphere, .heart:
+            geometry = SCNSphere(radius: 0.26)
+        case .cube:
+            geometry = SCNBox(width: 0.44, height: 0.44, length: 0.44, chamferRadius: 0.08)
+        case .star:
+            geometry = SCNSphere(radius: 0.22)
+        case .diamond:
+            geometry = SCNBox(width: 0.36, height: 0.36, length: 0.36, chamferRadius: 0.02)
+        case .drop:
+            geometry = SCNCone(topRadius: 0.04, bottomRadius: 0.22, height: 0.48)
+        }
+        let material = glossMaterial(primary)
+        let glow = CGFloat(design.look.glow)
+        material.emission.contents = secondary.withAlphaComponent(0.2 + 0.6 * glow)
+        if design.look.rareLook == .voidGlass {
+            material.transparency = 0.72
+            material.emission.contents = secondary.withAlphaComponent(0.9)
+        }
+        geometry.materials = [material]
+        let node = SCNNode(geometry: geometry)
+        if design.look.shape == .diamond {
+            node.eulerAngles = SCNVector3(0.7, 0.4, 0.6)
+        }
+        if design.look.shape == .heart {
+            node.scale = SCNVector3(1, 0.86, 0.9)
+        }
+        if design.look.trail || design.look.rareLook == .ember {
+            let beam = SCNCylinder(radius: 0.045, height: 1)
+            let beamMaterial = SCNMaterial()
+            beamMaterial.lightingModel = .constant
+            beamMaterial.diffuse.contents = secondary.withAlphaComponent(0.45)
+            beam.materials = [beamMaterial]
+            let beamNode = SCNNode(geometry: beam)
+            beamNode.name = "beacon"
+            node.addChildNode(beamNode)
+        }
+        if design.look.particles || design.look.rareLook == .prism {
+            for _ in 0..<4 {
+                let bit = SCNSphere(radius: 0.045)
+                let bitMaterial = SCNMaterial()
+                bitMaterial.lightingModel = .constant
+                bitMaterial.diffuse.contents = secondary
+                bit.materials = [bitMaterial]
+                let bitNode = SCNNode(geometry: bit)
+                bitNode.name = "spark"
+                node.addChildNode(bitNode)
+            }
+        }
+        let light = SCNLight()
+        light.type = .omni
+        light.intensity = CGFloat(40 + 160 * design.look.glow)
+        light.color = primary
+        light.attenuationEndDistance = 3.2
+        node.light = light
+        return node
+    }
+
+    private func uiColor(_ color: FeedColor) -> UIColor {
+        UIColor(red: CGFloat(color.red), green: CGFloat(color.green), blue: CGFloat(color.blue), alpha: 1)
     }
 
     private func appleStem() -> SCNNode {

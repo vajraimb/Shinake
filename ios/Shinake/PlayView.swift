@@ -177,7 +177,10 @@ struct PlayView: View {
             return nil
         }
         if model.game.mode == .feeding && !model.game.manualDrive && model.game.eaten == 0 {
-            return "点下面的菜，AI 会追。想自己开，点「我来开」"
+            if model.library.loadoutDesigns.isEmpty {
+                return "点下面的菜，AI 会追。想自己开，点「我来开」"
+            }
+            return "点你设计的食物，AI 会追。想自己开，点「我来开」"
         }
         if model.game.hintUrgent {
             switch model.game.coachCue {
@@ -209,8 +212,39 @@ struct PlayView: View {
     }
 
     private var feedTray: some View {
-        HStack(spacing: 8) {
-            ForEach(FoodKind.allCases, id: \.self) { kind in
+        let designed = model.library.loadoutDesigns
+        return HStack(spacing: 8) {
+            if designed.isEmpty {
+                classicTray
+            } else {
+                ForEach(designed) { design in
+                    Button {
+                        model.cast(design)
+                    } label: {
+                        VStack(spacing: 4) {
+                            Circle()
+                                .fill(Color(red: design.look.primary.red, green: design.look.primary.green, blue: design.look.primary.blue))
+                                .frame(width: 18, height: 18)
+                            Text(design.name)
+                                .font(.system(size: 12, weight: .semibold, design: .rounded))
+                                .foregroundColor(.white)
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 58)
+                        .background(Theme.card)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                    }
+                    .buttonStyle(PressStyle())
+                    .accessibilityLabel("投喂\(design.name)")
+                }
+            }
+        }
+        .padding(.horizontal, 12)
+    }
+
+    private var classicTray: some View {
+        ForEach(FoodKind.allCases, id: \.self) { kind in
                 Button {
                     model.cast(kind)
                 } label: {
@@ -230,9 +264,7 @@ struct PlayView: View {
                 }
                 .buttonStyle(PressStyle())
                 .accessibilityLabel("投喂\(Copy.food(kind))")
-            }
         }
-        .padding(.horizontal, 12)
     }
 
     private func toastBanner(_ text: String) -> some View {
@@ -261,7 +293,7 @@ struct PlayView: View {
             card(title: "暂停", subtitle: "蛇停在这一格") {
                 PrimaryButton(title: "继续", action: model.resume)
                 SecondaryButton(title: "重新开始", action: model.restart)
-                SecondaryButton(title: "回标题", action: model.backToTitle)
+                SecondaryButton(title: model.game.mode == .feeding ? "回实验室" : "回标题", action: model.backToTitle)
                 toggleRow
             }
         }
@@ -283,7 +315,7 @@ struct PlayView: View {
                     .foregroundColor(Theme.dim)
                 PrimaryButton(title: "再来一局", action: model.restart)
                     .accessibilityIdentifier("restartButton")
-                SecondaryButton(title: "回标题", action: model.backToTitle)
+                SecondaryButton(title: model.game.mode == .feeding ? "回实验室" : "回标题", action: model.backToTitle)
             }
         }
     }

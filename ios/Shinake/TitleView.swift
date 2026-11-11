@@ -28,7 +28,8 @@ struct TitleView: View {
             VStack(spacing: 12) {
                 PrimaryButton(title: "开始游戏") { model.requestPlay(.classic) }
                     .accessibilityIdentifier("startButton")
-                SecondaryButton(title: "投喂实验室") { model.requestPlay(.feeding) }
+                SecondaryButton(title: "投喂实验室") { model.openLab() }
+                    .accessibilityIdentifier("feedLabButton")
                 difficultyPicker
                 HStack {
                     Text(bestLine)

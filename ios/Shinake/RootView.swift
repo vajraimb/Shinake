@@ -9,6 +9,8 @@ struct RootView: View {
             Theme.bg.ignoresSafeArea()
             if model.screen == .title {
                 TitleView(model: model)
+            } else if model.screen == .lab {
+                FeedLabView(model: model, library: model.library)
             } else {
                 PlayView(model: model)
             }
