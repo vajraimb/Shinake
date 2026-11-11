@@ -177,7 +177,12 @@ private struct FeedEditor: View {
                         .tint(Theme.lime)
                 }
                 Toggle("拖尾", isOn: $draft.look.trail).tint(Theme.lime)
-                Toggle("粒子", isOn: $draft.look.particles).tint(Theme.lime)
+                Toggle("粒子", isOn: $draft.look.particles)
+                    .tint(Theme.lime)
+                    .background(
+                        ScrollAnchor(name: "feed.particles")
+                            .frame(maxWidth: .infinity, maxHeight: .infinity)
+                    )
                 HStack {
                     Text("效果")
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
@@ -200,7 +205,8 @@ private struct FeedEditor: View {
                 PrimaryButton(title: "保存") { save() }
             }
             .padding(20)
-            .padding(.bottom, 24)
+            .padding(.bottom, 72)
+            .background(EditorKeyboardLift())
             }
             .scrollDismissesKeyboard(.interactively)
         }
@@ -309,7 +315,6 @@ private struct FeedEditor: View {
 private struct FeedCards: View {
     @ObservedObject var library: FeedLibrary
     @State private var importText = ""
-    @State private var pendingDelete: FeedDesign?
 
     var body: some View {
         ZStack {
@@ -352,22 +357,6 @@ private struct FeedCards: View {
                 Button("完成") { hideKeyboard() }
             }
         }
-        .confirmationDialog(
-            "删除「\(pendingDelete?.name ?? "这张卡")」？",
-            isPresented: Binding(
-                get: { pendingDelete != nil },
-                set: { if !$0 { pendingDelete = nil } }
-            ),
-            titleVisibility: .visible
-        ) {
-            Button("删除", role: .destructive) {
-                if let pendingDelete { library.delete(pendingDelete.id) }
-                pendingDelete = nil
-            }
-            Button("取消", role: .cancel) { pendingDelete = nil }
-        } message: {
-            Text("这张卡会从列表和本局里去掉。")
-        }
     }
 
     private func card(_ design: FeedDesign) -> some View {
@@ -402,8 +391,9 @@ private struct FeedCards: View {
                 .buttonStyle(.plain)
                 Button { share(design) } label: { chipLabel("分享") }
                     .buttonStyle(.plain)
-                Button { pendingDelete = design } label: { chipLabel("删除", tint: Theme.coral) }
-                    .buttonStyle(.plain)
+                DeleteCardButton(name: design.name) {
+                    library.delete(design.id)
+                }
             }
         }
         .padding(14)
@@ -435,11 +425,8 @@ private struct FeedCards: View {
             library.flash("这张卡超出预算，不能分享")
             return
         }
-        let card = FeedShareCard(design: design, code: code)
-        let renderer = ImageRenderer(content: card)
-        renderer.scale = UIScreen.main.scale
         let caption = "食蛇投喂 \(design.name)\n\(code)"
-        SharePresenter.present(image: renderer.uiImage, caption: caption)
+        SharePresenter.present(image: drawShareCard(design: design, code: code), caption: caption)
     }
 
     private func importCode() {
@@ -732,7 +719,9 @@ struct FeedPreview: View {
             let rect = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
             ctx.fill(Path(ellipseIn: rect), with: .color(Color(red: 0.62, green: 0.9, blue: 0.38)))
         }
-        let foodScale = bite > 0 ? max(0.05, 1 - bite) : 1
+        // Shrink a little as the snake bites, but keep the silhouette readable.
+        // A star at a few points across loses its points and looks like a blob.
+        let foodScale = bite > 0 ? max(0.78, 1 - bite * 0.22) : 1
         let side = 40 * foodScale
         let rect = CGRect(x: foodX - side / 2, y: y - side / 2, width: side, height: side)
         if design.look.glow > 0.05 {
@@ -741,33 +730,6 @@ struct FeedPreview: View {
             halo.fill(Path(ellipseIn: rect.insetBy(dx: -8, dy: -8)), with: .color(secondary))
         }
         FoodInk(design: design).drawShape(ctx, in: rect, cycle: cycle * 3.2)
-    }
-}
-
-private struct FeedShareCard: View {
-    var design: FeedDesign
-    var code: String
-
-    var body: some View {
-        VStack(alignment: .leading, spacing: 12) {
-            Text("食蛇 · 投喂")
-                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                .foregroundColor(Theme.dim)
-            Text(design.name)
-                .font(.system(size: 28, weight: .bold, design: .rounded))
-                .foregroundColor(.white)
-            FeedPreview(design: design, height: 140, animate: false)
-            Text(design.effects.map(\.title).joined(separator: " · "))
-                .font(.system(size: 14, weight: .medium, design: .rounded))
-                .foregroundColor(Theme.lime)
-            Text(code)
-                .font(.system(size: 9, weight: .medium, design: .monospaced))
-                .foregroundColor(Theme.dim)
-                .lineLimit(6)
-        }
-        .padding(18)
-        .frame(width: 320)
-        .background(Theme.bg)
     }
 }
 
@@ -984,10 +946,132 @@ private func hideKeyboard() {
     UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
 }
 
+private func drawShareCard(design: FeedDesign, code: String) -> UIImage {
+    let size = CGSize(width: 640, height: 1040)
+    let format = UIGraphicsImageRendererFormat()
+    format.scale = 1
+    format.opaque = true
+    return UIGraphicsImageRenderer(size: size, format: format).image { ctx in
+        Theme.bgUI.setFill()
+        ctx.fill(CGRect(origin: .zero, size: size))
+        let title = "食蛇 · 投喂" as NSString
+        let name = design.name as NSString
+        let effects = (design.effects.map(\.title).joined(separator: " · ").isEmpty
+            ? "无效果"
+            : design.effects.map(\.title).joined(separator: " · ")) as NSString
+        let titleAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 26, weight: .semibold),
+            .foregroundColor: UIColor.white.withAlphaComponent(0.62),
+        ]
+        let nameAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 56, weight: .bold),
+            .foregroundColor: UIColor.white,
+        ]
+        let effectAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.systemFont(ofSize: 28, weight: .medium),
+            .foregroundColor: Theme.limeUI,
+        ]
+        let codeAttrs: [NSAttributedString.Key: Any] = [
+            .font: UIFont.monospacedSystemFont(ofSize: 18, weight: .medium),
+            .foregroundColor: UIColor.white.withAlphaComponent(0.62),
+        ]
+        title.draw(in: CGRect(x: 36, y: 36, width: 560, height: 40), withAttributes: titleAttrs)
+        name.draw(in: CGRect(x: 36, y: 84, width: 560, height: 80), withAttributes: nameAttrs)
+        let glyph = CGRect(x: 170, y: 200, width: 300, height: 300)
+        drawShareGlyph(design, in: glyph, context: ctx.cgContext)
+        effects.draw(in: CGRect(x: 36, y: 540, width: 568, height: 80), withAttributes: effectAttrs)
+        (code as NSString).draw(
+            in: CGRect(x: 36, y: 640, width: 568, height: 360),
+            withAttributes: codeAttrs
+        )
+    }
+}
+
+private func drawShareGlyph(_ design: FeedDesign, in rect: CGRect, context: CGContext) {
+    let color = UIColor(
+        red: CGFloat(design.look.primary.red),
+        green: CGFloat(design.look.primary.green),
+        blue: CGFloat(design.look.primary.blue),
+        alpha: 1
+    )
+    let path = shareShapePath(design.look.shape, in: rect)
+    context.saveGState()
+    color.setFill()
+    path.fill()
+    UIColor.white.withAlphaComponent(0.9).setStroke()
+    path.lineWidth = 6
+    path.stroke()
+    context.restoreGState()
+}
+
+private func shareShapePath(_ shape: FeedShape, in rect: CGRect) -> UIBezierPath {
+    switch shape {
+    case .sphere:
+        return UIBezierPath(ovalIn: rect)
+    case .cube:
+        return UIBezierPath(roundedRect: rect.insetBy(dx: rect.width * 0.08, dy: rect.height * 0.08), cornerRadius: 18)
+    case .heart:
+        let path = UIBezierPath()
+        let x = rect.minX
+        let y = rect.minY
+        let w = rect.width
+        let h = rect.height
+        path.move(to: CGPoint(x: x + w * 0.5, y: y + h * 0.93))
+        path.addCurve(
+            to: CGPoint(x: x + w * 0.02, y: y + h * 0.36),
+            controlPoint1: CGPoint(x: x + w * 0.18, y: y + h * 0.72),
+            controlPoint2: CGPoint(x: x - w * 0.02, y: y + h * 0.55)
+        )
+        path.addCurve(
+            to: CGPoint(x: x + w * 0.5, y: y + h * 0.30),
+            controlPoint1: CGPoint(x: x + w * 0.02, y: y + h * 0.05),
+            controlPoint2: CGPoint(x: x + w * 0.34, y: y + h * 0.02)
+        )
+        path.addCurve(
+            to: CGPoint(x: x + w * 0.98, y: y + h * 0.36),
+            controlPoint1: CGPoint(x: x + w * 0.66, y: y + h * 0.02),
+            controlPoint2: CGPoint(x: x + w * 0.98, y: y + h * 0.05)
+        )
+        path.addCurve(
+            to: CGPoint(x: x + w * 0.5, y: y + h * 0.93),
+            controlPoint1: CGPoint(x: x + w * 1.02, y: y + h * 0.55),
+            controlPoint2: CGPoint(x: x + w * 0.82, y: y + h * 0.72)
+        )
+        path.close()
+        return path
+    case .diamond:
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+        path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+        path.addLine(to: CGPoint(x: rect.minX, y: rect.midY))
+        path.close()
+        return path
+    case .star:
+        let path = UIBezierPath()
+        let outer = min(rect.width, rect.height) / 2
+        let inner = outer * 0.38
+        for index in 0..<10 {
+            let angle = CGFloat(index) * .pi / 5 - .pi / 2
+            let radius = index % 2 == 0 ? outer : inner
+            let point = CGPoint(x: rect.midX + cos(angle) * radius, y: rect.midY + sin(angle) * radius)
+            if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+        }
+        path.close()
+        return path
+    case .drop:
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+        path.addQuadCurve(to: CGPoint(x: rect.midX, y: rect.maxY), controlPoint: CGPoint(x: rect.maxX, y: rect.midY))
+        path.addQuadCurve(to: CGPoint(x: rect.midX, y: rect.minY), controlPoint: CGPoint(x: rect.minX, y: rect.midY))
+        path.close()
+        return path
+    }
+}
+
 private enum SharePresenter {
-    static func present(image: UIImage?, caption: String) {
-        var items: [Any] = [caption]
-        if let image { items.insert(image, at: 0) }
+    static func present(image: UIImage, caption: String) {
+        let items: [Any] = [image, caption]
         let activity = UIActivityViewController(activityItems: items, applicationActivities: nil)
         guard let presenter = topViewController() else { return }
         if let popover = activity.popoverPresentationController {
@@ -1011,6 +1095,197 @@ private enum SharePresenter {
         }
         return top
     }
+}
+
+private struct DeleteCardButton: View {
+    var name: String
+    var onDelete: () -> Void
+    @State private var anchor: UIView?
+
+    var body: some View {
+        Button {
+            DeletePrompt.present(name: name, source: anchor, onDelete: onDelete)
+        } label: {
+            Text("删除")
+                .font(.system(size: 14, weight: .semibold, design: .rounded))
+                .foregroundColor(Theme.coral)
+                .padding(.horizontal, 12)
+                .frame(minHeight: 44)
+                .background(Color.white.opacity(0.08))
+                .clipShape(Capsule())
+        }
+        .buttonStyle(.plain)
+        .background(AnchorCatcher { anchor = $0 })
+    }
+}
+
+private struct AnchorCatcher: UIViewRepresentable {
+    var onView: (UIView) -> Void
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.isUserInteractionEnabled = false
+        view.backgroundColor = .clear
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async { onView(uiView) }
+    }
+}
+
+private enum DeletePrompt {
+    static func present(name: String, source: UIView?, onDelete: @escaping () -> Void) {
+        guard let presenter = frontMostController() else { return }
+        let regular = presenter.traitCollection.horizontalSizeClass == .regular
+            || presenter.traitCollection.userInterfaceIdiom == .pad
+        let alert = UIAlertController(
+            title: "删除「\(name)」？",
+            message: "这张卡会从列表和本局里去掉。",
+            preferredStyle: regular ? .actionSheet : .alert
+        )
+        alert.addAction(UIAlertAction(title: "删除", style: .destructive) { _ in onDelete() })
+        if regular, let popover = alert.popoverPresentationController {
+            let anchor = (source?.window == nil ? nil : source) ?? presenter.view!
+            popover.sourceView = anchor
+            popover.sourceRect = anchor.bounds.isEmpty
+                ? CGRect(x: presenter.view.bounds.midX, y: presenter.view.bounds.midY, width: 1, height: 1)
+                : anchor.bounds
+            popover.permittedArrowDirections = [.up, .down]
+            // A cancel-styled action is left out of a popover, so 取消 stays a visible button.
+            alert.addAction(UIAlertAction(title: "取消", style: .default, handler: nil))
+        } else {
+            alert.addAction(UIAlertAction(title: "取消", style: .cancel, handler: nil))
+        }
+        presenter.present(alert, animated: true)
+    }
+}
+
+private struct ScrollAnchor: UIViewRepresentable {
+    var name: String
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.isUserInteractionEnabled = false
+        view.accessibilityIdentifier = name
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        uiView.accessibilityIdentifier = name
+    }
+}
+
+private struct EditorKeyboardLift: UIViewRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView()
+        view.isUserInteractionEnabled = false
+        context.coordinator.host = view
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        context.coordinator.host = uiView
+        context.coordinator.install()
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    final class Coordinator: NSObject {
+        weak var host: UIView?
+        private var tokens: [NSObjectProtocol] = []
+
+        func install() {
+            guard tokens.isEmpty else { return }
+            let names = [
+                UIResponder.keyboardWillChangeFrameNotification,
+                UIResponder.keyboardDidShowNotification,
+            ]
+            tokens = names.map { name in
+                NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] note in
+                    self?.lift(note)
+                }
+            }
+        }
+
+        func remove() {
+            tokens.forEach { NotificationCenter.default.removeObserver($0) }
+            tokens.removeAll()
+        }
+
+        func lift(_ note: Notification) {
+            guard let host, let window = host.window, let scroll = host.enclosingScrollView() else { return }
+            guard let end = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
+            let space = window.windowScene?.screen.coordinateSpace
+            let keyboard = space.map { window.convert(end, from: $0) } ?? end
+            guard keyboard.minY < window.bounds.maxY - 1 else { return }
+            let limit = keyboard.minY - 16
+            var overflow: CGFloat = 0
+            if let focus = window.firstResponderView() {
+                overflow = max(overflow, focus.convert(focus.bounds, to: window).maxY - limit)
+            }
+            if let marker = window.view(withAccessibilityIdentifier: "feed.particles") {
+                let frame = marker.convert(marker.bounds, to: window)
+                let overlap = frame.maxY - limit
+                // Only the small tuck under the 完成 bar. Don't jump the form to a row that is still far below.
+                if overlap > 0, overlap < 88, frame.minY < limit {
+                    overflow = max(overflow, overlap)
+                }
+            }
+            guard overflow > 1 else { return }
+            let extra = scroll.adjustedContentInset.bottom
+            let maxOffset = max(0, scroll.contentSize.height + extra - scroll.bounds.height)
+            let target = min(max(0, scroll.contentOffset.y + overflow), maxOffset)
+            let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
+            UIView.animate(withDuration: duration) {
+                scroll.setContentOffset(CGPoint(x: 0, y: target), animated: false)
+            }
+        }
+    }
+}
+
+private extension UIView {
+    func enclosingScrollView() -> UIScrollView? {
+        var current: UIView? = superview
+        while let view = current {
+            if let scroll = view as? UIScrollView { return scroll }
+            current = view.superview
+        }
+        return nil
+    }
+
+    func firstResponderView() -> UIView? {
+        if isFirstResponder { return self }
+        for subview in subviews {
+            if let found = subview.firstResponderView() { return found }
+        }
+        return nil
+    }
+
+    func view(withAccessibilityIdentifier identifier: String) -> UIView? {
+        if accessibilityIdentifier == identifier { return self }
+        for subview in subviews {
+            if let found = subview.view(withAccessibilityIdentifier: identifier) { return found }
+        }
+        return nil
+    }
+}
+
+private func frontMostController() -> UIViewController? {
+    let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+    let window = scenes.flatMap(\.windows).first(where: \.isKeyWindow) ?? scenes.flatMap(\.windows).first
+    var top = window?.rootViewController
+    while let presented = top?.presentedViewController {
+        top = presented
+    }
+    if let nav = top as? UINavigationController {
+        top = nav.visibleViewController ?? nav
+    }
+    return top
 }
 
 private struct KeyboardDismissInstaller: UIViewRepresentable {
