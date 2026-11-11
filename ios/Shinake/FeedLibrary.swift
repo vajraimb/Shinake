@@ -36,8 +36,10 @@ final class FeedLibrary: ObservableObject {
     @Published private(set) var gameCenterOn = false
     @Published private(set) var remoteScores: [BoardEntry] = []
     @Published private(set) var remoteWeekly: [BoardEntry] = []
+    @Published var banner: String?
 
     private let defaults: UserDefaults
+    private var bannerToken = 0
     private let storageKey = "shinake.feeds.v1"
     private var askedGameCenter = false
 
@@ -148,6 +150,17 @@ final class FeedLibrary: ObservableObject {
             submit(score: score)
         }
         persist()
+    }
+
+    func flash(_ text: String?) {
+        guard let text, !text.isEmpty else { return }
+        bannerToken += 1
+        let token = bannerToken
+        banner = text
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.4) { [weak self] in
+            guard let self, self.bannerToken == token else { return }
+            self.banner = nil
+        }
     }
 
     func authenticateIfNeeded() {

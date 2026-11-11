@@ -155,12 +155,22 @@ final class AppModel: ObservableObject {
     }
 
     func restart() {
+        recordFeedingIfLeaving()
         begin(game.mode)
     }
 
     func backToTitle() {
+        recordFeedingIfLeaving()
         screen = game.mode == .feeding ? .lab : .title
         hudTick += 1
+    }
+
+    /// A feeding score counts when the run ends, including pause → 回实验室
+    /// and 重新开始. Death still records from the frame loop; the flag stops a second write.
+    private func recordFeedingIfLeaving() {
+        guard game.mode == .feeding, !loggedFeedResult else { return }
+        loggedFeedResult = true
+        library.finishRun(score: game.score, recipes: game.eatenRecipes)
     }
 
     func pause() {

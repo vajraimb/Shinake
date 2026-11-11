@@ -400,7 +400,7 @@ final class GameSceneController {
         let half = Float(snapshot.grid - 1) * 0.5
         let pulse = 1 + 0.07 * sin(Float(time) * 3.2)
         for pellet in snapshot.foods {
-            let nodeKey = pellet.recipe.map { "recipe-\($0.id)-\($0.look.shape.rawValue)" } ?? pellet.kind.rawValue
+            let nodeKey = pellet.recipe.map(recipeKey) ?? pellet.kind.rawValue
             let node: SCNNode
             if let existing = foodNodes[pellet.id], existing.name == nodeKey {
                 node = existing
@@ -428,7 +428,16 @@ final class GameSceneController {
                 let floorY = -half + 0.05
                 shadow.position = SCNVector3(0, floorY - node.position.y, 0)
             }
+            if pellet.recipe != nil {
+                animateRecipe(node)
+            }
         }
+    }
+
+    private func recipeKey(_ design: FeedDesign) -> String {
+        let rares = design.effects.filter(\.isRare).map(\.rawValue).joined(separator: ",")
+        let look = design.look
+        return "\(design.id)|\(look.shape.rawValue)|\(look.rareLook?.rawValue ?? "-")|\(rares)|\(look.trail)|\(look.particles)"
     }
 
     private func makeFood(_ kind: FoodKind) -> SCNNode {
@@ -470,54 +479,110 @@ final class GameSceneController {
     private func makeRecipe(_ design: FeedDesign) -> SCNNode {
         let primary = uiColor(design.look.primary)
         let secondary = uiColor(design.look.secondary)
-        let geometry: SCNGeometry
-        switch design.look.shape {
-        case .sphere, .heart:
-            geometry = SCNSphere(radius: 0.26)
-        case .cube:
-            geometry = SCNBox(width: 0.44, height: 0.44, length: 0.44, chamferRadius: 0.08)
-        case .star:
-            geometry = SCNSphere(radius: 0.22)
-        case .diamond:
-            geometry = SCNBox(width: 0.36, height: 0.36, length: 0.36, chamferRadius: 0.02)
-        case .drop:
-            geometry = SCNCone(topRadius: 0.04, bottomRadius: 0.22, height: 0.48)
+        let root = SCNNode()
+        let body = foodShape(design.look.shape)
+        body.name = bodyName(for: design)
+        let material = foodMaterial(design, primary: primary, secondary: secondary)
+        paint(body, material)
+        root.addChildNode(body)
+
+        if design.look.rareLook == .prism {
+            let shell = body.clone()
+            shell.name = "prismShell"
+            shell.scale = SCNVector3(1.16, 1.16, 1.16)
+            let glass = SCNMaterial()
+            glass.lightingModel = .constant
+            glass.diffuse.contents = UIColor.white.withAlphaComponent(0.18)
+            glass.emission.contents = UIColor(red: 0.7, green: 0.9, blue: 1, alpha: 1)
+            glass.transparency = 0.55
+            glass.isDoubleSided = true
+            paint(shell, glass)
+            root.addChildNode(shell)
         }
-        let material = glossMaterial(primary)
-        let glow = CGFloat(design.look.glow)
-        material.emission.contents = secondary.withAlphaComponent(0.2 + 0.6 * glow)
         if design.look.rareLook == .voidGlass {
-            material.transparency = 0.72
-            material.emission.contents = secondary.withAlphaComponent(0.9)
+            let rim = body.clone()
+            rim.name = "glassRim"
+            rim.scale = SCNVector3(1.08, 1.08, 1.08)
+            let edge = SCNMaterial()
+            edge.lightingModel = .constant
+            edge.diffuse.contents = secondary.withAlphaComponent(0.15)
+            edge.emission.contents = secondary
+            edge.transparency = 0.72
+            edge.isDoubleSided = true
+            paint(rim, edge)
+            root.addChildNode(rim)
         }
-        geometry.materials = [material]
-        let node = SCNNode(geometry: geometry)
-        if design.look.shape == .diamond {
-            node.eulerAngles = SCNVector3(0.7, 0.4, 0.6)
+        if design.look.rareLook == .ember {
+            for index in 0..<6 {
+                let bit = SCNSphere(radius: 0.035)
+                bit.segmentCount = 8
+                let mat = SCNMaterial()
+                mat.lightingModel = .constant
+                mat.diffuse.contents = index % 2 == 0
+                    ? UIColor(red: 1, green: 0.45, blue: 0.08, alpha: 1)
+                    : UIColor(red: 1, green: 0.82, blue: 0.2, alpha: 1)
+                bit.materials = [mat]
+                let node = SCNNode(geometry: bit)
+                node.name = "emberBit"
+                root.addChildNode(node)
+            }
         }
-        if design.look.shape == .heart {
-            node.scale = SCNVector3(1, 0.86, 0.9)
+        if design.effects.contains(.golden) {
+            let ring = SCNTorus(ringRadius: 0.34, pipeRadius: 0.018)
+            let gold = SCNMaterial()
+            gold.lightingModel = .constant
+            gold.diffuse.contents = UIColor(red: 1, green: 0.82, blue: 0.28, alpha: 1)
+            gold.emission.contents = UIColor(red: 1, green: 0.72, blue: 0.15, alpha: 1)
+            ring.materials = [gold]
+            let node = SCNNode(geometry: ring)
+            node.name = "goldenRing"
+            node.eulerAngles.x = 1.2
+            root.addChildNode(node)
+        }
+        if design.effects.contains(.timeFreeze) {
+            let ring = SCNTorus(ringRadius: 0.38, pipeRadius: 0.012)
+            let ice = SCNMaterial()
+            ice.lightingModel = .constant
+            ice.diffuse.contents = UIColor(red: 0.75, green: 0.92, blue: 1, alpha: 1)
+            ice.emission.contents = UIColor(red: 0.65, green: 0.88, blue: 1, alpha: 1)
+            ring.materials = [ice]
+            let node = SCNNode(geometry: ring)
+            node.name = "freezeRing"
+            root.addChildNode(node)
+        }
+        if design.effects.contains(.phantomTrail) {
+            for index in 0..<2 {
+                let ghost = body.clone()
+                ghost.name = "phantom"
+                ghost.opacity = 0.28
+                ghost.position = SCNVector3(-0.16 - Float(index) * 0.12, 0.02, 0)
+                root.addChildNode(ghost)
+            }
         }
         if design.look.trail || design.look.rareLook == .ember {
-            let beam = SCNCylinder(radius: 0.045, height: 1)
+            let beam = SCNCylinder(radius: 0.04, height: 1)
             let beamMaterial = SCNMaterial()
             beamMaterial.lightingModel = .constant
-            beamMaterial.diffuse.contents = secondary.withAlphaComponent(0.45)
+            let beamColor = design.look.rareLook == .ember
+                ? UIColor(red: 1, green: 0.42, blue: 0.08, alpha: 1)
+                : secondary
+            beamMaterial.diffuse.contents = beamColor.withAlphaComponent(0.45)
             beam.materials = [beamMaterial]
             let beamNode = SCNNode(geometry: beam)
             beamNode.name = "beacon"
-            node.addChildNode(beamNode)
+            root.addChildNode(beamNode)
         }
-        if design.look.particles || design.look.rareLook == .prism {
-            for _ in 0..<4 {
-                let bit = SCNSphere(radius: 0.045)
+        if design.look.particles || design.look.rareLook == .prism || design.effects.contains(.rainbow) {
+            for _ in 0..<5 {
+                let bit = SCNSphere(radius: 0.04)
+                bit.segmentCount = 8
                 let bitMaterial = SCNMaterial()
                 bitMaterial.lightingModel = .constant
                 bitMaterial.diffuse.contents = secondary
                 bit.materials = [bitMaterial]
                 let bitNode = SCNNode(geometry: bit)
                 bitNode.name = "spark"
-                node.addChildNode(bitNode)
+                root.addChildNode(bitNode)
             }
         }
         let light = SCNLight()
@@ -525,8 +590,233 @@ final class GameSceneController {
         light.intensity = CGFloat(40 + 160 * design.look.glow)
         light.color = primary
         light.attenuationEndDistance = 3.2
-        node.light = light
+        root.light = light
+        return root
+    }
+
+    private func bodyName(for design: FeedDesign) -> String {
+        switch design.look.rareLook {
+        case .ember: return "emberBody"
+        case .voidGlass: return "glassBody"
+        case .prism: return "prismBody"
+        case .none:
+            return design.effects.contains(.rainbow) ? "prismBody" : "plainBody"
+        }
+    }
+
+    private func foodShape(_ shape: FeedShape) -> SCNNode {
+        switch shape {
+        case .sphere:
+            let sphere = SCNSphere(radius: 0.24)
+            sphere.segmentCount = 24
+            return SCNNode(geometry: sphere)
+        case .cube:
+            return SCNNode(geometry: SCNBox(width: 0.42, height: 0.42, length: 0.42, chamferRadius: 0.04))
+        case .heart:
+            let node = extruded(heartBezier(), depth: 0.2)
+            node.eulerAngles = SCNVector3(-0.35, 0.55, 0)
+            return node
+        case .star:
+            let node = SCNNode(geometry: starPrism())
+            node.eulerAngles = SCNVector3(-0.45, 0.35, 0.15)
+            return node
+        case .diamond:
+            return SCNNode(geometry: octahedron(radius: 0.30))
+        case .drop:
+            return dropNode()
+        }
+    }
+
+    private func foodMaterial(_ design: FeedDesign, primary: UIColor, secondary: UIColor) -> SCNMaterial {
+        let glow = CGFloat(design.look.glow)
+        let material = glossMaterial(primary)
+        material.emission.contents = secondary.withAlphaComponent(0.25 + 0.55 * glow)
+        switch design.look.rareLook {
+        case .voidGlass:
+            material.diffuse.contents = UIColor(
+                red: CGFloat(design.look.primary.red) * 0.16,
+                green: CGFloat(design.look.primary.green) * 0.16,
+                blue: CGFloat(design.look.primary.blue) * 0.22,
+                alpha: 1
+            )
+            material.transparency = 0.55
+            material.emission.contents = secondary.withAlphaComponent(0.9)
+            material.specular.contents = UIColor.white
+        case .ember:
+            material.diffuse.contents = UIColor(red: 1, green: 0.32, blue: 0.06, alpha: 1)
+            material.emission.contents = UIColor(red: 1, green: 0.45, blue: 0.05, alpha: 1)
+        case .prism, .none:
+            break
+        }
+        if design.effects.contains(.golden) {
+            material.emission.contents = UIColor(red: 1, green: 0.78, blue: 0.25, alpha: 1)
+        }
+        return material
+    }
+
+    private func animateRecipe(_ node: SCNNode) {
+        let hue = CGFloat(time * 0.22).truncatingRemainder(dividingBy: 1)
+        let rainbow = UIColor(hue: hue, saturation: 0.72, brightness: 1, alpha: 1)
+        if let body = node.childNode(withName: "prismBody", recursively: false) {
+            let material = body.geometry?.firstMaterial ?? body.childNodes.first?.geometry?.firstMaterial
+            material?.diffuse.contents = rainbow
+            material?.emission.contents = rainbow.withAlphaComponent(0.75)
+            paintColor(body, rainbow, emission: rainbow.withAlphaComponent(0.7))
+        }
+        if let shell = node.childNode(withName: "prismShell", recursively: false) {
+            let shift = UIColor(hue: (hue + 0.33).truncatingRemainder(dividingBy: 1), saturation: 0.8, brightness: 1, alpha: 1)
+            paintColor(shell, shift.withAlphaComponent(0.4), emission: shift)
+            shell.eulerAngles.y = Float(time) * 0.7
+        }
+        if let body = node.childNode(withName: "emberBody", recursively: false) {
+            let flicker = 0.55 + 0.45 * abs(sin(time * 8))
+            let hot = UIColor(red: 1, green: CGFloat(0.28 + 0.35 * flicker), blue: 0.05, alpha: 1)
+            paintColor(body, hot, emission: hot)
+        }
+        for (index, bit) in node.childNodes.filter({ $0.name == "emberBit" }).enumerated() {
+            let phase = (time * 0.65 + Double(index) * 0.16).truncatingRemainder(dividingBy: 1)
+            bit.position = SCNVector3(sin(Float(index) * 1.7) * 0.18, Float(-0.05 + phase * 0.5), cos(Float(index) * 1.3) * 0.18)
+            bit.opacity = CGFloat(1 - phase)
+        }
+        let sparks = node.childNodes.filter { $0.name == "spark" }
+        for (index, spark) in sparks.enumerated() {
+            let shift = UIColor(hue: (hue + CGFloat(index) * 0.18).truncatingRemainder(dividingBy: 1), saturation: 0.7, brightness: 1, alpha: 1)
+            spark.geometry?.firstMaterial?.diffuse.contents = shift
+            spark.geometry?.firstMaterial?.emission.contents = shift
+        }
+        if let ring = node.childNode(withName: "freezeRing", recursively: false) {
+            ring.eulerAngles.z = Float(time) * 0.8
+        }
+        if let ring = node.childNode(withName: "goldenRing", recursively: false) {
+            ring.eulerAngles.y = Float(time) * 1.1
+        }
+    }
+
+    private func extruded(_ path: UIBezierPath, depth: CGFloat) -> SCNNode {
+        path.flatness = 0.04
+        let shape = SCNShape(path: path, extrusionDepth: depth)
+        let node = SCNNode(geometry: shape)
+        let bounds = path.bounds
+        node.pivot = SCNMatrix4MakeTranslation(Float(bounds.midX), Float(bounds.midY), Float(depth * 0.5))
         return node
+    }
+
+    /// Lobes up, point down, centered near the origin. Y is up, matching SceneKit.
+    private func heartBezier() -> UIBezierPath {
+        let path = UIBezierPath()
+        path.move(to: CGPoint(x: 0, y: -0.28))
+        path.addCurve(
+            to: CGPoint(x: -0.26, y: 0.04),
+            controlPoint1: CGPoint(x: -0.02, y: -0.08),
+            controlPoint2: CGPoint(x: -0.30, y: -0.12)
+        )
+        path.addCurve(
+            to: CGPoint(x: 0, y: 0.02),
+            controlPoint1: CGPoint(x: -0.22, y: 0.24),
+            controlPoint2: CGPoint(x: -0.06, y: 0.20)
+        )
+        path.addCurve(
+            to: CGPoint(x: 0.26, y: 0.04),
+            controlPoint1: CGPoint(x: 0.06, y: 0.20),
+            controlPoint2: CGPoint(x: 0.22, y: 0.24)
+        )
+        path.addCurve(
+            to: CGPoint(x: 0, y: -0.28),
+            controlPoint1: CGPoint(x: 0.30, y: -0.12),
+            controlPoint2: CGPoint(x: 0.02, y: -0.08)
+        )
+        path.close()
+        return path
+    }
+
+    private func starPrism() -> SCNGeometry {
+        let outer: Float = 0.32
+        let inner: Float = 0.12
+        let depth: Float = 0.16
+        var top: [SCNVector3] = []
+        var bottom: [SCNVector3] = []
+        for index in 0..<10 {
+            let angle = Float(index) * .pi / 5 + .pi / 2
+            let radius = index % 2 == 0 ? outer : inner
+            top.append(SCNVector3(cos(angle) * radius, sin(angle) * radius, depth / 2))
+            bottom.append(SCNVector3(cos(angle) * radius, sin(angle) * radius, -depth / 2))
+        }
+        let centerTop = SCNVector3(0, 0, depth / 2)
+        let centerBottom = SCNVector3(0, 0, -depth / 2)
+        var faces: [(SCNVector3, SCNVector3, SCNVector3)] = []
+        for index in 0..<10 {
+            let next = (index + 1) % 10
+            faces.append((centerTop, top[index], top[next]))
+            faces.append((centerBottom, bottom[next], bottom[index]))
+            faces.append((top[index], bottom[index], bottom[next]))
+            faces.append((top[index], bottom[next], top[next]))
+        }
+        return faceted(faces)
+    }
+
+    private func octahedron(radius: Float) -> SCNGeometry {
+        let r = radius
+        let top = SCNVector3(0, r, 0)
+        let bottom = SCNVector3(0, -r, 0)
+        let px = SCNVector3(r, 0, 0)
+        let nx = SCNVector3(-r, 0, 0)
+        let pz = SCNVector3(0, 0, r)
+        let nz = SCNVector3(0, 0, -r)
+        return faceted([
+            (top, px, pz), (top, pz, nx), (top, nx, nz), (top, nz, px),
+            (bottom, pz, px), (bottom, nx, pz), (bottom, nz, nx), (bottom, px, nz),
+        ])
+    }
+
+    private func faceted(_ faces: [(SCNVector3, SCNVector3, SCNVector3)]) -> SCNGeometry {
+        var verts: [SCNVector3] = []
+        var normals: [SCNVector3] = []
+        for (a, b, c) in faces {
+            let n = faceNormal(a, b, c)
+            verts.append(contentsOf: [a, b, c])
+            normals.append(contentsOf: [n, n, n])
+        }
+        let vertexSource = SCNGeometrySource(vertices: verts)
+        let normalSource = SCNGeometrySource(normals: normals)
+        let indices = Array(UInt32(0)..<UInt32(verts.count))
+        let indexData = indices.withUnsafeBufferPointer { Data(buffer: $0) }
+        let element = SCNGeometryElement(
+            data: indexData,
+            primitiveType: .triangles,
+            primitiveCount: faces.count,
+            bytesPerIndex: MemoryLayout<UInt32>.size
+        )
+        return SCNGeometry(sources: [vertexSource, normalSource], elements: [element])
+    }
+
+    private func dropNode() -> SCNNode {
+        let root = SCNNode()
+        let cone = SCNCone(topRadius: 0.015, bottomRadius: 0.16, height: 0.36)
+        cone.radialSegmentCount = 22
+        let tip = SCNNode(geometry: cone)
+        tip.position = SCNVector3(0, 0.12, 0)
+        let ball = SCNSphere(radius: 0.17)
+        ball.segmentCount = 22
+        let belly = SCNNode(geometry: ball)
+        belly.position = SCNVector3(0, -0.05, 0)
+        root.addChildNode(tip)
+        root.addChildNode(belly)
+        return root
+    }
+
+    private func paint(_ node: SCNNode, _ material: SCNMaterial) {
+        if node.geometry != nil {
+            node.geometry?.materials = [material.copy() as? SCNMaterial ?? material]
+        }
+        node.childNodes.forEach { paint($0, material) }
+    }
+
+    private func paintColor(_ node: SCNNode, _ color: UIColor, emission: UIColor) {
+        node.geometry?.materials.forEach {
+            $0.diffuse.contents = color
+            $0.emission.contents = emission
+        }
+        node.childNodes.forEach { paintColor($0, color, emission: emission) }
     }
 
     private func uiColor(_ color: FeedColor) -> UIColor {
@@ -679,6 +969,23 @@ private func glossMaterial(_ color: UIColor) -> SCNMaterial {
     material.shininess = 0.45
     material.emission.contents = color.withAlphaComponent(0.45)
     return material
+}
+
+private func faceNormal(_ a: SCNVector3, _ b: SCNVector3, _ c: SCNVector3) -> SCNVector3 {
+    let ux = b.x - a.x
+    let uy = b.y - a.y
+    let uz = b.z - a.z
+    let vx = c.x - a.x
+    let vy = c.y - a.y
+    let vz = c.z - a.z
+    var n = SCNVector3(uy * vz - uz * vy, uz * vx - ux * vz, ux * vy - uy * vx)
+    let length = sqrt(n.x * n.x + n.y * n.y + n.z * n.z)
+    if length > 0.0001 {
+        n.x /= length
+        n.y /= length
+        n.z /= length
+    }
+    return n
 }
 
 private func mix(_ a: SCNVector3, _ b: SCNVector3, _ t: Float) -> SCNVector3 {

@@ -15,7 +15,9 @@ struct FeedLabView: View {
 
     var body: some View {
         NavigationStack {
-            ScrollView {
+            ZStack {
+                Theme.bg.ignoresSafeArea()
+                ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
                     Text("设计自己的食物，融出稀有，再丢进立方体里。")
                         .font(.system(size: 15, weight: .medium, design: .rounded))
@@ -35,11 +37,14 @@ struct FeedLabView: View {
                     labLink("排行榜", subtitle: "这台手机，能连上就同步 Game Center", page: .ranks)
                 }
                 .padding(20)
+                .padding(.bottom, 24)
+                }
             }
-            .background(Theme.bg.ignoresSafeArea())
-            .navigationTitle("投喂实验室")
-            .navigationBarTitleDisplayMode(.inline)
-            .toolbar {
+        .navigationTitle("投喂实验室")
+        .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Theme.bg, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbar {
                 ToolbarItem(placement: .navigationBarLeading) {
                     Button("返回") { model.screen = .title }
                         .foregroundColor(Theme.lime)
@@ -61,6 +66,25 @@ struct FeedLabView: View {
             }
         }
         .tint(Theme.lime)
+        .toolbarBackground(Theme.bg, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .background(KeyboardDismissInstaller())
+        .overlay(alignment: .bottom) {
+            if let banner = library.banner {
+                Text(banner)
+                    .font(.system(size: 15, weight: .semibold, design: .rounded))
+                    .foregroundColor(Theme.ink)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 16)
+                    .padding(.vertical, 10)
+                    .background(Theme.lime)
+                    .clipShape(Capsule())
+                    .padding(.horizontal, 20)
+                    .padding(.bottom, 28)
+                    .transition(.opacity)
+            }
+        }
+        .animation(.easeOut(duration: 0.2), value: library.banner)
     }
 
     private func labLink(_ title: String, subtitle: String, page: LabPage) -> some View {
@@ -88,7 +112,6 @@ private struct FeedEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft = FeedDesign.blank(id: "draft")
     @State private var loaded = false
-    @State private var notice: String?
 
     private let swatches: [FeedColor] = [
         FeedColor(red: 0.95, green: 0.32, blue: 0.34),
@@ -102,7 +125,9 @@ private struct FeedEditor: View {
     ]
 
     var body: some View {
-        ScrollView {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView {
             VStack(alignment: .leading, spacing: 18) {
                 FeedPreview(design: draft, height: 180)
                     .frame(maxWidth: .infinity)
@@ -125,14 +150,18 @@ private struct FeedEditor: View {
                         ForEach(FeedShape.allCases, id: \.self) { shape in
                             Button {
                                 draft.look.shape = shape
+                                hideKeyboard()
                             } label: {
-                                Text(shape.title)
-                                    .font(.system(size: 15, weight: .semibold, design: .rounded))
-                                    .padding(.horizontal, 14)
-                                    .frame(height: 40)
-                                    .background(draft.look.shape == shape ? Theme.lime : Theme.card)
-                                    .foregroundColor(draft.look.shape == shape ? Theme.ink : .white)
-                                    .clipShape(Capsule())
+                                HStack(spacing: 6) {
+                                    FeedMark(design: draft.withShape(shape), side: 22)
+                                    Text(shape.title)
+                                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                                }
+                                .padding(.horizontal, 12)
+                                .frame(height: 44)
+                                .background(draft.look.shape == shape ? Theme.lime : Theme.card)
+                                .foregroundColor(draft.look.shape == shape ? Theme.ink : .white)
+                                .clipShape(Capsule())
                             }
                             .buttonStyle(.plain)
                         }
@@ -168,18 +197,23 @@ private struct FeedEditor: View {
                     .font(.system(size: 13, weight: .medium, design: .rounded))
                     .foregroundColor(Theme.faint)
                     .fixedSize(horizontal: false, vertical: true)
-                if let notice {
-                    Text(notice)
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundColor(Theme.lime)
-                }
                 PrimaryButton(title: "保存") { save() }
             }
             .padding(20)
+            .padding(.bottom, 24)
+            }
+            .scrollDismissesKeyboard(.interactively)
         }
-        .background(Theme.bg.ignoresSafeArea())
         .navigationTitle(existingID == nil ? "新食物" : "改食物")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Theme.bg, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("完成") { hideKeyboard() }
+            }
+        }
         .onAppear(perform: load)
     }
 
@@ -255,14 +289,15 @@ private struct FeedEditor: View {
     }
 
     private func save() {
+        hideKeyboard()
         let clean = draft.sanitized()
         guard clean.isLegal else {
-            notice = "超预算了，先拿掉一个效果"
+            library.flash("超预算了，先拿掉一个效果")
             return
         }
         draft = clean
         library.save(clean)
-        notice = "已保存「\(clean.name)」"
+        library.flash("已保存「\(clean.name)」")
         dismiss()
     }
 
@@ -274,19 +309,13 @@ private struct FeedEditor: View {
 private struct FeedCards: View {
     @ObservedObject var library: FeedLibrary
     @State private var importText = ""
-    @State private var notice: String?
-    @State private var shareItems: [Any] = []
-    @State private var showShare = false
+    @State private var pendingDelete: FeedDesign?
 
     var body: some View {
-        ScrollView {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView {
             VStack(spacing: 14) {
-                if let notice {
-                    Text(notice)
-                        .font(.system(size: 14, weight: .semibold, design: .rounded))
-                        .foregroundColor(Theme.lime)
-                        .frame(maxWidth: .infinity, alignment: .leading)
-                }
                 ForEach(library.designs) { design in
                     card(design)
                 }
@@ -309,12 +338,35 @@ private struct FeedCards: View {
                 }
             }
             .padding(20)
+            .padding(.bottom, 24)
+            }
+            .scrollDismissesKeyboard(.interactively)
         }
-        .background(Theme.bg.ignoresSafeArea())
         .navigationTitle("我的卡片")
         .navigationBarTitleDisplayMode(.inline)
-        .sheet(isPresented: $showShare) {
-            ActivityView(items: shareItems)
+        .toolbarBackground(Theme.bg, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
+        .toolbar {
+            ToolbarItemGroup(placement: .keyboard) {
+                Spacer()
+                Button("完成") { hideKeyboard() }
+            }
+        }
+        .confirmationDialog(
+            "删除「\(pendingDelete?.name ?? "这张卡")」？",
+            isPresented: Binding(
+                get: { pendingDelete != nil },
+                set: { if !$0 { pendingDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("删除", role: .destructive) {
+                if let pendingDelete { library.delete(pendingDelete.id) }
+                pendingDelete = nil
+            }
+            Button("取消", role: .cancel) { pendingDelete = nil }
+        } message: {
+            Text("这张卡会从列表和本局里去掉。")
         }
     }
 
@@ -343,16 +395,15 @@ private struct FeedCards: View {
                 }
                 .buttonStyle(.plain)
                 Button {
-                    notice = library.toggleLoadout(design.id)
+                    library.flash(library.toggleLoadout(design.id))
                 } label: {
                     chipLabel(armed ? "撤下" : "上场")
                 }
                 .buttonStyle(.plain)
                 Button { share(design) } label: { chipLabel("分享") }
                     .buttonStyle(.plain)
-                Button { library.delete(design.id) } label: { chipLabel("删除") }
+                Button { pendingDelete = design } label: { chipLabel("删除", tint: Theme.coral) }
                     .buttonStyle(.plain)
-                    .foregroundColor(Theme.coral)
             }
         }
         .padding(14)
@@ -360,10 +411,10 @@ private struct FeedCards: View {
         .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
     }
 
-    private func chipLabel(_ title: String) -> some View {
+    private func chipLabel(_ title: String, tint: Color = .white) -> some View {
         Text(title)
             .font(.system(size: 14, weight: .semibold, design: .rounded))
-            .foregroundColor(.white)
+            .foregroundColor(tint)
             .padding(.horizontal, 12)
             .frame(minHeight: 44)
             .background(Color.white.opacity(0.08))
@@ -379,28 +430,25 @@ private struct FeedCards: View {
     }
 
     private func share(_ design: FeedDesign) {
+        hideKeyboard()
         guard let code = FeedCodec.encode(design) else {
-            notice = "这张卡超出预算，不能分享"
+            library.flash("这张卡超出预算，不能分享")
             return
         }
         let card = FeedShareCard(design: design, code: code)
         let renderer = ImageRenderer(content: card)
-        renderer.scale = 2
+        renderer.scale = UIScreen.main.scale
         let caption = "食蛇投喂 \(design.name)\n\(code)"
-        if let image = renderer.uiImage {
-            shareItems = [image, caption]
-        } else {
-            shareItems = [caption]
-        }
-        showShare = true
+        SharePresenter.present(image: renderer.uiImage, caption: caption)
     }
 
     private func importCode() {
+        hideKeyboard()
         if let name = library.importCode(importText) {
-            notice = "已收入「\(name)」"
+            library.flash("已收入「\(name)」")
             importText = ""
         } else {
-            notice = "这段代码读不出来"
+            library.flash("这段代码读不出来")
         }
     }
 }
@@ -409,11 +457,12 @@ private struct FeedFusion: View {
     @ObservedObject var library: FeedLibrary
     @State private var left: String?
     @State private var right: String?
-    @State private var notice: String?
     @State private var result: FeedDesign?
 
     var body: some View {
-        ScrollView {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 if library.designs.count < 2 {
                     Text("先做两样食物，才能融合。")
@@ -431,20 +480,20 @@ private struct FeedFusion: View {
                         Text(result.name)
                             .font(.system(size: 18, weight: .bold, design: .rounded))
                             .foregroundColor(.white)
-                    }
-                    if let notice {
-                        Text(notice)
-                            .font(.system(size: 15, weight: .semibold, design: .rounded))
-                            .foregroundColor(Theme.lime)
-                            .fixedSize(horizontal: false, vertical: true)
+                        Text(cardCaption(result))
+                            .font(.system(size: 13, weight: .medium, design: .rounded))
+                            .foregroundColor(Theme.dim)
                     }
                 }
             }
             .padding(20)
+            .padding(.bottom, 24)
+            }
         }
-        .background(Theme.bg.ignoresSafeArea())
         .navigationTitle("融合")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Theme.bg, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .onAppear {
             left = left ?? library.designs.first?.id
             right = right ?? library.designs.dropFirst().first?.id
@@ -474,14 +523,21 @@ private struct FeedFusion: View {
         guard let outcome = library.fuse(left, right) else { return }
         result = outcome.design
         if let effect = outcome.rareEffect {
-            notice = "发现稀有效果「\(effect.title)」，已收入图鉴"
+            library.flash("发现稀有效果「\(effect.title)」，已收入图鉴")
         } else if let look = outcome.rareLook {
-            notice = "发现稀有外观「\(look.title)」，已收入图鉴"
+            library.flash("发现稀有外观「\(look.title)」，已收入图鉴")
         } else if outcome.design.look.rareLook != nil || outcome.design.effects.contains(where: \.isRare) {
-            notice = "「\(outcome.design.name)」带着稀有，已在图鉴里"
+            library.flash("「\(outcome.design.name)」带着稀有，已在图鉴里")
         } else {
-            notice = "合成了「\(outcome.design.name)」"
+            library.flash("合成了「\(outcome.design.name)」")
         }
+    }
+
+    private func cardCaption(_ design: FeedDesign) -> String {
+        let effects = design.effects.map(\.title).joined(separator: " ")
+        return [design.look.shape.title, design.look.rareLook?.title, effects.isEmpty ? "无效果" : effects]
+            .compactMap { $0 }
+            .joined(separator: " · ")
     }
 }
 
@@ -489,7 +545,9 @@ private struct FeedBestiary: View {
     @ObservedObject var library: FeedLibrary
 
     var body: some View {
-        ScrollView {
+        ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView {
             VStack(alignment: .leading, spacing: 10) {
                 Text("效果")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
@@ -506,10 +564,13 @@ private struct FeedBestiary: View {
                 }
             }
             .padding(20)
+            .padding(.bottom, 24)
+            }
         }
-        .background(Theme.bg.ignoresSafeArea())
         .navigationTitle("图鉴")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Theme.bg, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
     }
 
     private func row(title: String, detail: String, known: Bool) -> some View {
@@ -539,7 +600,9 @@ private struct FeedRanks: View {
         let weekRows = library.scores.filter { $0.week == theme.id }.prefix(10).map {
             BoardEntry(id: "w-\($0.id)", rank: 0, name: "本周", score: $0.score)
         }
-        return ScrollView {
+        return ZStack {
+            Theme.bg.ignoresSafeArea()
+            ScrollView {
             VStack(alignment: .leading, spacing: 14) {
                 Text(theme.title)
                     .font(.system(size: 16, weight: .semibold, design: .rounded))
@@ -556,10 +619,13 @@ private struct FeedRanks: View {
                 }
             }
             .padding(20)
+            .padding(.bottom, 24)
+            }
         }
-        .background(Theme.bg.ignoresSafeArea())
         .navigationTitle("排行榜")
         .navigationBarTitleDisplayMode(.inline)
+        .toolbarBackground(Theme.bg, for: .navigationBar)
+        .toolbarBackground(.visible, for: .navigationBar)
         .onAppear { library.authenticateIfNeeded() }
     }
 
@@ -591,19 +657,57 @@ private struct FeedRanks: View {
     }
 }
 
+struct FeedMark: View {
+    var design: FeedDesign
+    var side: CGFloat
+
+    var body: some View {
+        let lively = design.look.rareLook != nil || design.effects.contains(where: \.isRare)
+        return Group {
+            if lively {
+                TimelineView(.animation(minimumInterval: 1.0 / 12.0)) { context in
+                    mark(context.date.timeIntervalSinceReferenceDate)
+                }
+            } else {
+                mark(0)
+            }
+        }
+        .frame(width: side, height: side)
+        .accessibilityHidden(true)
+    }
+
+    private func mark(_ time: TimeInterval) -> some View {
+        Canvas { ctx, size in
+            let rect = CGRect(origin: .zero, size: size).insetBy(dx: 1, dy: 1)
+            FoodInk(design: design).drawShape(ctx, in: rect, cycle: time)
+        }
+    }
+}
+
 struct FeedPreview: View {
     var design: FeedDesign
     var height: CGFloat
+    var animate: Bool = true
 
     var body: some View {
-        TimelineView(.animation) { context in
-            let cycle = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 3.2) / 3.2
-            Canvas { ctx, size in
-                draw(ctx, size: size, cycle: cycle)
+        Group {
+            if animate {
+                TimelineView(.animation(minimumInterval: 1.0 / 30.0)) { context in
+                    let cycle = context.date.timeIntervalSinceReferenceDate.truncatingRemainder(dividingBy: 3.2) / 3.2
+                    canvas(cycle)
+                }
+            } else {
+                canvas(0.35)
             }
         }
         .frame(height: height)
         .accessibilityLabel("\(design.name) 预览")
+    }
+
+    private func canvas(_ cycle: Double) -> some View {
+        Canvas { ctx, size in
+            draw(ctx, size: size, cycle: cycle)
+        }
     }
 
     private func draw(_ ctx: GraphicsContext, size: CGSize, cycle: Double) {
@@ -612,13 +716,14 @@ struct FeedPreview: View {
         let foodX = size.width * 0.78
         let y = size.height * 0.55
         let headX = size.width * 0.18 + (foodX - size.width * 0.18 - 28) * travel
-        if design.look.trail {
+        let secondary = Color(red: design.look.secondary.red, green: design.look.secondary.green, blue: design.look.secondary.blue)
+        if design.look.trail || design.effects.contains(.phantomTrail) || design.look.rareLook == .ember {
             for index in 0..<4 {
                 let fade = 1 - Double(index) / 4
                 var mark = ctx
-                mark.opacity = 0.18 * fade
+                mark.opacity = 0.22 * fade
                 let blob = Path(ellipseIn: CGRect(x: headX - 18 - CGFloat(index) * 16, y: y - 8, width: 16, height: 16))
-                mark.fill(blob, with: .color(Color(red: design.look.secondary.red, green: design.look.secondary.green, blue: design.look.secondary.blue)))
+                mark.fill(blob, with: .color(secondary))
             }
         }
         for index in (0..<5).reversed() {
@@ -627,59 +732,15 @@ struct FeedPreview: View {
             let rect = CGRect(x: x - radius, y: y - radius, width: radius * 2, height: radius * 2)
             ctx.fill(Path(ellipseIn: rect), with: .color(Color(red: 0.62, green: 0.9, blue: 0.38)))
         }
-        let foodScale = bite > 0 ? max(0, 1 - bite) : 1
-        var food = ctx
-        food.opacity = 0.35 + 0.65 * design.look.glow
-        let side = 34 * foodScale
+        let foodScale = bite > 0 ? max(0.05, 1 - bite) : 1
+        let side = 40 * foodScale
         let rect = CGRect(x: foodX - side / 2, y: y - side / 2, width: side, height: side)
-        let path = foodPath(design.look.shape, in: rect)
-        food.fill(path, with: .color(Color(red: design.look.primary.red, green: design.look.primary.green, blue: design.look.primary.blue)))
-        if design.look.particles {
-            for index in 0..<5 {
-                let angle = cycle * 6 + Double(index) * 1.2
-                let px = foodX + CGFloat(cos(angle)) * 26
-                let py = y + CGFloat(sin(angle)) * 16
-                let dot = CGRect(x: px - 2, y: py - 2, width: 4, height: 4)
-                ctx.fill(Path(ellipseIn: dot), with: .color(Color(red: design.look.secondary.red, green: design.look.secondary.green, blue: design.look.secondary.blue)))
-            }
+        if design.look.glow > 0.05 {
+            var halo = ctx
+            halo.opacity = 0.28 * design.look.glow
+            halo.fill(Path(ellipseIn: rect.insetBy(dx: -8, dy: -8)), with: .color(secondary))
         }
-    }
-
-    private func foodPath(_ shape: FeedShape, in rect: CGRect) -> Path {
-        switch shape {
-        case .sphere, .heart:
-            return Path(ellipseIn: rect)
-        case .cube:
-            return Path(roundedRect: rect, cornerRadius: 4)
-        case .diamond:
-            return Path { path in
-                path.move(to: CGPoint(x: rect.midX, y: rect.minY))
-                path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
-                path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
-                path.addLine(to: CGPoint(x: rect.minX, y: rect.midY))
-                path.closeSubpath()
-            }
-        case .star:
-            return Path { path in
-                let cx = rect.midX
-                let cy = rect.midY
-                let outer = rect.width / 2
-                let inner = outer * 0.42
-                for index in 0..<10 {
-                    let angle = Double(index) * .pi / 5 - .pi / 2
-                    let radius = index % 2 == 0 ? outer : inner
-                    let point = CGPoint(x: cx + CGFloat(cos(angle) * radius), y: cy + CGFloat(sin(angle) * radius))
-                    if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
-                }
-                path.closeSubpath()
-            }
-        case .drop:
-            return Path { path in
-                path.move(to: CGPoint(x: rect.midX, y: rect.minY))
-                path.addQuadCurve(to: CGPoint(x: rect.midX, y: rect.maxY), control: CGPoint(x: rect.maxX, y: rect.midY))
-                path.addQuadCurve(to: CGPoint(x: rect.midX, y: rect.minY), control: CGPoint(x: rect.minX, y: rect.midY))
-            }
-        }
+        FoodInk(design: design).drawShape(ctx, in: rect, cycle: cycle * 3.2)
     }
 }
 
@@ -695,7 +756,7 @@ private struct FeedShareCard: View {
             Text(design.name)
                 .font(.system(size: 28, weight: .bold, design: .rounded))
                 .foregroundColor(.white)
-            FeedPreview(design: design, height: 140)
+            FeedPreview(design: design, height: 140, animate: false)
             Text(design.effects.map(\.title).joined(separator: " · "))
                 .font(.system(size: 14, weight: .medium, design: .rounded))
                 .foregroundColor(Theme.lime)
@@ -710,12 +771,311 @@ private struct FeedShareCard: View {
     }
 }
 
-private struct ActivityView: UIViewControllerRepresentable {
-    var items: [Any]
+private struct FoodInk {
+    var design: FeedDesign
 
-    func makeUIViewController(context: Context) -> UIActivityViewController {
-        UIActivityViewController(activityItems: items, applicationActivities: nil)
+    func drawShape(_ ctx: GraphicsContext, in rect: CGRect, cycle: Double) {
+        let fill = fillColor(cycle: cycle)
+        if design.effects.contains(.phantomTrail) {
+            var ghost = ctx
+            ghost.opacity = 0.32
+            ghost.translateBy(x: -rect.width * 0.22, y: rect.height * 0.04)
+            fillMain(ghost, in: rect, fill: fill, cycle: cycle, dress: false)
+        }
+        if design.effects.contains(.timeFreeze) {
+            let ring = Path(ellipseIn: rect.insetBy(dx: -3, dy: -3))
+            ctx.stroke(ring, with: .color(Color(red: 0.72, green: 0.92, blue: 1)), lineWidth: max(1.5, rect.width * 0.045))
+        }
+        fillMain(ctx, in: rect, fill: fill, cycle: cycle, dress: true)
+        if design.look.rareLook == .ember {
+            for index in 0..<4 {
+                let phase = (cycle * 0.45 + Double(index) * 0.22).truncatingRemainder(dividingBy: 1)
+                let x = rect.midX + CGFloat(index - 2) * rect.width * 0.16
+                let y = rect.maxY - 2 - CGFloat(phase) * rect.height * 0.9
+                var spark = ctx
+                spark.opacity = 1 - phase
+                spark.fill(
+                    Path(ellipseIn: CGRect(x: x, y: y, width: max(2, rect.width * 0.08), height: max(2, rect.width * 0.08))),
+                    with: .color(Color(red: 1, green: 0.55, blue: 0.1))
+                )
+            }
+        }
+        if design.look.particles || design.look.rareLook == .prism || design.effects.contains(.rainbow) {
+            for index in 0..<5 {
+                let angle = cycle * 2.4 + Double(index) * 1.25
+                let px = rect.midX + CGFloat(cos(angle)) * rect.width * 0.62
+                let py = rect.midY + CGFloat(sin(angle)) * rect.height * 0.48
+                let hue = (cycle * 0.2 + Double(index) * 0.18).truncatingRemainder(dividingBy: 1)
+                let dot = CGRect(x: px - 2, y: py - 2, width: 4, height: 4)
+                ctx.fill(Path(ellipseIn: dot), with: .color(Color(hue: hue, saturation: 0.7, brightness: 1)))
+            }
+        }
     }
 
-    func updateUIViewController(_ controller: UIActivityViewController, context: Context) {}
+    private func fillMain(_ ctx: GraphicsContext, in rect: CGRect, fill: Color, cycle: Double, dress: Bool) {
+        if design.look.shape == .cube {
+            let box = cubeParts(in: rect)
+            ctx.fill(box.side, with: .color(fill.opacity(0.62)))
+            ctx.fill(box.top, with: .color(fill.opacity(0.82)))
+            ctx.fill(box.front, with: .color(fill))
+            if dress { dressOutline(ctx, path: box.front, cycle: cycle) }
+            return
+        }
+        let path = shapePath(in: rect)
+        ctx.fill(path, with: .color(fill))
+        if design.look.shape == .sphere {
+            let highlight = CGRect(
+                x: rect.minX + rect.width * 0.22,
+                y: rect.minY + rect.height * 0.16,
+                width: rect.width * 0.28,
+                height: rect.height * 0.2
+            )
+            ctx.fill(Path(ellipseIn: highlight), with: .color(.white.opacity(0.55)))
+        }
+        if design.look.shape == .diamond {
+            var facet = Path()
+            facet.move(to: CGPoint(x: rect.midX, y: rect.minY))
+            facet.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+            facet.move(to: CGPoint(x: rect.minX, y: rect.midY))
+            facet.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+            ctx.stroke(facet, with: .color(.white.opacity(0.45)), lineWidth: 1)
+        }
+        if dress { dressOutline(ctx, path: path, cycle: cycle) }
+    }
+
+    private func dressOutline(_ ctx: GraphicsContext, path: Path, cycle: Double) {
+        let width = max(1.5, 2.2)
+        if design.look.rareLook == .prism || design.effects.contains(.rainbow) {
+            let hue = (cycle * 0.25).truncatingRemainder(dividingBy: 1)
+            ctx.stroke(path, with: .color(Color(hue: hue, saturation: 0.2, brightness: 1)), lineWidth: width)
+        }
+        if design.look.rareLook == .voidGlass {
+            ctx.stroke(path, with: .color(.white.opacity(0.9)), lineWidth: width)
+        }
+        if design.look.rareLook == .ember {
+            ctx.stroke(path, with: .color(Color(red: 1, green: 0.62, blue: 0.12)), lineWidth: width)
+        }
+        if design.effects.contains(.golden) {
+            ctx.stroke(path, with: .color(Color(red: 1, green: 0.84, blue: 0.28)), lineWidth: width + 0.6)
+        }
+    }
+
+    private func fillColor(cycle: Double) -> Color {
+        let primary = design.look.primary
+        switch design.look.rareLook {
+        case .prism:
+            let hue = (cycle * 0.22).truncatingRemainder(dividingBy: 1)
+            return Color(hue: hue, saturation: 0.72, brightness: 1)
+        case .ember:
+            let green = 0.28 + 0.22 * (0.5 + 0.5 * sin(cycle * 8))
+            return Color(red: 1, green: green, blue: 0.05)
+        case .voidGlass:
+            return Color(
+                red: primary.red * 0.16,
+                green: primary.green * 0.16,
+                blue: max(0.28, primary.blue * 0.4)
+            )
+        case .none:
+            if design.effects.contains(.rainbow) {
+                let hue = (cycle * 0.22).truncatingRemainder(dividingBy: 1)
+                return Color(hue: hue, saturation: 0.78, brightness: 1)
+            }
+            return Color(red: primary.red, green: primary.green, blue: primary.blue)
+        }
+    }
+
+    private func shapePath(in rect: CGRect) -> Path {
+        switch design.look.shape {
+        case .sphere:
+            return Path(ellipseIn: rect)
+        case .cube:
+            return cubeParts(in: rect).front
+        case .heart:
+            return heartPath(in: rect)
+        case .diamond:
+            return Path { path in
+                path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+                path.addLine(to: CGPoint(x: rect.maxX, y: rect.midY))
+                path.addLine(to: CGPoint(x: rect.midX, y: rect.maxY))
+                path.addLine(to: CGPoint(x: rect.minX, y: rect.midY))
+                path.closeSubpath()
+            }
+        case .star:
+            return Path { path in
+                let outer = min(rect.width, rect.height) / 2
+                let inner = outer * 0.38
+                for index in 0..<10 {
+                    let angle = Double(index) * .pi / 5 - .pi / 2
+                    let radius = index % 2 == 0 ? outer : inner
+                    let point = CGPoint(x: rect.midX + CGFloat(cos(angle) * radius), y: rect.midY + CGFloat(sin(angle) * radius))
+                    if index == 0 { path.move(to: point) } else { path.addLine(to: point) }
+                }
+                path.closeSubpath()
+            }
+        case .drop:
+            return Path { path in
+                path.move(to: CGPoint(x: rect.midX, y: rect.minY))
+                path.addQuadCurve(to: CGPoint(x: rect.midX, y: rect.maxY), control: CGPoint(x: rect.maxX + rect.width * 0.05, y: rect.midY))
+                path.addQuadCurve(to: CGPoint(x: rect.midX, y: rect.minY), control: CGPoint(x: rect.minX - rect.width * 0.05, y: rect.midY))
+            }
+        }
+    }
+
+    private func heartPath(in rect: CGRect) -> Path {
+        var path = Path()
+        let x = rect.minX
+        let y = rect.minY
+        let w = rect.width
+        let h = rect.height
+        path.move(to: CGPoint(x: x + w * 0.5, y: y + h * 0.93))
+        path.addCurve(
+            to: CGPoint(x: x + w * 0.02, y: y + h * 0.36),
+            control1: CGPoint(x: x + w * 0.18, y: y + h * 0.72),
+            control2: CGPoint(x: x - w * 0.02, y: y + h * 0.55)
+        )
+        path.addCurve(
+            to: CGPoint(x: x + w * 0.5, y: y + h * 0.30),
+            control1: CGPoint(x: x + w * 0.02, y: y + h * 0.05),
+            control2: CGPoint(x: x + w * 0.34, y: y + h * 0.02)
+        )
+        path.addCurve(
+            to: CGPoint(x: x + w * 0.98, y: y + h * 0.36),
+            control1: CGPoint(x: x + w * 0.66, y: y + h * 0.02),
+            control2: CGPoint(x: x + w * 0.98, y: y + h * 0.05)
+        )
+        path.addCurve(
+            to: CGPoint(x: x + w * 0.5, y: y + h * 0.93),
+            control1: CGPoint(x: x + w * 1.02, y: y + h * 0.55),
+            control2: CGPoint(x: x + w * 0.82, y: y + h * 0.72)
+        )
+        path.closeSubpath()
+        return path
+    }
+
+    private func cubeParts(in rect: CGRect) -> (front: Path, top: Path, side: Path) {
+        let dx = rect.width * 0.28
+        let dy = rect.height * 0.22
+        let front = CGRect(x: rect.minX, y: rect.minY + dy, width: rect.width - dx, height: rect.height - dy)
+        var top = Path()
+        top.move(to: CGPoint(x: front.minX, y: front.minY))
+        top.addLine(to: CGPoint(x: front.minX + dx, y: front.minY - dy))
+        top.addLine(to: CGPoint(x: front.maxX + dx, y: front.minY - dy))
+        top.addLine(to: CGPoint(x: front.maxX, y: front.minY))
+        top.closeSubpath()
+        var side = Path()
+        side.move(to: CGPoint(x: front.maxX, y: front.minY))
+        side.addLine(to: CGPoint(x: front.maxX + dx, y: front.minY - dy))
+        side.addLine(to: CGPoint(x: front.maxX + dx, y: front.maxY - dy))
+        side.addLine(to: CGPoint(x: front.maxX, y: front.maxY))
+        side.closeSubpath()
+        return (Path(roundedRect: front, cornerRadius: 2), top, side)
+    }
+}
+
+private extension FeedDesign {
+    func withShape(_ shape: FeedShape) -> FeedDesign {
+        var copy = self
+        copy.look.shape = shape
+        return copy
+    }
+}
+
+private func hideKeyboard() {
+    UIApplication.shared.sendAction(#selector(UIResponder.resignFirstResponder), to: nil, from: nil, for: nil)
+}
+
+private enum SharePresenter {
+    static func present(image: UIImage?, caption: String) {
+        var items: [Any] = [caption]
+        if let image { items.insert(image, at: 0) }
+        let activity = UIActivityViewController(activityItems: items, applicationActivities: nil)
+        guard let presenter = topViewController() else { return }
+        if let popover = activity.popoverPresentationController {
+            popover.sourceView = presenter.view
+            let bounds = presenter.view.bounds
+            popover.sourceRect = CGRect(x: bounds.midX, y: bounds.midY, width: 1, height: 1)
+            popover.permittedArrowDirections = []
+        }
+        presenter.present(activity, animated: true)
+    }
+
+    private static func topViewController() -> UIViewController? {
+        let scenes = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }
+        let window = scenes.flatMap(\.windows).first(where: \.isKeyWindow) ?? scenes.flatMap(\.windows).first
+        var top = window?.rootViewController
+        while let presented = top?.presentedViewController {
+            top = presented
+        }
+        if let nav = top as? UINavigationController {
+            top = nav.visibleViewController ?? nav
+        }
+        return top
+    }
+}
+
+private struct KeyboardDismissInstaller: UIViewRepresentable {
+    func makeCoordinator() -> Coordinator { Coordinator() }
+
+    func makeUIView(context: Context) -> UIView {
+        let view = UIView(frame: .zero)
+        view.isUserInteractionEnabled = false
+        return view
+    }
+
+    func updateUIView(_ uiView: UIView, context: Context) {
+        DispatchQueue.main.async {
+            context.coordinator.attach(from: uiView)
+        }
+    }
+
+    static func dismantleUIView(_ uiView: UIView, coordinator: Coordinator) {
+        coordinator.remove()
+    }
+
+    final class Coordinator: NSObject, UIGestureRecognizerDelegate {
+        private var tap: UITapGestureRecognizer?
+
+        func attach(from view: UIView) {
+            guard let window = view.window else { return }
+            if let existing = window.gestureRecognizers?.first(where: { $0.name == "shinake.keyboardDismiss" }) as? UITapGestureRecognizer {
+                tap = existing
+                return
+            }
+            if tap?.view === window { return }
+            remove()
+            let recognizer = UITapGestureRecognizer(target: self, action: #selector(dismiss))
+            recognizer.cancelsTouchesInView = false
+            recognizer.delegate = self
+            recognizer.name = "shinake.keyboardDismiss"
+            window.addGestureRecognizer(recognizer)
+            tap = recognizer
+        }
+
+        func remove() {
+            if let tap { tap.view?.removeGestureRecognizer(tap) }
+            tap = nil
+        }
+
+        @objc func dismiss() {
+            tap?.view?.endEditing(true)
+        }
+
+        func gestureRecognizer(_ gestureRecognizer: UIGestureRecognizer, shouldReceive touch: UITouch) -> Bool {
+            var view = touch.view
+            while let current = view {
+                if current is UITextField || current is UITextView { return false }
+                let name = NSStringFromClass(type(of: current))
+                if name.contains("TextField") || name.contains("TextView") { return false }
+                view = current.superview
+            }
+            return true
+        }
+
+        func gestureRecognizer(
+            _ gestureRecognizer: UIGestureRecognizer,
+            shouldRecognizeSimultaneouslyWith otherGestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            true
+        }
+    }
 }

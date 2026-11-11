@@ -221,10 +221,8 @@ struct PlayView: View {
                     Button {
                         model.cast(design)
                     } label: {
-                        VStack(spacing: 4) {
-                            Circle()
-                                .fill(Color(red: design.look.primary.red, green: design.look.primary.green, blue: design.look.primary.blue))
-                                .frame(width: 18, height: 18)
+                        VStack(spacing: 2) {
+                            FeedMark(design: design, side: 26)
                             Text(design.name)
                                 .font(.system(size: 12, weight: .semibold, design: .rounded))
                                 .foregroundColor(.white)
