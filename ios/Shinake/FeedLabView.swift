@@ -1,3 +1,4 @@
+import LinkPresentation
 import SwiftUI
 import UIKit
 
@@ -112,6 +113,7 @@ private struct FeedEditor: View {
     @Environment(\.dismiss) private var dismiss
     @State private var draft = FeedDesign.blank(id: "draft")
     @State private var loaded = false
+    @State private var keyboardPad: CGFloat = 0
 
     private let swatches: [FeedColor] = [
         FeedColor(red: 0.95, green: 0.32, blue: 0.34),
@@ -134,14 +136,6 @@ private struct FeedEditor: View {
                     .frame(height: 180)
                     .background(Theme.card)
                     .clipShape(RoundedRectangle(cornerRadius: 18, style: .continuous))
-                TextField("名字", text: $draft.name)
-                    .font(.system(size: 18, weight: .semibold, design: .rounded))
-                    .padding(12)
-                    .background(Theme.card)
-                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
-                    .onChange(of: draft.name) { value in
-                        if value.count > 16 { draft.name = String(value.prefix(16)) }
-                    }
                 Text("形状")
                     .font(.system(size: 14, weight: .semibold, design: .rounded))
                     .foregroundColor(Theme.dim)
@@ -183,6 +177,15 @@ private struct FeedEditor: View {
                         ScrollAnchor(name: "feed.particles")
                             .frame(maxWidth: .infinity, maxHeight: .infinity)
                     )
+                TextField("名字", text: $draft.name)
+                    .font(.system(size: 18, weight: .semibold, design: .rounded))
+                    .padding(12)
+                    .background(Theme.card)
+                    .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
+                    .padding(.top, 36)
+                    .onChange(of: draft.name) { value in
+                        if value.count > 16 { draft.name = String(value.prefix(16)) }
+                    }
                 HStack {
                     Text("效果")
                         .font(.system(size: 14, weight: .semibold, design: .rounded))
@@ -205,8 +208,8 @@ private struct FeedEditor: View {
                 PrimaryButton(title: "保存") { save() }
             }
             .padding(20)
-            .padding(.bottom, 72)
-            .background(EditorKeyboardLift())
+            .padding(.bottom, 24 + keyboardPad)
+            .background(EditorKeyboardLift(bottomInset: $keyboardPad))
             }
             .scrollDismissesKeyboard(.interactively)
         }
@@ -426,7 +429,12 @@ private struct FeedCards: View {
             return
         }
         let caption = "食蛇投喂 \(design.name)\n\(code)"
-        SharePresenter.present(image: drawShareCard(design: design, code: code), caption: caption)
+        let image = drawShareCard(design: design, code: code)
+        guard shareCardHasInk(image) else {
+            library.flash("卡片没画出来")
+            return
+        }
+        SharePresenter.present(image: image, title: design.name, caption: caption)
     }
 
     private func importCode() {
@@ -996,12 +1004,41 @@ private func drawShareGlyph(_ design: FeedDesign, in rect: CGRect, context: CGCo
     )
     let path = shareShapePath(design.look.shape, in: rect)
     context.saveGState()
-    color.setFill()
-    path.fill()
-    UIColor.white.withAlphaComponent(0.9).setStroke()
-    path.lineWidth = 6
-    path.stroke()
+    context.addPath(path.cgPath)
+    context.setFillColor(color.cgColor)
+    context.fillPath()
+    context.addPath(path.cgPath)
+    context.setStrokeColor(UIColor.white.withAlphaComponent(0.9).cgColor)
+    context.setLineWidth(6)
+    context.strokePath()
     context.restoreGState()
+}
+
+private func shareCardHasInk(_ image: UIImage) -> Bool {
+    guard image.size.width > 32, image.size.height > 32, let cgImage = image.cgImage else { return false }
+    guard cgImage.bitsPerPixel >= 32, let data = cgImage.dataProvider?.data, let bytes = CFDataGetBytePtr(data) else {
+        return false
+    }
+    let width = cgImage.width
+    let height = cgImage.height
+    let bytesPerRow = cgImage.bytesPerRow
+    let bytesPerPixel = cgImage.bitsPerPixel / 8
+    let stepX = max(1, width / 48)
+    let stepY = max(1, height / 48)
+    var y = 0
+    while y < height {
+        var x = 0
+        while x < width {
+            let pixel = bytes + y * bytesPerRow + x * bytesPerPixel
+            var bright = 0
+            for channel in 0..<4 where pixel[channel] > 80 { bright += 1 }
+            // A flat dark card has only the alpha byte above this. White type and the food color do not.
+            if bright >= 2 { return true }
+            x += stepX
+        }
+        y += stepY
+    }
+    return false
 }
 
 private func shareShapePath(_ shape: FeedShape, in rect: CGRect) -> UIBezierPath {
@@ -1069,9 +1106,39 @@ private func shareShapePath(_ shape: FeedShape, in rect: CGRect) -> UIBezierPath
     }
 }
 
+final class FeedCardActivity: NSObject, UIActivityItemSource {
+    let image: UIImage
+    let title: String
+
+    init(image: UIImage, title: String) {
+        self.image = image
+        self.title = title
+    }
+
+    func activityViewControllerPlaceholderItem(_ activityViewController: UIActivityViewController) -> Any {
+        image
+    }
+
+    func activityViewController(
+        _ activityViewController: UIActivityViewController,
+        itemForActivityType activityType: UIActivity.ActivityType?
+    ) -> Any? {
+        image
+    }
+
+    func activityViewControllerLinkMetadata(_ activityViewController: UIActivityViewController) -> LPLinkMetadata? {
+        let metadata = LPLinkMetadata()
+        metadata.title = title
+        metadata.imageProvider = NSItemProvider(object: image)
+        metadata.iconProvider = NSItemProvider(object: image)
+        return metadata
+    }
+}
+
 private enum SharePresenter {
-    static func present(image: UIImage, caption: String) {
-        let items: [Any] = [image, caption]
+    static func present(image: UIImage, title: String, caption: String) {
+        let card = FeedCardActivity(image: image, title: title)
+        let items: [Any] = [card, caption]
         let activity = UIActivityViewController(activityItems: items, applicationActivities: nil)
         guard let presenter = topViewController() else { return }
         if let popover = activity.popoverPresentationController {
@@ -1177,7 +1244,9 @@ private struct ScrollAnchor: UIViewRepresentable {
 }
 
 private struct EditorKeyboardLift: UIViewRepresentable {
-    func makeCoordinator() -> Coordinator { Coordinator() }
+    @Binding var bottomInset: CGFloat
+
+    func makeCoordinator() -> Coordinator { Coordinator(bottomInset: $bottomInset) }
 
     func makeUIView(context: Context) -> UIView {
         let view = UIView()
@@ -1188,6 +1257,7 @@ private struct EditorKeyboardLift: UIViewRepresentable {
 
     func updateUIView(_ uiView: UIView, context: Context) {
         context.coordinator.host = uiView
+        context.coordinator.bottomInset = $bottomInset
         context.coordinator.install()
     }
 
@@ -1197,7 +1267,13 @@ private struct EditorKeyboardLift: UIViewRepresentable {
 
     final class Coordinator: NSObject {
         weak var host: UIView?
+        var bottomInset: Binding<CGFloat>
         private var tokens: [NSObjectProtocol] = []
+        private let toolbarHeight: CGFloat = 56
+
+        init(bottomInset: Binding<CGFloat>) {
+            self.bottomInset = bottomInset
+        }
 
         func install() {
             guard tokens.isEmpty else { return }
@@ -1218,32 +1294,48 @@ private struct EditorKeyboardLift: UIViewRepresentable {
         }
 
         func lift(_ note: Notification) {
-            guard let host, let window = host.window, let scroll = host.enclosingScrollView() else { return }
+            guard let host, let window = host.window else { return }
             guard let end = note.userInfo?[UIResponder.keyboardFrameEndUserInfoKey] as? CGRect else { return }
             let space = window.windowScene?.screen.coordinateSpace
             let keyboard = space.map { window.convert(end, from: $0) } ?? end
-            guard keyboard.minY < window.bounds.maxY - 1 else { return }
-            let limit = keyboard.minY - 16
+            let hidden = keyboard.minY >= window.bounds.maxY - 1
+            let keyboardHeight = hidden ? 0 : max(0, window.bounds.maxY - keyboard.minY)
+            let needed = hidden ? 0 : keyboardHeight + toolbarHeight
+            if abs(bottomInset.wrappedValue - needed) > 0.5 {
+                bottomInset.wrappedValue = needed
+            }
+            guard let scroll = host.enclosingScrollView() else { return }
+            applyInset(needed, on: scroll)
+            guard !hidden else { return }
+            let limit = keyboard.minY - toolbarHeight
+            scrollClear(of: limit, in: scroll, window: window)
+            for delay in [0.05, 0.28] {
+                DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+                    guard let self, let host = self.host, let window = host.window, let scroll = host.enclosingScrollView() else { return }
+                    self.applyInset(needed, on: scroll)
+                    self.scrollClear(of: limit, in: scroll, window: window)
+                }
+            }
+        }
+
+        private func applyInset(_ needed: CGFloat, on scroll: UIScrollView) {
+            let safeExtra = scroll.adjustedContentInset.bottom - scroll.contentInset.bottom
+            scroll.contentInset.bottom = max(0, needed - safeExtra)
+            scroll.verticalScrollIndicatorInsets.bottom = scroll.contentInset.bottom
+        }
+
+        private func scrollClear(of limit: CGFloat, in scroll: UIScrollView, window: UIWindow) {
             var overflow: CGFloat = 0
             if let focus = window.firstResponderView() {
                 overflow = max(overflow, focus.convert(focus.bounds, to: window).maxY - limit)
             }
             if let marker = window.view(withAccessibilityIdentifier: "feed.particles") {
-                let frame = marker.convert(marker.bounds, to: window)
-                let overlap = frame.maxY - limit
-                // Only the small tuck under the 完成 bar. Don't jump the form to a row that is still far below.
-                if overlap > 0, overlap < 88, frame.minY < limit {
-                    overflow = max(overflow, overlap)
-                }
+                overflow = max(overflow, marker.convert(marker.bounds, to: window).maxY + 8 - limit)
             }
             guard overflow > 1 else { return }
-            let extra = scroll.adjustedContentInset.bottom
-            let maxOffset = max(0, scroll.contentSize.height + extra - scroll.bounds.height)
+            let maxOffset = max(0, scroll.contentSize.height - scroll.bounds.height + scroll.adjustedContentInset.bottom)
             let target = min(max(0, scroll.contentOffset.y + overflow), maxOffset)
-            let duration = note.userInfo?[UIResponder.keyboardAnimationDurationUserInfoKey] as? Double ?? 0.25
-            UIView.animate(withDuration: duration) {
-                scroll.setContentOffset(CGPoint(x: 0, y: target), animated: false)
-            }
+            scroll.setContentOffset(CGPoint(x: scroll.contentOffset.x, y: target), animated: false)
         }
     }
 }
