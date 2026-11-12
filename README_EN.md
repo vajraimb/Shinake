@@ -209,6 +209,31 @@ battle report, obstacle maps, game-over flow, mid-game mode switch), `SNAKE_LLMT
 frames), `SNAKE_REPORT=1` (sample battle-report card).
 </details>
 
+## iPhone
+
+Portrait native app, SwiftUI + SceneKit. Bundle id `one.vajra.shinake`, iOS 16 and up.
+The six-direction cube is still the game; the feel is rebuilt for a phone. Default difficulty is Easy (a move every 0.64s, six shields for the first 90 seconds, and the first three apples do not spend a charge). Swipe to turn. The two bottom buttons, 深入 and 拉近, move along the depth axis. All UI copy is Simplified Chinese.
+
+On a Mac with Xcode and an **iPhone 17 Pro** simulator installed:
+
+```bash
+ios/build-simulator.sh
+```
+
+Which is:
+
+```bash
+xcodebuild -project ios/Shinake.xcodeproj -scheme Shinake \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -configuration Debug build
+xcodebuild -project ios/Shinake.xcodeproj -scheme Shinake \
+  -destination 'platform=iOS Simulator,name=iPhone 17 Pro' \
+  -configuration Debug test
+```
+
+Logic tests also run without a simulator (macOS or Linux): `swift test`.
+Open `ios/Shinake.xcodeproj` and run on the iPhone 17 Pro simulator. Simulator builds are unsigned; a device build uses team `A5VCS5XD6R`.
+
 ## 📦 Download
 
 [Releases](../../releases) · `Shinake-macos-arm64.zip` (macOS Apple

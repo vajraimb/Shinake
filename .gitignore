@@ -19,3 +19,11 @@ shot_*.png
 
 # os junk
 .DS_Store
+
+# swift / xcode
+.build/
+.swiftpm/
+DerivedData/
+xcuserdata/
+*.xcuserstate
+*.moved-aside
