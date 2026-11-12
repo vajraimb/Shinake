@@ -6,7 +6,9 @@ import ShinakeCore
 
 struct Frame: Encodable {
     var label: String
-    var grid: Int
+    var width: Int
+    var height: Int
+    var depth: Int
     var snake: [[Int]]
     var food: [[Int]]
     var kinds: [String]
@@ -44,7 +46,9 @@ func dump(_ game: SnakeGame, _ label: String) {
     let snap = game.snapshot()
     let frame = Frame(
         label: label,
-        grid: snap.grid,
+        width: snap.arena.width,
+        height: snap.arena.height,
+        depth: snap.arena.depth,
         snake: snap.snake.map { [$0.x, $0.y, $0.z] },
         food: snap.foods.map { [$0.position.x, $0.position.y, $0.position.z] },
         kinds: snap.foods.map { $0.kind.rawValue },

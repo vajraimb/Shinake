@@ -20,7 +20,7 @@ struct FeedLabView: View {
                 Theme.bg.ignoresSafeArea()
                 ScrollView {
                 VStack(alignment: .leading, spacing: 16) {
-                    Text("设计自己的食物，融出稀有，再丢进立方体里。")
+                    Text("设计自己的食物，融出稀有，再丢进长方体里。")
                         .font(.system(size: 15, weight: .medium, design: .rounded))
                         .foregroundColor(Theme.dim)
                         .fixedSize(horizontal: false, vertical: true)

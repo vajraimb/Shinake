@@ -19,7 +19,7 @@ struct TitleView: View {
                     .font(.system(size: 13, weight: .semibold, design: .rounded))
                     .tracking(7)
                     .foregroundColor(Theme.faint)
-                Text("在立方体里追一颗光")
+                Text("在长方体里追一颗光")
                     .font(.system(size: 17, weight: .medium, design: .rounded))
                     .foregroundColor(Theme.dim)
                     .padding(.top, 6)
@@ -87,7 +87,7 @@ struct TitleView: View {
     }
 }
 
-/// A slow turn of the same cube, so the title isn't an empty field.
+/// A slow turn of the same tall board, so the title isn't an empty field.
 private struct TitleCube: UIViewRepresentable {
     func makeCoordinator() -> Coordinator { Coordinator() }
 
@@ -131,12 +131,17 @@ private struct TitleCube: UIViewRepresentable {
             ambientNode.light = ambient
             scene.rootNode.addChildNode(ambientNode)
 
-            let half: Float = 1.35
+            let arena = Difficulty.easy.profile.arena
+            let longest = Float(max(arena.width, arena.height, arena.depth) - 1)
+            let scale = 2.7 / max(longest, 1)
+            let hx = Float(arena.width - 1) * 0.5 * scale
+            let hy = Float(arena.height - 1) * 0.5 * scale
+            let hz = Float(arena.depth - 1) * 0.5 * scale
             let corners: [SIMD3<Float>] = [
-                SIMD3(-half, -half, -half), SIMD3(half, -half, -half),
-                SIMD3(half, half, -half), SIMD3(-half, half, -half),
-                SIMD3(-half, -half, half), SIMD3(half, -half, half),
-                SIMD3(half, half, half), SIMD3(-half, half, half),
+                SIMD3(-hx, -hy, -hz), SIMD3(hx, -hy, -hz),
+                SIMD3(hx, hy, -hz), SIMD3(-hx, hy, -hz),
+                SIMD3(-hx, -hy, hz), SIMD3(hx, -hy, hz),
+                SIMD3(hx, hy, hz), SIMD3(-hx, hy, hz),
             ]
             let pairs: [(Int, Int, UIColor)] = [
                 (0, 1, Theme.axisX), (1, 2, Theme.axisY), (2, 3, Theme.axisX), (3, 0, Theme.axisY),

@@ -75,7 +75,7 @@ public struct RenderSnapshot: Equatable {
     public var direction: Vec3
     public var foods: [FoodPellet]
     public var solids: [Vec3]
-    public var grid: Int
+    public var arena: ArenaSize
     public var alive: Bool
     /// Queued turn the head should face before the body steps.
     public var pendingTurn: Vec3?
@@ -98,12 +98,21 @@ public enum SnakeBody {
 /// Where a classic score is stored. A run that brought a feed loadout must
 /// not share a key with the plain 简单 / 普通 / 困难 record.
 public enum ScoreBoard {
+    /// Bumped when the arena changed shape, so cube-era records are not shown.
+    public static let generation = "v2"
+
     public static func localBestKey(difficulty: Difficulty, separateLoadout: Bool) -> String {
         if separateLoadout {
-            return "shinake.best.loadout.\(difficulty.rawValue)"
+            return "shinake.best.\(generation).loadout.\(difficulty.rawValue)"
         }
-        return "shinake.best.\(difficulty.rawValue)"
+        return "shinake.best.\(generation).\(difficulty.rawValue)"
     }
+}
+
+/// Feeding boards created for the cuboid. The cube-era IDs are not submitted.
+public enum GameCenterBoards {
+    public static let bestID = "one.vajra.shinake.feeding_v2"
+    public static let weeklyID = "one.vajra.shinake.weekly_v2"
 }
 
 /// The whole playable game, with no UIKit and no clock of its own.
@@ -195,7 +204,10 @@ public final class SnakeGame {
     /// Classic runs that field a loadout keep a separate local record.
     public var recordsSeparately: Bool { mode == .classic && !classicLoadout.isEmpty }
 
-    public var grid: Int { profile.grid }
+    public var width: Int { profile.arena.width }
+    public var height: Int { profile.arena.height }
+    public var depth: Int { profile.arena.depth }
+    public var arena: ArenaSize { profile.arena }
     /// The turn that will apply on the next step, if the player already swiped.
     public var pendingTurn: Vec3? { queue.first?.vector }
     public var length: Int { snake.count }
@@ -270,7 +282,7 @@ public final class SnakeGame {
                 if lhs.y != rhs.y { return lhs.y < rhs.y }
                 return lhs.x < rhs.x
             },
-            grid: grid,
+            arena: arena,
             alive: phase != .over,
             pendingTurn: queue.first?.vector,
             snakeScale: snakeScale,
@@ -467,11 +479,13 @@ public final class SnakeGame {
     // MARK: Board
 
     private func resetBoard() {
-        let center = profile.grid / 2
+        let x = profile.arena.width / 2
+        let y = profile.arena.height / 2
+        let z = profile.arena.depth / 2
         snake = [
-            Vec3(center + 1, center, center),
-            Vec3(center, center, center),
-            Vec3(center - 1, center, center),
+            Vec3(x + 1, y, z),
+            Vec3(x, y, z),
+            Vec3(x - 1, y, z),
         ]
         previous = snake
         direction = .xp
@@ -871,28 +885,35 @@ public final class SnakeGame {
 
         var preferred: [Vec3] = []
         var fallback: [Vec3] = []
-        let n = profile.grid
+        let width = profile.arena.width
+        let height = profile.arena.height
+        let depth = profile.arena.depth
         let margin = bias == .interior ? 2 : 1
-        for z in 0..<n {
-            for y in 0..<n {
-                for x in 0..<n {
+        for z in 0..<depth {
+            for y in 0..<height {
+                for x in 0..<width {
                     let cell = Vec3(x, y, z)
                     if occupied.contains(cell) { continue }
                     let distance = cell.manhattan(to: head)
                     let inset = x >= margin && y >= margin && z >= margin
-                        && x < n - margin && y < n - margin && z < n - margin
+                        && x < width - margin && y < height - margin && z < depth - margin
                     switch bias {
                     case .openingPlane:
-                        if cell.z == head.z && distance >= 2 && distance <= 4 && inset {
+                        if cell.z == head.z && distance >= FoodPlacement.openingMin
+                            && distance <= FoodPlacement.openingMax && inset {
                             preferred.append(cell)
-                        } else if cell.z == head.z && distance >= 2 {
+                        } else if cell.z == head.z && distance >= FoodPlacement.openingMin {
                             fallback.append(cell)
                         }
                     case .depthLesson:
                         let planar = abs(cell.x - head.x) + abs(cell.y - head.y)
-                        let depth = abs(cell.z - head.z)
-                        if depth >= 1 && planar <= 2 && distance >= 2 && distance <= 5 && inset {
+                        let layers = abs(cell.z - head.z)
+                        if layers >= 1 && planar <= 2
+                            && distance >= FoodPlacement.laterMin
+                            && distance <= FoodPlacement.laterMax && inset {
                             preferred.append(cell)
+                        } else if distance >= FoodPlacement.laterMin {
+                            fallback.append(cell)
                         }
                     case .interior:
                         if inset && cell.z == head.z && distance >= 2 && distance <= 4 {
@@ -901,11 +922,12 @@ public final class SnakeGame {
                             fallback.append(cell)
                         }
                     case .standard:
-                        if distance >= profile.minFoodDistance {
+                        if distance >= FoodPlacement.laterMin && distance <= FoodPlacement.laterMax {
                             preferred.append(cell)
+                        } else if distance >= FoodPlacement.laterMin {
+                            fallback.append(cell)
                         }
                     }
-                    if bias != .interior && bias != .openingPlane { fallback.append(cell) }
                 }
             }
         }
@@ -918,12 +940,12 @@ public final class SnakeGame {
     }
 
     private var freeCellCount: Int {
-        profile.grid * profile.grid * profile.grid - solids.count
+        profile.arena.cellCount - solids.count
     }
 
     private func inBounds(_ cell: Vec3) -> Bool {
         cell.x >= 0 && cell.y >= 0 && cell.z >= 0
-            && cell.x < grid && cell.y < grid && cell.z < grid
+            && cell.x < width && cell.y < height && cell.z < depth
     }
 
     /// `growing` means the tail cell does not vacate this move.
@@ -1063,8 +1085,8 @@ public final class SnakeGame {
         let hintDir = rawHint.z == 0 ? rawHint : planarHeading
         var best: Vec3?
         var bestScore = Int.min
-        for y in 0..<grid {
-            for x in 0..<grid {
+        for y in 0..<height {
+            for x in 0..<width {
                 let cell = Vec3(x, y, head.z)
                 let distance = cell.manhattan(to: head)
                 if distance < 2 || distance > 3 { continue }
@@ -1128,8 +1150,8 @@ public final class SnakeGame {
         for cell in snake { occupied.insert(cell) }
         var best: Vec3?
         var bestScore = Int.max
-        for y in 0..<grid {
-            for x in 0..<grid {
+        for y in 0..<height {
+            for x in 0..<width {
                 let cell = Vec3(x, y, head.z)
                 if occupied.contains(cell) { continue }
                 let distance = cell.manhattan(to: head)
@@ -1254,8 +1276,8 @@ public final class SnakeGame {
     // MARK: Autopilot
     //
     // The desktop snake chases food with BFS and only bites when it can still
-    // reach its own tail afterwards. Same idea, smaller: the phone board is
-    // at most 12³, so a full search per move is cheap.
+    // reach its own tail afterwards. The phone board is a portrait cuboid,
+    // small enough that a full search per move stays cheap.
 
     private func chooseAI() -> Vec3 {
         let reverse = -direction
@@ -1348,7 +1370,7 @@ public final class SnakeGame {
         var grow = pendingGrowth
         var current = snake[0]
         var steps = 0
-        let limit = grid * grid * grid
+        let limit = arena.cellCount
         while true {
             let next: Vec3
             if steps == 0 {

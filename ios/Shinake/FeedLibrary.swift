@@ -40,7 +40,8 @@ final class FeedLibrary: ObservableObject {
 
     private let defaults: UserDefaults
     private var bannerToken = 0
-    private let storageKey = "shinake.feeds.v1"
+    private let storageKey = "shinake.feeds.v2"
+    private let retiredStorageKey = "shinake.feeds.v1"
     private var askedGameCenter = false
 
     init(defaults: UserDefaults) {
@@ -192,6 +193,7 @@ final class FeedLibrary: ObservableObject {
     func submit(score: Int) {
         #if canImport(GameKit)
         guard GKLocalPlayer.local.isAuthenticated, score > 0 else { return }
+        // Cube-era boards (one.vajra.shinake.feeding and .weekly) are not submitted.
         GKLeaderboard.submitScore(
             score,
             context: 0,
@@ -246,8 +248,23 @@ final class FeedLibrary: ObservableObject {
     }
 
     private func load() {
-        guard let data = defaults.data(forKey: storageKey),
+        if let data = defaults.data(forKey: storageKey),
+           let archive = try? JSONDecoder().decode(Archive.self, from: data) {
+            apply(archive)
+            return
+        }
+        // Keep the cards from the cube era, and drop scores that were set on it.
+        guard let data = defaults.data(forKey: retiredStorageKey),
               let archive = try? JSONDecoder().decode(Archive.self, from: data) else { return }
+        apply(archive)
+        scores = []
+        for id in Array(stats.keys) {
+            stats[id]?.bestScore = 0
+        }
+        persist()
+    }
+
+    private func apply(_ archive: Archive) {
         designs = archive.designs
         stats = archive.stats
         discoveredEffects = Set(archive.discoveredEffects)
@@ -271,9 +288,3 @@ final class FeedLibrary: ObservableObject {
     }
 }
 
-#if canImport(GameKit)
-private enum GameCenterBoards {
-    static let bestID = "one.vajra.shinake.feeding"
-    static let weeklyID = "one.vajra.shinake.weekly"
-}
-#endif

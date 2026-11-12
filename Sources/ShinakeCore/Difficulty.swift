@@ -34,7 +34,7 @@ public enum Difficulty: String, CaseIterable, Codable, Equatable {
 /// One place for every number that changes how long a casual player lives.
 public struct DifficultyProfile: Equatable {
     public var id: String
-    public var grid: Int
+    public var arena: ArenaSize
     /// Seconds between moves at the start of a run.
     public var startInterval: Double
     /// Fastest the permanent ramp is allowed to get.
@@ -61,7 +61,7 @@ public struct DifficultyProfile: Equatable {
 
     public init(
         id: String,
-        grid: Int,
+        arena: ArenaSize,
         startInterval: Double,
         minInterval: Double,
         speedStep: Double,
@@ -76,7 +76,7 @@ public struct DifficultyProfile: Equatable {
         solids: Set<Vec3> = []
     ) {
         self.id = id
-        self.grid = grid
+        self.arena = arena
         self.startInterval = startInterval
         self.minInterval = minInterval
         self.speedStep = speedStep
@@ -98,7 +98,7 @@ public struct DifficultyProfile: Equatable {
     /// during those 90s is still turned aside after the counter hits zero.
     public static let easy = DifficultyProfile(
         id: "easy",
-        grid: 9,
+        arena: ArenaSize(width: 9, height: fittedArenaHeight(width: 9, depth: 9, target: 14), depth: 9),
         startInterval: 0.64,
         minInterval: 0.32,
         speedStep: 0.008,
@@ -116,7 +116,7 @@ public struct DifficultyProfile: Equatable {
     /// Floor 0.18s is still well above the desktop game's 0.08s panic speed.
     public static let normal = DifficultyProfile(
         id: "normal",
-        grid: 10,
+        arena: ArenaSize(width: 10, height: fittedArenaHeight(width: 10, depth: 10, target: 16), depth: 10),
         startInterval: 0.40,
         minInterval: 0.18,
         speedStep: 0.012,
@@ -130,11 +130,15 @@ public struct DifficultyProfile: Equatable {
         showsGuide: true
     )
 
-    /// Desktop pace on the same 12³ void: 0.27s start, −0.007s per bite, floor 0.08s.
-    /// Phone controls are the only mercy — no grace, no coach line.
+    /// Desktop pace on a 12-wide void: 0.27s start, −0.007s per bite, floor 0.08s.
+    /// The board is taller than it is wide. Phone controls are the only mercy.
     public static let hard = DifficultyProfile(
         id: "hard",
-        grid: LegacyTuning.grid,
+        arena: ArenaSize(
+            width: LegacyTuning.grid,
+            height: fittedArenaHeight(width: LegacyTuning.grid, depth: LegacyTuning.grid, target: 19),
+            depth: LegacyTuning.grid
+        ),
         startInterval: LegacyTuning.startInterval,
         minInterval: LegacyTuning.minInterval,
         speedStep: LegacyTuning.speedStep,
@@ -147,6 +151,16 @@ public struct DifficultyProfile: Equatable {
         chiliMultiplier: 0.65,
         showsGuide: false
     )
+}
+
+/// Where food is allowed to appear, in Manhattan cells.
+public enum FoodPlacement {
+    /// Easy's free opening stays on the snake's layer, close enough to see.
+    public static let openingMin = 2
+    public static let openingMax = 4
+    /// After that opening, food sits in this band on every difficulty.
+    public static let laterMin = 3
+    public static let laterMax = 8
 }
 
 public func moveInterval(eaten: Int, profile: DifficultyProfile) -> Double {

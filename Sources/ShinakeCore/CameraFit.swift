@@ -1,16 +1,25 @@
 import Foundation
 
 /// Vertical field of view used by the play camera. Kept fixed so a phone
-/// doesn't get a fisheye view; distance is what changes to fit the cube.
+/// doesn't get a fisheye view; distance is what changes to fit the arena.
 public let playCameraVerticalFOV = 32.0
 
-/// Empty fraction of each screen edge. Tight enough that the cube fills the
+/// Empty fraction of each screen edge. Tight enough that the arena fills the
 /// canvas, with a few percent left so a corner head is not shaved off.
 public let playCameraMargin = 0.045
 
-/// Extra world units around the grid. Covers a head of radius 0.30, which is
-/// larger than the drawn head (0.23), plus the cube's edge tube.
+/// Extra world units around the arena. Covers a head of radius 0.30, which is
+/// larger than the drawn head (0.23), plus the frame's edge tube.
 public let playCameraPad = 0.38
+
+/// How much farther the camera may sit versus the old cube, on a portrait canvas.
+public let arenaDistanceGrowthLimit = 1.05
+
+/// Play-canvas aspect the height budget is measured on: a tall portrait phone,
+/// the same 0.62 the corner test uses. On that canvas the 14 / 16 / 19 targets
+/// grow the fit distance by about 3%. A shorter canvas still frames the board;
+/// the camera just sits farther back. Landscape is not a supported orientation.
+public let portraitPlayAspects = [0.62]
 
 public struct WorldPoint: Equatable {
     public var x: Double
@@ -26,26 +35,50 @@ public struct WorldPoint: Equatable {
     public static let zero = WorldPoint(0, 0, 0)
 }
 
-/// Half the grid's world size. Cell 0 and cell `grid - 1` sit at ±this.
-public func cubeHalfExtent(grid: Int) -> Double {
-    Double(max(grid - 1, 1)) * 0.5
-}
+/// Width, height, and depth in cells. Depth stays equal to width so a layer
+/// step is the same length as a sideways step. Height is the portrait stretch.
+public struct ArenaSize: Equatable {
+    public var width: Int
+    public var height: Int
+    public var depth: Int
 
-/// A small shift of the look-at point toward the head. The shift is capped
-/// so the cube stays near the middle of the frame while the head eases inward.
-public func cameraLookAt(headWorld: WorldPoint, grid: Int, bias: Double = 0.08) -> WorldPoint {
-    let limit = cubeHalfExtent(grid: grid) * 0.35
-    func pull(_ value: Double) -> Double {
-        min(limit, max(-limit, value * bias))
+    public init(width: Int, height: Int, depth: Int) {
+        self.width = width
+        self.height = height
+        self.depth = depth
     }
-    return WorldPoint(pull(headWorld.x), pull(headWorld.y), pull(headWorld.z))
+
+    public static func cube(_ cells: Int) -> ArenaSize {
+        ArenaSize(width: cells, height: cells, depth: cells)
+    }
+
+    public var cellCount: Int { width * height * depth }
 }
 
-/// Closest distance at which every padded corner of the play cube falls
-/// inside the viewport. `aspect` is view width / height. The camera keeps
-/// `CameraRig`'s orientation, so swipe mapping does not change.
-public func cameraDistanceToFitCube(
-    grid: Int,
+/// Half the world size of one axis. Cell 0 and cell `cells - 1` sit at ±this.
+public func axisHalfExtent(_ cells: Int) -> Double {
+    Double(max(cells - 1, 1)) * 0.5
+}
+
+/// A small shift of the look-at point toward the head. Each axis is capped
+/// by that axis's own half, so a tall board does not drag the frame off center.
+public func cameraLookAt(headWorld: WorldPoint, arena: ArenaSize, bias: Double = 0.08) -> WorldPoint {
+    func pull(_ value: Double, _ cells: Int) -> Double {
+        let limit = axisHalfExtent(cells) * 0.35
+        return min(limit, max(-limit, value * bias))
+    }
+    return WorldPoint(
+        pull(headWorld.x, arena.width),
+        pull(headWorld.y, arena.height),
+        pull(headWorld.z, arena.depth)
+    )
+}
+
+/// Closest distance at which every padded corner falls inside the viewport.
+/// `aspect` is view width / height. The camera keeps `CameraRig`'s orientation,
+/// so swipe mapping does not change.
+public func cameraDistanceToFit(
+    arena: ArenaSize,
     aspect: Double,
     verticalFOVDegrees: Double = playCameraVerticalFOV,
     margin: Double = playCameraMargin,
@@ -53,11 +86,12 @@ public func cameraDistanceToFitCube(
     pad: Double = playCameraPad,
     rig: CameraRig = .standard
 ) -> Double {
+    let reach = max(axisHalfExtent(arena.width), axisHalfExtent(arena.height), axisHalfExtent(arena.depth))
     var low = 0.5
-    var high = max(cubeHalfExtent(grid: grid) * 6, 4)
+    var high = max(reach * 6, 4)
     var guardrail = 0
-    while !playCubeFits(
-        grid: grid,
+    while !playArenaFits(
+        arena: arena,
         aspect: aspect,
         distance: high,
         lookAt: lookAt,
@@ -71,8 +105,8 @@ public func cameraDistanceToFitCube(
     }
     for _ in 0..<32 {
         let mid = (low + high) * 0.5
-        if playCubeFits(
-            grid: grid,
+        if playArenaFits(
+            arena: arena,
             aspect: aspect,
             distance: mid,
             lookAt: lookAt,
@@ -91,8 +125,8 @@ public func cameraDistanceToFitCube(
 
 /// True when all eight padded corners project inside the inset frame and
 /// in front of the camera.
-public func playCubeFits(
-    grid: Int,
+public func playArenaFits(
+    arena: ArenaSize,
     aspect: Double,
     distance: Double,
     lookAt: WorldPoint = .zero,
@@ -102,7 +136,7 @@ public func playCubeFits(
     rig: CameraRig = .standard
 ) -> Bool {
     let limit = 1 - min(0.45, max(0, margin))
-    for corner in paddedCorners(grid: grid, pad: pad) {
+    for corner in paddedCorners(arena: arena, pad: pad) {
         guard let ndc = cameraNDC(
             point: corner,
             lookAt: lookAt,
@@ -114,6 +148,36 @@ public func playCubeFits(
         if abs(ndc.x) > limit + 1e-6 || abs(ndc.y) > limit + 1e-6 { return false }
     }
     return true
+}
+
+/// Tallest height from `width` through `target` whose fitted distance stays
+/// within `arenaDistanceGrowthLimit` of the cube on every portrait aspect.
+/// If `target` itself fits, that height is used. Otherwise the search stops
+/// at the last height that still fits.
+public func fittedArenaHeight(
+    width: Int,
+    depth: Int,
+    target: Int,
+    aspects: [Double] = portraitPlayAspects
+) -> Int {
+    let cap = max(width, target)
+    let cube = ArenaSize(width: width, height: width, depth: depth)
+    let baselines = aspects.map { cameraDistanceToFit(arena: cube, aspect: $0) }
+    var chosen = width
+    guard cap > width else { return width }
+    for height in (width + 1)...cap {
+        let arena = ArenaSize(width: width, height: height, depth: depth)
+        let fits = zip(aspects, baselines).allSatisfy { aspect, base in
+            let distance = cameraDistanceToFit(arena: arena, aspect: aspect)
+            return distance <= base * arenaDistanceGrowthLimit + 1e-6
+        }
+        if fits {
+            chosen = height
+        } else {
+            break
+        }
+    }
+    return chosen
 }
 
 /// Normalized device coordinates. ±1 is the edge of the frustum before margin.
@@ -145,13 +209,16 @@ public func cameraNDC(
     return (x, y, depth)
 }
 
-private func paddedCorners(grid: Int, pad: Double) -> [WorldPoint] {
-    let half = cubeHalfExtent(grid: grid) + max(0, pad)
+private func paddedCorners(arena: ArenaSize, pad: Double) -> [WorldPoint] {
+    let extra = max(0, pad)
+    let hx = axisHalfExtent(arena.width) + extra
+    let hy = axisHalfExtent(arena.height) + extra
+    let hz = axisHalfExtent(arena.depth) + extra
     var corners: [WorldPoint] = []
     corners.reserveCapacity(8)
-    for x in [-half, half] {
-        for y in [-half, half] {
-            for z in [-half, half] {
+    for x in [-hx, hx] {
+        for y in [-hy, hy] {
+            for z in [-hz, hz] {
                 corners.append(WorldPoint(x, y, z))
             }
         }

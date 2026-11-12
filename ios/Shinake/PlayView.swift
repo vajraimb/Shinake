@@ -301,7 +301,7 @@ struct PlayView: View {
         ZStack {
             Color.black.opacity(0.62).ignoresSafeArea()
             card(
-                title: model.game.phase == .won ? "立方体满了" : Copy.death(model.game.deathCause),
+                title: model.game.phase == .won ? "格子满了" : Copy.death(model.game.deathCause),
                 subtitle: endSubtitle
             ) {
                 Text("\(model.game.score)")

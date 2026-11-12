@@ -8,7 +8,7 @@ private enum SnakeFood {
     static let radius: CGFloat = 0.275
 }
 
-/// The cube, the snake and the food. Nodes are reused across frames so a
+/// The arena, the snake and the food. Nodes are reused across frames so a
 /// 60 fps tick on iPhone 13 Pro Max is a handful of position writes, not a
 /// rebuild. The camera matches `CameraRig.standard`, which is also what
 /// swipe-to-axis mapping is tested against.
@@ -30,7 +30,7 @@ final class GameSceneController {
     private var guideNode: SCNNode?
     private let snakeLayer = sliceNode(Theme.limeUI.withAlphaComponent(0.16))
     private let foodLayer = sliceNode(UIColor(red: 1, green: 0.36, blue: 0.42, alpha: 0.22))
-    private var builtGrid = -1
+    private var builtArena: ArenaSize?
     private var time: Double = 0
     private var snakeAlive = true
     private var bodyScale: Float = 1
@@ -116,8 +116,8 @@ final class GameSceneController {
         time += dt
         bodyScale = Float(snapshot.snakeScale)
         hueShift = snapshot.colorShift
-        if snapshot.grid != builtGrid {
-            rebuildBoard(grid: snapshot.grid)
+        if snapshot.arena != builtArena {
+            rebuildBoard(arena: snapshot.arena)
         }
         placeCamera(snapshot, shake: shake, dt: dt)
         placeLayers(snapshot)
@@ -127,26 +127,40 @@ final class GameSceneController {
         placeGuide(snapshot, visible: showGuide)
     }
 
-    private func rebuildBoard(grid: Int) {
-        builtGrid = grid
+    private func rebuildBoard(arena: ArenaSize) {
+        builtArena = arena
         gridNode?.removeFromParentNode()
         edgeRoot.removeFromParentNode()
         edgeRoot = SCNNode()
         world.addChildNode(edgeRoot)
 
-        let half = Float(grid - 1) * 0.5
+        let hx = Float(arena.width - 1) * 0.5
+        let hy = Float(arena.height - 1) * 0.5
+        let hz = Float(arena.depth - 1) * 0.5
         var vertices: [SCNVector3] = []
-        vertices.reserveCapacity(grid * grid * 6)
-        for a in 0..<grid {
-            for b in 0..<grid {
-                let fa = Float(a) - half
-                let fb = Float(b) - half
-                vertices.append(SCNVector3(-half, fa, fb))
-                vertices.append(SCNVector3(half, fa, fb))
-                vertices.append(SCNVector3(fa, -half, fb))
-                vertices.append(SCNVector3(fa, half, fb))
-                vertices.append(SCNVector3(fa, fb, -half))
-                vertices.append(SCNVector3(fa, fb, half))
+        vertices.reserveCapacity((arena.height * arena.depth + arena.width * arena.depth + arena.width * arena.height) * 2)
+        for y in 0..<arena.height {
+            for z in 0..<arena.depth {
+                let fy = Float(y) - hy
+                let fz = Float(z) - hz
+                vertices.append(SCNVector3(-hx, fy, fz))
+                vertices.append(SCNVector3(hx, fy, fz))
+            }
+        }
+        for x in 0..<arena.width {
+            for z in 0..<arena.depth {
+                let fx = Float(x) - hx
+                let fz = Float(z) - hz
+                vertices.append(SCNVector3(fx, -hy, fz))
+                vertices.append(SCNVector3(fx, hy, fz))
+            }
+        }
+        for x in 0..<arena.width {
+            for y in 0..<arena.height {
+                let fx = Float(x) - hx
+                let fy = Float(y) - hy
+                vertices.append(SCNVector3(fx, fy, -hz))
+                vertices.append(SCNVector3(fx, fy, hz))
             }
         }
         let source = SCNGeometrySource(vertices: vertices)
@@ -167,14 +181,14 @@ final class GameSceneController {
         gridNode = node
 
         let corners = [
-            SIMD3<Float>(-half, -half, -half),
-            SIMD3<Float>(half, -half, -half),
-            SIMD3<Float>(half, half, -half),
-            SIMD3<Float>(-half, half, -half),
-            SIMD3<Float>(-half, -half, half),
-            SIMD3<Float>(half, -half, half),
-            SIMD3<Float>(half, half, half),
-            SIMD3<Float>(-half, half, half),
+            SIMD3<Float>(-hx, -hy, -hz),
+            SIMD3<Float>(hx, -hy, -hz),
+            SIMD3<Float>(hx, hy, -hz),
+            SIMD3<Float>(-hx, hy, -hz),
+            SIMD3<Float>(-hx, -hy, hz),
+            SIMD3<Float>(hx, -hy, hz),
+            SIMD3<Float>(hx, hy, hz),
+            SIMD3<Float>(-hx, hy, hz),
         ]
         // Bottom face, top face, then the four verticals.
         let pairs: [(Int, Int, UIColor)] = [
@@ -199,17 +213,17 @@ final class GameSceneController {
         }
         let headWorld: WorldPoint
         if let head = snapshot.snake.first {
-            let point = worldPoint(head, grid: snapshot.grid)
+            let point = worldPoint(head, arena: snapshot.arena)
             headWorld = WorldPoint(Double(point.x), Double(point.y), Double(point.z))
         } else {
             headWorld = .zero
         }
-        let target = cameraLookAt(headWorld: headWorld, grid: snapshot.grid)
+        let target = cameraLookAt(headWorld: headWorld, arena: snapshot.arena)
         let aim = SIMD3<Float>(Float(target.x), Float(target.y), Float(target.z))
         let follow = Float(1 - exp(-dt * 2.8))
         smoothedLook += (aim - smoothedLook) * min(1, max(0, follow))
-        let distance = cameraDistanceToFitCube(
-            grid: snapshot.grid,
+        let distance = cameraDistanceToFit(
+            arena: snapshot.arena,
             aspect: aspect,
             lookAt: WorldPoint(Double(smoothedLook.x), Double(smoothedLook.y), Double(smoothedLook.z))
         )
@@ -390,9 +404,9 @@ final class GameSceneController {
         if let turn = snapshot.pendingTurn {
             return SIMD3<Float>(Float(turn.x), Float(turn.y), Float(turn.z))
         }
-        let current = worldPoint(snapshot.snake[0], grid: snapshot.grid)
+        let current = worldPoint(snapshot.snake[0], arena: snapshot.arena)
         let fromCell = snapshot.previous.first ?? snapshot.snake[0]
-        let from = worldPoint(fromCell, grid: snapshot.grid)
+        let from = worldPoint(fromCell, arena: snapshot.arena)
         let travel = SIMD3<Float>(current.x - from.x, current.y - from.y, current.z - from.z)
         if simd_length(travel) > 0.05 {
             return simd_normalize(travel)
@@ -407,7 +421,7 @@ final class GameSceneController {
             node.removeFromParentNode()
             foodNodes.removeValue(forKey: id)
         }
-        let half = Float(snapshot.grid - 1) * 0.5
+        let floor = Float(snapshot.arena.height - 1) * 0.5
         let pulse = 1 + 0.07 * sin(Float(time) * 3.2)
         for pellet in snapshot.foods {
             let nodeKey = pellet.recipe.map(recipeKey) ?? pellet.kind.rawValue
@@ -426,16 +440,16 @@ final class GameSceneController {
                 let angle = Float(time) * 2.4 + Float(index) * 1.57
                 spark.simdPosition = SIMD3<Float>(cos(angle) * 0.40, sin(angle * 1.4) * 0.12, sin(angle) * 0.40)
             }
-            node.position = worldPoint(pellet.position, grid: snapshot.grid)
+            node.position = worldPoint(pellet.position, arena: snapshot.arena)
             let squash: Float = pellet.kind == .apple ? 0.88 : 1
             node.scale = SCNVector3(pulse, pulse * squash, pulse)
             if let beacon = node.childNode(withName: "beacon", recursively: false) {
-                let height = max(0.2, node.position.y + half)
+                let height = max(0.2, node.position.y + floor)
                 beacon.position = SCNVector3(0, -height * 0.5, 0)
                 (beacon.geometry as? SCNCylinder)?.height = CGFloat(height)
             }
             if let shadow = node.childNode(withName: "shadow", recursively: false) {
-                let floorY = -half + 0.05
+                let floorY = -floor + 0.05
                 shadow.position = SCNVector3(0, floorY - node.position.y, 0)
             }
             if pellet.recipe != nil {
@@ -869,26 +883,27 @@ final class GameSceneController {
             }
         }
         for (cell, node) in zip(snapshot.solids, solidNodes) {
-            node.position = worldPoint(cell, grid: snapshot.grid)
+            node.position = worldPoint(cell, arena: snapshot.arena)
         }
     }
 
     private func placeLayers(_ snapshot: RenderSnapshot) {
-        let span = Float(max(snapshot.grid - 1, 1))
+        let spanX = Float(max(snapshot.arena.width - 1, 1))
+        let spanY = Float(max(snapshot.arena.height - 1, 1))
         guard let head = snapshot.snake.first else {
             snakeLayer.isHidden = true
             foodLayer.isHidden = true
             return
         }
-        let headPoint = worldPoint(head, grid: snapshot.grid)
+        let headPoint = worldPoint(head, arena: snapshot.arena)
         snakeLayer.isHidden = false
         snakeLayer.position = SCNVector3(0, 0, headPoint.z)
-        snakeLayer.scale = SCNVector3(span, span, 1)
+        snakeLayer.scale = SCNVector3(spanX, spanY, 1)
         if let food = snapshot.foods.first, food.position.z != head.z {
-            let foodPoint = worldPoint(food.position, grid: snapshot.grid)
+            let foodPoint = worldPoint(food.position, arena: snapshot.arena)
             foodLayer.isHidden = false
             foodLayer.position = SCNVector3(0, 0, foodPoint.z)
-            foodLayer.scale = SCNVector3(span, span, 1)
+            foodLayer.scale = SCNVector3(spanX, spanY, 1)
         } else {
             foodLayer.isHidden = true
         }
@@ -898,8 +913,8 @@ final class GameSceneController {
         guideNode?.removeFromParentNode()
         guideNode = nil
         guard visible, let food = snapshot.foods.first, let head = snapshot.snake.first else { return }
-        let from = worldPoint(head, grid: snapshot.grid)
-        let to = worldPoint(food.position, grid: snapshot.grid)
+        let from = worldPoint(head, arena: snapshot.arena)
+        let to = worldPoint(food.position, arena: snapshot.arena)
         let node = cylinder(
             from: SIMD3<Float>(from.x, from.y, from.z),
             to: SIMD3<Float>(to.x, to.y, to.z),
@@ -913,21 +928,24 @@ final class GameSceneController {
     private func segmentPosition(index: Int, snapshot: RenderSnapshot, alpha: Float) -> SCNVector3 {
         let current = snapshot.snake
         let previous = snapshot.previous
-        let grid = snapshot.grid
+        let arena = snapshot.arena
         if index == 0 {
             let from = previous.first ?? current[0]
-            return mix(worldPoint(from, grid: grid), worldPoint(current[0], grid: grid), alpha)
+            return mix(worldPoint(from, arena: arena), worldPoint(current[0], arena: arena), alpha)
         }
         if previous.count == current.count, index < previous.count {
-            return mix(worldPoint(previous[index], grid: grid), worldPoint(current[index], grid: grid), alpha)
+            return mix(worldPoint(previous[index], arena: arena), worldPoint(current[index], arena: arena), alpha)
         }
         let from = (index - 1) < previous.count ? previous[index - 1] : current[index]
-        return mix(worldPoint(from, grid: grid), worldPoint(current[index], grid: grid), alpha)
+        return mix(worldPoint(from, arena: arena), worldPoint(current[index], arena: arena), alpha)
     }
 
-    private func worldPoint(_ cell: Vec3, grid: Int) -> SCNVector3 {
-        let half = Float(grid - 1) * 0.5
-        return SCNVector3(Float(cell.x) - half, Float(cell.y) - half, Float(cell.z) - half)
+    private func worldPoint(_ cell: Vec3, arena: ArenaSize) -> SCNVector3 {
+        return SCNVector3(
+            Float(cell.x) - Float(arena.width - 1) * 0.5,
+            Float(cell.y) - Float(arena.height - 1) * 0.5,
+            Float(cell.z) - Float(arena.depth - 1) * 0.5
+        )
     }
 
     private func cylinder(from start: SIMD3<Float>, to end: SIMD3<Float>, color: UIColor, radius: Float = 0.045) -> SCNNode {

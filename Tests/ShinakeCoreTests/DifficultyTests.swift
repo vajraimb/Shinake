@@ -18,7 +18,12 @@ final class DifficultyTests: XCTestCase {
     func testEasyIsTheDefaultProfileShape() {
         let easy = Difficulty.easy.profile
         XCTAssertEqual(easy, .easy)
-        XCTAssertEqual(easy.grid, 9)
+        XCTAssertEqual(easy.arena.width, 9)
+        XCTAssertEqual(easy.arena.depth, 9)
+        XCTAssertEqual(easy.arena.height, fittedArenaHeight(width: 9, depth: 9, target: 14))
+        XCTAssertLessThanOrEqual(easy.arena.height, 14)
+        XCTAssertGreaterThan(easy.arena.height, easy.arena.width)
+        XCTAssertEqual(easy.arena.height, 14)
         XCTAssertEqual(easy.startInterval, 0.64, accuracy: 0.0001)
         XCTAssertEqual(easy.minInterval, 0.32, accuracy: 0.0001)
         XCTAssertEqual(easy.speedStep, 0.008, accuracy: 0.0001)
@@ -33,7 +38,14 @@ final class DifficultyTests: XCTestCase {
 
     func testHardMatchesTheDesktopPace() {
         let hard = Difficulty.hard.profile
-        XCTAssertEqual(hard.grid, LegacyTuning.grid)
+        XCTAssertEqual(hard.arena.width, LegacyTuning.grid)
+        XCTAssertEqual(hard.arena.depth, LegacyTuning.grid)
+        XCTAssertEqual(
+            hard.arena.height,
+            fittedArenaHeight(width: LegacyTuning.grid, depth: LegacyTuning.grid, target: 19)
+        )
+        XCTAssertGreaterThan(hard.arena.height, hard.arena.width)
+        XCTAssertEqual(hard.arena.height, 19)
         XCTAssertEqual(hard.startInterval, LegacyTuning.startInterval, accuracy: 0.0001)
         XCTAssertEqual(hard.minInterval, LegacyTuning.minInterval, accuracy: 0.0001)
         XCTAssertEqual(hard.speedStep, LegacyTuning.speedStep, accuracy: 0.0001)
@@ -47,6 +59,11 @@ final class DifficultyTests: XCTestCase {
         XCTAssertGreaterThan(normal.startInterval, Difficulty.hard.profile.startInterval)
         XCTAssertLessThan(normal.startInterval, Difficulty.easy.profile.startInterval)
         XCTAssertGreaterThan(normal.minInterval, LegacyTuning.minInterval)
+        XCTAssertEqual(normal.arena.width, 10)
+        XCTAssertEqual(normal.arena.depth, 10)
+        XCTAssertEqual(normal.arena.height, fittedArenaHeight(width: 10, depth: 10, target: 16))
+        XCTAssertGreaterThan(normal.arena.height, normal.arena.width)
+        XCTAssertEqual(normal.arena.height, 16)
         XCTAssertEqual(normal.graceCharges, 1)
         XCTAssertEqual(normal.graceWindow, 30, accuracy: 0.0001)
         XCTAssertEqual(normal.freeRescuesUntilEaten, 0)

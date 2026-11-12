@@ -122,7 +122,7 @@ final class SnakeGameTests: XCTestCase {
 
     func testWallKillsImmediatelyOnHard() {
         let game = classic(.hard)
-        let edge = game.grid - 1
+        let edge = game.width - 1
         game.debugArrange(
             snake: [Vec3(edge, 6, 6), Vec3(edge - 1, 6, 6), Vec3(edge - 2, 6, 6)],
             direction: .xp,
@@ -136,7 +136,7 @@ final class SnakeGameTests: XCTestCase {
 
     func testEasyGraceTurnsAWallIntoASave() {
         let game = classic(.easy)
-        let edge = game.grid - 1
+        let edge = game.width - 1
         game.debugArrange(
             snake: [Vec3(edge, 4, 4), Vec3(edge - 1, 4, 4), Vec3(edge - 2, 4, 4)],
             direction: .xp,
@@ -154,7 +154,7 @@ final class SnakeGameTests: XCTestCase {
 
     func testGraceIsSpentOnlyAfterTheOpeningApples() {
         let game = classic(.easy)
-        let edge = game.grid - 1
+        let edge = game.width - 1
         game.debugArrange(
             snake: [Vec3(edge, 4, 4), Vec3(edge - 1, 4, 4), Vec3(edge - 2, 4, 4)],
             direction: .xp,
@@ -185,7 +185,7 @@ final class SnakeGameTests: XCTestCase {
 
     func testGraceExpiresWithTheClock() {
         let game = classic(.easy)
-        let edge = game.grid - 1
+        let edge = game.width - 1
         game.debugArrange(
             snake: [Vec3(edge, 4, 4), Vec3(edge - 1, 4, 4), Vec3(edge - 2, 4, 4)],
             direction: .xp,
@@ -233,7 +233,8 @@ final class SnakeGameTests: XCTestCase {
         for seed: UInt64 in [1, 4, 11, 20] {
             let game = classic(.hard, seed: seed)
             let distance = game.foods[0].position.manhattan(to: game.snake[0])
-            XCTAssertGreaterThanOrEqual(distance, LegacyTuning.minFoodDistance, "seed \(seed)")
+            XCTAssertGreaterThanOrEqual(distance, FoodPlacement.laterMin, "seed \(seed)")
+            XCTAssertLessThanOrEqual(distance, FoodPlacement.laterMax, "seed \(seed)")
             XCTAssertFalse(game.snake.contains(game.foods[0].position))
         }
     }
@@ -303,7 +304,7 @@ final class SnakeGameTests: XCTestCase {
 
     func testShieldStopsAWallAndMushroomShortensALongSnake() {
         let game = classic(.hard)
-        let edge = game.grid - 1
+        let edge = game.width - 1
         game.debugArrange(
             snake: [Vec3(edge, 6, 6), Vec3(edge - 1, 6, 6), Vec3(edge - 2, 6, 6)],
             direction: .xp,
@@ -450,7 +451,7 @@ final class SnakeGameTests: XCTestCase {
         for _ in 0..<3 {
             let head = game.snake[0]
             let bite = head + .xp
-            guard game.grid > bite.x else { break }
+            guard game.width > bite.x else { break }
             game.debugArrange(
                 snake: game.snake,
                 direction: .xp,
@@ -558,11 +559,10 @@ final class SnakeGameTests: XCTestCase {
         let distance = food.manhattan(to: head)
         XCTAssertGreaterThanOrEqual(distance, 2)
         XCTAssertLessThanOrEqual(distance, 4)
-        let limit = game.grid - 2
         XCTAssertGreaterThan(food.x, 1)
-        XCTAssertLessThan(food.x, limit)
+        XCTAssertLessThan(food.x, game.width - 2)
         XCTAssertGreaterThan(food.y, 1)
-        XCTAssertLessThan(food.y, limit)
+        XCTAssertLessThan(food.y, game.height - 2)
         let start = game.snake
         _ = game.update(dt: 0.2)
         XCTAssertEqual(game.snake, start)
@@ -606,7 +606,7 @@ final class SnakeGameTests: XCTestCase {
 
     func testHintLeavesABlockedAxisAndDoesNotStayThere() {
         let game = classic(.easy)
-        let edge = game.grid - 1
+        let edge = game.width - 1
         let head = Vec3(edge, 4, 4)
         // Facing the right wall. The apple is purely to the left, so a left
         // swipe would be a U-turn and the wall blocks going further right.
@@ -655,11 +655,11 @@ final class SnakeGameTests: XCTestCase {
 
     func testOpeningAppleStaysOnLayerAfterADepthRescue() {
         let game = classic(.easy)
-        let head = Vec3(8, 8, 4)
+        let head = Vec3(game.width - 1, game.height - 1, game.depth / 2)
         // Right and up are the wall. Left is the neck. Down is the tail, and
         // growth keeps that cell occupied, so the only safe turn leaves the layer.
         game.debugArrange(
-            snake: [head, head + .xn, Vec3(7, 7, 4), Vec3(8, 7, 4)],
+            snake: [head, head + .xn, head + .xn + .yn, head + .yn],
             direction: .xp,
             foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(3, 8, 4))],
             pendingGrowth: 1
@@ -791,12 +791,18 @@ final class SnakeGameTests: XCTestCase {
         XCTAssertEqual(SnakeBody.shrinkMultiplier, 0.72, accuracy: 0.0001)
         XCTAssertEqual(
             ScoreBoard.localBestKey(difficulty: .easy, separateLoadout: false),
-            "shinake.best.easy"
+            "shinake.best.v2.easy"
         )
         XCTAssertEqual(
             ScoreBoard.localBestKey(difficulty: .normal, separateLoadout: true),
-            "shinake.best.loadout.normal"
+            "shinake.best.v2.loadout.normal"
         )
+        XCTAssertNotEqual(
+            ScoreBoard.localBestKey(difficulty: .hard, separateLoadout: false),
+            "shinake.best.hard"
+        )
+        XCTAssertEqual(GameCenterBoards.bestID, "one.vajra.shinake.feeding_v2")
+        XCTAssertEqual(GameCenterBoards.weeklyID, "one.vajra.shinake.weekly_v2")
     }
 
     func testEmptyLoadoutStaysAnAppleGameThenKeepsTwoFoods() {
@@ -899,5 +905,76 @@ final class SnakeGameTests: XCTestCase {
         XCTAssertEqual(game.snakeScale, SnakeBody.shrinkMultiplier, accuracy: 0.0001)
         XCTAssertEqual(game.foods.count, 2)
         XCTAssertTrue(game.foods.allSatisfy { $0.recipe?.id == "bonus" })
+    }
+
+    func testCeilingKillsAndCellsAboveTheOldCubeAreInside() {
+        let hard = classic(.hard)
+        XCTAssertEqual(hard.depth, hard.width)
+        XCTAssertGreaterThan(hard.height, hard.width)
+        let x = hard.width / 2
+        let z = hard.depth / 2
+        let approach = Vec3(x, hard.width - 1, z)
+        hard.debugArrange(
+            snake: [approach, approach + .yn, approach + .yn + .xn],
+            direction: .yp,
+            foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(0, 0, 0))]
+        )
+        let entered = hard.debugStep()
+        XCTAssertFalse(entered.contains(.died))
+        XCTAssertEqual(hard.snake[0], approach + .yp)
+
+        let ceiling = Vec3(x, hard.height - 1, z)
+        hard.debugArrange(
+            snake: [ceiling, ceiling + .yn, ceiling + .yn + .xn],
+            direction: .yp,
+            foods: [FoodPellet(id: 2, kind: .apple, position: Vec3(1, 0, 1))]
+        )
+        let hit = hard.debugStep()
+        XCTAssertTrue(hit.contains(.died))
+        XCTAssertEqual(hard.deathCause, .wall)
+
+        let left = Vec3(0, hard.height / 2, z)
+        hard.debugArrange(
+            snake: [left, left + .xp, left + .xp + .xp],
+            direction: .xn,
+            foods: [FoodPellet(id: 3, kind: .apple, position: Vec3(2, 2, 2))]
+        )
+        let wrapped = hard.debugStep()
+        XCTAssertTrue(wrapped.contains(.died))
+        XCTAssertEqual(hard.deathCause, .wall)
+    }
+
+    func testOpeningStaysCloseAndLaterFoodUsesTheThreeToEightBand() {
+        let game = classic(.easy, seed: 8)
+        let opening = game.foods[0].position
+        XCTAssertEqual(opening.z, game.snake[0].z)
+        XCTAssertGreaterThanOrEqual(opening.x, 0)
+        XCTAssertLessThan(opening.x, game.width)
+        XCTAssertGreaterThanOrEqual(opening.y, 0)
+        XCTAssertLessThan(opening.y, game.height)
+        let distance = opening.manhattan(to: game.snake[0])
+        XCTAssertGreaterThanOrEqual(distance, FoodPlacement.openingMin)
+        XCTAssertLessThanOrEqual(distance, FoodPlacement.openingMax)
+
+        for _ in 0..<3 {
+            let bite = game.foods[0].position
+            game.debugArrange(
+                snake: [bite + .xn, bite + .xn + .xn, bite + .xn + .xn + .xn],
+                direction: .xp,
+                foods: [FoodPellet(id: 1, kind: .apple, position: bite)],
+                eaten: game.eaten
+            )
+            _ = game.debugStep()
+        }
+        XCTAssertEqual(game.eaten, 3)
+        XCTAssertEqual(game.foods.count, 2)
+        for pellet in game.foods {
+            XCTAssertLessThan(pellet.position.y, game.height)
+            XCTAssertLessThan(pellet.position.x, game.width)
+            XCTAssertLessThan(pellet.position.z, game.depth)
+            let span = pellet.position.manhattan(to: game.snake[0])
+            XCTAssertGreaterThanOrEqual(span, FoodPlacement.laterMin)
+            XCTAssertLessThanOrEqual(span, FoodPlacement.laterMax)
+        }
     }
 }

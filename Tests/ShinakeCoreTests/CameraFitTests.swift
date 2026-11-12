@@ -6,94 +6,126 @@ import XCTest
 #endif
 
 final class CameraFitTests: XCTestCase {
-    /// Portrait play-canvas aspects: a tall 13 Pro Max canvas, an SE canvas,
-    /// a square, and a short wide one.
-    private let aspects = [0.62, 0.86, 1.0, 1.35]
+    private let profiles = [DifficultyProfile.easy, DifficultyProfile.normal, DifficultyProfile.hard]
 
-    func testFittedDistanceKeepsTheWholeCubeInside() {
-        for grid in [9, 10, 12] {
-            for aspect in aspects {
-                let distance = cameraDistanceToFitCube(grid: grid, aspect: aspect)
-                XCTAssertGreaterThan(distance, 1, "grid \(grid) aspect \(aspect)")
+    func testPortraitCuboidStaysWithinFivePercentOfTheCube() {
+        for profile in profiles {
+            let arena = profile.arena
+            let cube = ArenaSize.cube(arena.width)
+            XCTAssertEqual(arena.depth, arena.width)
+            XCTAssertGreaterThan(arena.height, arena.width)
+            for aspect in portraitPlayAspects {
+                let cubeDistance = cameraDistanceToFit(arena: cube, aspect: aspect)
+                let distance = cameraDistanceToFit(arena: arena, aspect: aspect)
+                XCTAssertLessThanOrEqual(
+                    distance,
+                    cubeDistance * arenaDistanceGrowthLimit + 1e-6,
+                    "\(profile.id) aspect \(aspect) grew past 5%"
+                )
                 XCTAssertTrue(
-                    playCubeFits(grid: grid, aspect: aspect, distance: distance),
-                    "grid \(grid) aspect \(aspect) distance \(distance)"
+                    playArenaFits(arena: arena, aspect: aspect, distance: distance),
+                    "\(profile.id) aspect \(aspect)"
                 )
                 XCTAssertFalse(
-                    playCubeFits(grid: grid, aspect: aspect, distance: distance * 0.985),
-                    "grid \(grid) aspect \(aspect) should clip when pulled in"
+                    playArenaFits(arena: arena, aspect: aspect, distance: distance * 0.985),
+                    "\(profile.id) aspect \(aspect) should clip when pulled in"
                 )
             }
         }
     }
 
+    func testHeightIsTheTallestThatStillFitsPortrait() {
+        let targets = [(9, 14), (10, 16), (12, 19)]
+        for (width, target) in targets {
+            let height = fittedArenaHeight(width: width, depth: width, target: target)
+            XCTAssertGreaterThan(height, width)
+            XCTAssertLessThanOrEqual(height, target)
+            let chosen = ArenaSize(width: width, height: height, depth: width)
+            let cube = ArenaSize.cube(width)
+            for aspect in portraitPlayAspects {
+                let base = cameraDistanceToFit(arena: cube, aspect: aspect)
+                let distance = cameraDistanceToFit(arena: chosen, aspect: aspect)
+                XCTAssertLessThanOrEqual(distance, base * arenaDistanceGrowthLimit + 1e-6)
+            }
+            if height < target {
+                let taller = ArenaSize(width: width, height: height + 1, depth: width)
+                let overflows = portraitPlayAspects.contains { aspect in
+                    let base = cameraDistanceToFit(arena: cube, aspect: aspect)
+                    let next = cameraDistanceToFit(arena: taller, aspect: aspect)
+                    return next > base * arenaDistanceGrowthLimit + 1e-6
+                }
+                XCTAssertTrue(overflows, "width \(width) could have been taller than \(height)")
+            }
+            // A shorter portrait canvas still frames the whole board.
+            let short = cameraDistanceToFit(arena: chosen, aspect: 0.86)
+            XCTAssertTrue(playArenaFits(arena: chosen, aspect: 0.86, distance: short))
+        }
+    }
+
+    func testCuboidCornersStayInsideATallPortraitCanvas() {
+        let aspect = 0.62
+        for profile in profiles {
+            let arena = profile.arena
+            let hx = axisHalfExtent(arena.width)
+            let hy = axisHalfExtent(arena.height)
+            let hz = axisHalfExtent(arena.depth)
+            let corner = WorldPoint(-hx, hy, -hz)
+            let look = cameraLookAt(headWorld: corner, arena: arena)
+            let distance = cameraDistanceToFit(arena: arena, aspect: aspect, lookAt: look)
+            let ndc = cameraNDC(point: corner, lookAt: look, distance: distance, aspect: aspect)
+            XCTAssertNotNil(ndc, profile.id)
+            if let ndc {
+                XCTAssertLessThan(abs(ndc.x), 1 - playCameraMargin + 1e-4, profile.id)
+                XCTAssertLessThan(abs(ndc.y), 1 - playCameraMargin + 1e-4, profile.id)
+            }
+            let surface = WorldPoint(-(hx + 0.30), hy, -hz)
+            let surfaceNDC = cameraNDC(point: surface, lookAt: .zero, distance: cameraDistanceToFit(arena: arena, aspect: aspect), aspect: aspect)
+            XCTAssertNotNil(surfaceNDC, profile.id)
+            if let surfaceNDC {
+                XCTAssertLessThan(abs(surfaceNDC.x), 1 - playCameraMargin + 1e-4, profile.id)
+                XCTAssertLessThan(abs(surfaceNDC.y), 1 - playCameraMargin + 1e-4, profile.id)
+            }
+        }
+    }
+
     func testOldFixedDistanceCropsANarrowPortraitCanvas() {
-        // What the device build used: distance = grid * 2.55, FOV 32°.
-        // On a tall 13 Pro Max canvas the cube's corners leave the frame.
-        let grid = 9
-        let old = Double(grid) * 2.55
-        XCTAssertFalse(playCubeFits(grid: grid, aspect: 0.66, distance: old))
-        let fitted = cameraDistanceToFitCube(grid: grid, aspect: 0.66)
+        // What the device build used: distance = width * 2.55, FOV 32°.
+        let cube = ArenaSize.cube(DifficultyProfile.easy.arena.width)
+        let old = Double(cube.width) * 2.55
+        XCTAssertFalse(playArenaFits(arena: cube, aspect: 0.66, distance: old))
+        let fitted = cameraDistanceToFit(arena: cube, aspect: 0.66)
         XCTAssertGreaterThan(fitted, old)
-        XCTAssertTrue(playCubeFits(grid: grid, aspect: 0.66, distance: fitted))
+        XCTAssertTrue(playArenaFits(arena: cube, aspect: 0.66, distance: fitted))
     }
 
     func testTighterMarginPullsTheCameraCloser() {
-        let roomy = cameraDistanceToFitCube(grid: 9, aspect: 0.66, margin: 0.12, pad: 0.55)
-        let tight = cameraDistanceToFitCube(grid: 9, aspect: 0.66)
+        let cube = ArenaSize.cube(DifficultyProfile.easy.arena.width)
+        let roomy = cameraDistanceToFit(arena: cube, aspect: 0.66, margin: 0.12, pad: 0.55)
+        let tight = cameraDistanceToFit(arena: cube, aspect: 0.66)
         XCTAssertEqual(playCameraMargin, 0.045, accuracy: 0.0001)
         XCTAssertLessThan(playCameraPad, 0.5)
         XCTAssertLessThan(tight, roomy * 0.92)
-        XCTAssertTrue(playCubeFits(grid: 9, aspect: 0.66, distance: tight))
+        XCTAssertTrue(playArenaFits(arena: cube, aspect: 0.66, distance: tight))
     }
 
-    func testCornerHeadSphereStaysInsideTheFrame() {
-        let grid = 9
-        let half = cubeHalfExtent(grid: grid)
-        let headSurface = WorldPoint(-(half + 0.30), half, -half)
-        let distance = cameraDistanceToFitCube(grid: grid, aspect: 0.62)
-        let ndc = cameraNDC(point: headSurface, lookAt: .zero, distance: distance, aspect: 0.62)
-        XCTAssertNotNil(ndc)
-        if let ndc {
-            XCTAssertLessThan(abs(ndc.x), 1 - playCameraMargin + 1e-4)
-            XCTAssertLessThan(abs(ndc.y), 1 - playCameraMargin + 1e-4)
-        }
+    func testNarrowerPortraitCanvasNeedsAtLeastAsMuchDistance() {
+        let arena = DifficultyProfile.easy.arena
+        let wider = cameraDistanceToFit(arena: arena, aspect: 0.86)
+        let narrow = cameraDistanceToFit(arena: arena, aspect: 0.62)
+        XCTAssertGreaterThanOrEqual(narrow, wider)
     }
 
-    func testNarrowerCanvasNeedsAtLeastAsMuchDistance() {
-        let wide = cameraDistanceToFitCube(grid: 9, aspect: 1.2)
-        let narrow = cameraDistanceToFitCube(grid: 9, aspect: 0.62)
-        XCTAssertGreaterThanOrEqual(narrow, wide)
-    }
-
-    func testLookAtBiasStaysGentleAndTheCubeStillFits() {
-        let grid = 9
-        let half = cubeHalfExtent(grid: grid)
-        let head = WorldPoint(half, -half * 0.5, half)
-        let look = cameraLookAt(headWorld: head, grid: grid)
+    func testLookAtBiasStaysGentleAndTheArenaStillFits() {
+        let arena = DifficultyProfile.easy.arena
+        let hx = axisHalfExtent(arena.width)
+        let hy = axisHalfExtent(arena.height)
+        let head = WorldPoint(hx, -hy * 0.5, hx)
+        let look = cameraLookAt(headWorld: head, arena: arena)
         XCTAssertGreaterThan(look.x, 0)
-        XCTAssertLessThan(look.x, half * 0.35 + 1e-6)
-        XCTAssertEqual(cameraLookAt(headWorld: head, grid: grid, bias: 0), .zero)
-        let distance = cameraDistanceToFitCube(grid: grid, aspect: 0.66, lookAt: look)
-        XCTAssertTrue(playCubeFits(grid: grid, aspect: 0.66, distance: distance, lookAt: look))
-    }
-
-    func testCornerHeadStillProjectsInsideTheMargin() {
-        let grid = 9
-        let half = cubeHalfExtent(grid: grid)
-        let head = WorldPoint(-half, half, -half)
-        let look = cameraLookAt(headWorld: head, grid: grid)
-        let distance = cameraDistanceToFitCube(grid: grid, aspect: 0.62, lookAt: look)
-        let ndc = cameraNDC(
-            point: head,
-            lookAt: look,
-            distance: distance,
-            aspect: 0.62
-        )
-        XCTAssertNotNil(ndc)
-        if let ndc {
-            XCTAssertLessThan(abs(ndc.x), 1 - playCameraMargin + 1e-6)
-            XCTAssertLessThan(abs(ndc.y), 1 - playCameraMargin + 1e-6)
-        }
+        XCTAssertLessThan(look.x, hx * 0.35 + 1e-6)
+        XCTAssertLessThan(abs(look.y), hy * 0.35 + 1e-6)
+        XCTAssertEqual(cameraLookAt(headWorld: head, arena: arena, bias: 0), .zero)
+        let distance = cameraDistanceToFit(arena: arena, aspect: 0.62, lookAt: look)
+        XCTAssertTrue(playArenaFits(arena: arena, aspect: 0.62, distance: distance, lookAt: look))
     }
 }
