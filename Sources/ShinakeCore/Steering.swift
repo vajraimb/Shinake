@@ -5,7 +5,7 @@ import Foundation
 /// Yaw 0 is a camera sitting on +Z looking at the origin. These angles keep
 /// screen-right on +X, screen-up on +Y, and the depth axis on Z, while still
 /// showing three faces of the cube. The mapping is asserted in tests — if the
-/// angle changes, the depth buttons and the hints have to change with it.
+/// angle changes, the pinch and the hints have to change with it.
 public struct CameraRig: Equatable {
     public var yaw: Double
     public var pitch: Double
@@ -103,7 +103,6 @@ public enum DepthPinch: Equatable {
 }
 
 /// Pinch out goes into the screen. Pinch in comes toward the viewer.
-/// The 深入 and 拉近 buttons are not affected.
 public func depthControl(for pinch: DepthPinch) -> ControlInput {
     switch pinch {
     case .outward: return .depthIn

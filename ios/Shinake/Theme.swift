@@ -70,8 +70,8 @@ enum Copy {
         case .goEat:
             return "去吃那颗光"
         case .useDepth(let inward, let layers):
-            let name = inward ? "深入" : "拉近"
-            return "还差 \(layers) 层 · 点「\(name)」"
+            let how = inward ? "张开" : "捏合"
+            return "还差 \(layers) 层 · 双指\(how)"
         case .practiceSaved:
             return "先帮你拐回来，这次不扣护盾"
         case .graceSaved(let left):
@@ -87,8 +87,8 @@ enum Copy {
         case .screen(.left): return "向左滑"
         case .screen(.up): return "向上滑"
         case .screen(.down): return "向下滑"
-        case .depthIn: return "果子在里面，点「深入」"
-        case .depthOut: return "果子朝你这边，点「拉近」"
+        case .depthIn: return "果子在里面，双指张开"
+        case .depthOut: return "果子朝你这边，双指捏合"
         }
     }
 

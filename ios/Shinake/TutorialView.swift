@@ -7,7 +7,7 @@ struct TutorialView: View {
     private let pages: [(title: String, body: String)] = [
         ("滑动转向", "手指在画面上滑。蛇顺着那个方向拐，但不能直接掉头，免得咬到自己。"),
         ("先吃到光", "开局很慢，箭头会告诉你往哪滑。吃到会变长。\n投喂实验室里，你点菜，AI 替你追。"),
-        ("还有一层深浅", "长方体有前后。底部「深\u{2060}入」往画面里面走，「拉\u{2060}近」往你这边退。每按一次，或每捏一次，只走一层。\n双指张开＝深\u{2060}入 · 捏合＝拉\u{2060}近。\n简单难度先送 6 次护\u{2060}盾。前三个苹果撞到了也不扣。"),
+        ("还有一层深浅", "长方体有前后。双指张开，蛇往画面里面走一层；双指捏合，往你这边退一层。\n张开＝深\u{2060}入 · 捏合＝拉\u{2060}近。\n简单难度先送 6 次护\u{2060}盾。前三个苹果撞到了也不扣。"),
     ]
 
     var body: some View {
@@ -86,8 +86,8 @@ struct TutorialView: View {
             }
         default:
             HStack(spacing: 12) {
-                depthPreview("深入", "往里")
-                depthPreview("拉近", "往外")
+                depthPreview("张开", "深入 · 往里")
+                depthPreview("捏合", "拉近 · 往外")
             }
             .frame(maxWidth: 320)
         }
@@ -169,17 +169,15 @@ struct SettingsSheet: View {
             .background(Theme.card)
             .clipShape(RoundedRectangle(cornerRadius: 12, style: .continuous))
             Text(model.scheme == .swipe
-                 ? "在画面上滑动来转向。底部两个大按钮管长方体的前后。"
-                 : "六个大按钮，适合单手点。左右上下是画面方向，深入和拉近是前后。")
+                 ? "在画面上滑动来转向。双指张开是深入，捏合是拉近。"
+                 : "四个方向键管上下左右。前后用双指：张开是深入，捏合是拉近。")
                 .font(.system(size: 14, weight: .regular, design: .rounded))
                 .foregroundColor(Theme.dim)
                 .fixedSize(horizontal: false, vertical: true)
             Toggle("音效", isOn: $model.soundOn)
             Toggle("震动", isOn: $model.hapticsOn)
             Toggle("隐藏状态栏", isOn: $model.statusBarHidden)
-            Toggle("双指深浅", isOn: $model.pinchDepth)
-                .tint(Theme.lime)
-            Text("张开＝深\u{2060}入 · 捏合＝拉\u{2060}近。一次只走一层。")
+            Text("换层是双指。张开＝深\u{2060}入 · 捏合＝拉\u{2060}近。一次只走一层。箭头变蓝时，照着这个方向捏。")
                 .font(.system(size: 13, weight: .regular, design: .rounded))
                 .foregroundColor(Theme.faint)
                 .fixedSize(horizontal: false, vertical: true)

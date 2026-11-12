@@ -20,7 +20,7 @@ struct PlayView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                     BoardGestures(
                         swipes: model.scheme == .swipe,
-                        pinch: model.pinchDepth,
+                        pinch: true,
                         onSwipe: { model.steer(.screen($0)) },
                         onPinch: { model.steer(depthControl(for: $0)) }
                     )
@@ -51,8 +51,8 @@ struct PlayView: View {
         }
     }
 
-    /// Buttons sit on the board's lower edge and stay above the gesture layer,
-    /// so a tap on 深入 / 拉近 is not eaten by a swipe.
+    /// Pause sits on the lower corner. Depth is the two-finger pinch, so the
+    /// full-width 深入 / 拉近 keys no longer cover the bottom of the board.
     private var controlsColumn: some View {
         VStack(spacing: 8) {
             if let toast = model.toast {
@@ -99,11 +99,7 @@ struct PlayView: View {
                     }
                 }
                 .padding(.horizontal, 10)
-                ControlPad(
-                    model: model,
-                    emphasizeDepthIn: depthHot(inward: true),
-                    emphasizeDepthOut: depthHot(inward: false)
-                )
+                ControlPad(model: model)
             }
         }
         .padding(.bottom, 6)
@@ -197,7 +193,7 @@ struct PlayView: View {
         }
         if model.game.hintUrgent {
             switch model.game.coachCue {
-            case .practiceSaved, .graceSaved, .swipeToStart:
+            case .practiceSaved, .graceSaved, .swipeToStart, .useDepth, .aim(.depthIn), .aim(.depthOut):
                 break
             default:
                 return "顺着箭头滑"
@@ -207,25 +203,14 @@ struct PlayView: View {
             return "点方向键开始 · 不能直接掉头"
         }
         if case .useDepth(let inward, let layers) = model.game.coachCue {
-            let name = inward ? "深入" : "拉近"
-            if model.pinchDepth {
-                let how = inward ? "张开" : "捏合"
-                return "还差 \(layers) 层 · \(how)或点「\(name)」"
-            }
-            return "还差 \(layers) 层 · 点「\(name)」"
+            let how = inward ? "张开" : "捏合"
+            return "还差 \(layers) 层 · 双指\(how)"
         }
         return Copy.cue(model.game.coachCue)
     }
 
     private var depthCueActive: Bool {
         if case .useDepth = model.game.coachCue { return true }
-        return false
-    }
-
-    private func depthHot(inward: Bool) -> Bool {
-        if case .useDepth(let flag, _) = model.game.coachCue {
-            return flag == inward
-        }
         return false
     }
 
@@ -490,7 +475,7 @@ private final class BoardGestureView: UIView {
         backgroundColor = .clear
         isMultipleTouchEnabled = true
         isAccessibilityElement = true
-        accessibilityLabel = "滑动转向区域"
+        accessibilityLabel = "滑动转向，双指张开深入，捏合拉近"
         pan.minimumNumberOfTouches = 1
         pan.maximumNumberOfTouches = 1
         addGestureRecognizer(pan)
