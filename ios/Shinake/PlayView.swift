@@ -8,11 +8,16 @@ struct PlayView: View {
         let _ = model.hudTick
         ZStack {
             Theme.bg.ignoresSafeArea()
-            VStack(spacing: 8) {
+            VStack(spacing: 0) {
+                // The score keeps this strip. The board starts below it, so a
+                // head on the top row is not drawn under the numbers.
                 hud
+                    .padding(.horizontal, 20)
+                    .padding(.top, 2)
+                    .padding(.bottom, 8)
                 ZStack(alignment: .bottom) {
                     GameCanvas(model: model)
-                        .clipShape(RoundedRectangle(cornerRadius: 24, style: .continuous))
+                        .clipShape(RoundedRectangle(cornerRadius: 22, style: .continuous))
                     BoardGestures(
                         swipes: model.scheme == .swipe,
                         pinch: model.pinchDepth,
@@ -21,70 +26,21 @@ struct PlayView: View {
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
                     if let arrow = aimArrow {
-                        AimArrow(symbol: arrow.symbol, caption: arrow.caption, urgent: model.game.hintUrgent)
-                            .padding(.top, 18)
-                            .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
-                            .allowsHitTesting(false)
+                        AimArrow(
+                            symbol: arrow.symbol,
+                            caption: arrow.caption,
+                            urgent: model.game.hintUrgent || depthCueActive,
+                            tint: depthCueActive ? Theme.blue : Theme.lime
+                        )
+                        .padding(.top, 10)
+                        .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
+                        .allowsHitTesting(false)
                     }
-                    VStack(spacing: 8) {
-                        if let toast = model.toast {
-                            toastBanner(toast)
-                        }
-                        if let hint = hintText {
-                            hintBanner(hint)
-                        }
-                    }
-                    .padding(.bottom, 10)
-                    .padding(.horizontal, 16)
+                    controlsColumn
                 }
-                .padding(.horizontal, 12)
+                .padding(.horizontal, 6)
                 .frame(maxHeight: .infinity)
-                if model.game.mode == .feeding {
-                    feedTray
-                }
-                if model.game.mode == .feeding && model.game.autopilot && !model.game.manualDrive {
-                    Button(action: model.toggleManual) {
-                        Text("我来开")
-                            .font(.system(size: 16, weight: .semibold, design: .rounded))
-                            .frame(maxWidth: .infinity)
-                            .frame(height: 48)
-                            .background(Theme.card)
-                            .foregroundColor(.white)
-                            .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
-                    }
-                    .buttonStyle(PressStyle())
-                    .padding(.horizontal, 16)
-                } else if model.game.mode == .feeding {
-                    Button(action: model.toggleManual) {
-                        Text("交给 AI")
-                            .font(.system(size: 15, weight: .medium, design: .rounded))
-                            .foregroundColor(Theme.dim)
-                    }
-                    .buttonStyle(.plain)
-                }
-                if !runEnded {
-                    HStack {
-                        pauseButton
-                        Spacer(minLength: 8)
-                        if model.game.mode == .feeding && !model.game.manualDrive {
-                            Text("AI 在飞")
-                                .font(.system(size: 13, weight: .semibold, design: .rounded))
-                                .foregroundColor(Theme.ink)
-                                .padding(.horizontal, 12)
-                                .frame(height: 32)
-                                .background(Theme.lime)
-                                .clipShape(Capsule())
-                        }
-                    }
-                    .padding(.horizontal, 16)
-                    ControlPad(
-                        model: model,
-                        emphasizeDepthIn: depthHot(inward: true),
-                        emphasizeDepthOut: depthHot(inward: false)
-                    )
-                }
             }
-            .padding(.bottom, 6)
 
             if model.game.phase == .paused {
                 pauseCard
@@ -93,6 +49,65 @@ struct PlayView: View {
                 endCard
             }
         }
+    }
+
+    /// Buttons sit on the board's lower edge and stay above the gesture layer,
+    /// so a tap on 深入 / 拉近 is not eaten by a swipe.
+    private var controlsColumn: some View {
+        VStack(spacing: 8) {
+            if let toast = model.toast {
+                toastBanner(toast)
+            }
+            if let hint = hintText {
+                hintBanner(hint)
+            }
+            if model.game.mode == .feeding {
+                feedTray
+            }
+            if model.game.mode == .feeding && model.game.autopilot && !model.game.manualDrive {
+                Button(action: model.toggleManual) {
+                    Text("我来开")
+                        .font(.system(size: 16, weight: .semibold, design: .rounded))
+                        .frame(maxWidth: .infinity)
+                        .frame(height: 48)
+                        .background(Theme.card)
+                        .foregroundColor(.white)
+                        .clipShape(RoundedRectangle(cornerRadius: 14, style: .continuous))
+                }
+                .buttonStyle(PressStyle())
+                .padding(.horizontal, 10)
+            } else if model.game.mode == .feeding {
+                Button(action: model.toggleManual) {
+                    Text("交给 AI")
+                        .font(.system(size: 15, weight: .medium, design: .rounded))
+                        .foregroundColor(Theme.dim)
+                }
+                .buttonStyle(.plain)
+            }
+            if !runEnded {
+                HStack {
+                    pauseButton
+                    Spacer(minLength: 8)
+                    if model.game.mode == .feeding && !model.game.manualDrive {
+                        Text("AI 在飞")
+                            .font(.system(size: 13, weight: .semibold, design: .rounded))
+                            .foregroundColor(Theme.ink)
+                            .padding(.horizontal, 12)
+                            .frame(height: 32)
+                            .background(Theme.lime)
+                            .clipShape(Capsule())
+                    }
+                }
+                .padding(.horizontal, 10)
+                ControlPad(
+                    model: model,
+                    emphasizeDepthIn: depthHot(inward: true),
+                    emphasizeDepthOut: depthHot(inward: false)
+                )
+            }
+        }
+        .padding(.bottom, 6)
+        .fixedSize(horizontal: false, vertical: true)
     }
 
     private var hud: some View {
@@ -110,8 +125,6 @@ struct PlayView: View {
             }
             Spacer(minLength: 0)
         }
-        .padding(.horizontal, 20)
-        .padding(.top, 4)
     }
 
     private var runEnded: Bool {
@@ -204,6 +217,11 @@ struct PlayView: View {
         return Copy.cue(model.game.coachCue)
     }
 
+    private var depthCueActive: Bool {
+        if case .useDepth = model.game.coachCue { return true }
+        return false
+    }
+
     private func depthHot(inward: Bool) -> Bool {
         if case .useDepth(let flag, _) = model.game.coachCue {
             return flag == inward
@@ -276,13 +294,15 @@ struct PlayView: View {
     }
 
     private func hintBanner(_ text: String) -> some View {
-        Text(text)
-            .font(.system(size: 15, weight: .semibold, design: .rounded))
+        let depth = depthCueActive
+        return Text(text)
+            .font(.system(size: depth ? 17 : 15, weight: .bold, design: .rounded))
             .foregroundColor(.white)
-            .padding(.horizontal, 14)
-            .padding(.vertical, 8)
-            .background(.black.opacity(0.45))
+            .padding(.horizontal, 16)
+            .padding(.vertical, depth ? 10 : 8)
+            .background(depth ? Theme.blue.opacity(0.94) : Color.black.opacity(0.45))
             .clipShape(Capsule())
+            .padding(.horizontal, 16)
     }
 
     private var pauseCard: some View {
@@ -365,18 +385,20 @@ private struct AimArrow: View {
     var symbol: String
     var caption: String
     var urgent: Bool
+    var tint: Color
     @State private var pulse = false
 
     var body: some View {
         VStack(spacing: 2) {
             Image(systemName: symbol)
-                .font(.system(size: 40, weight: .bold))
+                .font(.system(size: 44, weight: .bold))
                 .scaleEffect(urgent && pulse ? 1.22 : 1)
             Text(caption)
-                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .font(.system(size: 18, weight: .bold, design: .rounded))
         }
-        .foregroundColor(Theme.lime)
-        .shadow(color: .black.opacity(0.55), radius: 8, y: 2)
+        .foregroundColor(tint)
+        .shadow(color: .black.opacity(0.85), radius: 6, y: 1)
+        .shadow(color: tint.opacity(0.9), radius: urgent ? 16 : 8)
         .onAppear { startPulse() }
         .onChange(of: urgent) { _ in startPulse() }
     }

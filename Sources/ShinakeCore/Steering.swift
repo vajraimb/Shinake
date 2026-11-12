@@ -10,7 +10,10 @@ public struct CameraRig: Equatable {
     public var yaw: Double
     public var pitch: Double
 
-    public static let standard = CameraRig(yaw: 0.62, pitch: 0.48)
+    /// Flatter than the old 0.62 / 0.48 orbit so the board fills a portrait
+    /// phone, while +X stays screen-right, +Y screen-up, and −Z still reads
+    /// as "into the screen".
+    public static let standard = CameraRig(yaw: 0.40, pitch: 0.26)
 
     /// Unit vector from the look-at target out to the eye.
     public var eyeOffset: (x: Double, y: Double, z: Double) {

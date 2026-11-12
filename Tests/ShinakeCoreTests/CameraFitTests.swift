@@ -8,20 +8,21 @@ import XCTest
 final class CameraFitTests: XCTestCase {
     private let profiles = [DifficultyProfile.easy, DifficultyProfile.normal, DifficultyProfile.hard]
 
-    func testPortraitCuboidStaysWithinFivePercentOfTheCube() {
+    func testPortraitBoardsFitTheCanvasTheyWereChosenFor() {
+        let expected: [(String, ArenaSize)] = [
+            ("easy", ArenaSize(width: 11, height: 18, depth: 9)),
+            ("normal", ArenaSize(width: 12, height: 20, depth: 10)),
+            ("hard", ArenaSize(width: 14, height: 24, depth: 12)),
+        ]
+        for (name, size) in expected {
+            let arena = profiles.first { $0.id == name }?.arena
+            XCTAssertEqual(arena, size, name)
+        }
         for profile in profiles {
             let arena = profile.arena
-            let cube = ArenaSize.cube(arena.width)
-            XCTAssertEqual(arena.depth, arena.width)
-            XCTAssertGreaterThan(arena.height, arena.width)
+            XCTAssertGreaterThan(arena.height, arena.width, profile.id)
             for aspect in portraitPlayAspects {
-                let cubeDistance = cameraDistanceToFit(arena: cube, aspect: aspect)
                 let distance = cameraDistanceToFit(arena: arena, aspect: aspect)
-                XCTAssertLessThanOrEqual(
-                    distance,
-                    cubeDistance * arenaDistanceGrowthLimit + 1e-6,
-                    "\(profile.id) aspect \(aspect) grew past 5%"
-                )
                 XCTAssertTrue(
                     playArenaFits(arena: arena, aspect: aspect, distance: distance),
                     "\(profile.id) aspect \(aspect)"
@@ -78,7 +79,7 @@ final class CameraFitTests: XCTestCase {
                 XCTAssertLessThan(abs(ndc.x), 1 - playCameraMargin + 1e-4, profile.id)
                 XCTAssertLessThan(abs(ndc.y), 1 - playCameraMargin + 1e-4, profile.id)
             }
-            let surface = WorldPoint(-(hx + 0.30), hy, -hz)
+            let surface = WorldPoint(-(hx + SnakeBody.headRadius), hy, -hz)
             let surfaceNDC = cameraNDC(point: surface, lookAt: .zero, distance: cameraDistanceToFit(arena: arena, aspect: aspect), aspect: aspect)
             XCTAssertNotNil(surfaceNDC, profile.id)
             if let surfaceNDC {
@@ -102,7 +103,8 @@ final class CameraFitTests: XCTestCase {
         let cube = ArenaSize.cube(DifficultyProfile.easy.arena.width)
         let roomy = cameraDistanceToFit(arena: cube, aspect: 0.66, margin: 0.12, pad: 0.55)
         let tight = cameraDistanceToFit(arena: cube, aspect: 0.66)
-        XCTAssertEqual(playCameraMargin, 0.045, accuracy: 0.0001)
+        XCTAssertEqual(playCameraMargin, 0.02, accuracy: 0.0001)
+        XCTAssertEqual(playCameraPad, 0.18, accuracy: 0.0001)
         XCTAssertLessThan(playCameraPad, 0.5)
         XCTAssertLessThan(tight, roomy * 0.92)
         XCTAssertTrue(playArenaFits(arena: cube, aspect: 0.66, distance: tight))

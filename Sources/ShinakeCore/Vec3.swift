@@ -29,6 +29,10 @@ public struct Vec3: Equatable, Hashable, Codable {
         Vec3(-value.x, -value.y, -value.z)
     }
 
+    public static func - (lhs: Vec3, rhs: Vec3) -> Vec3 {
+        Vec3(lhs.x - rhs.x, lhs.y - rhs.y, lhs.z - rhs.z)
+    }
+
     public var isUnitAxis: Bool {
         let ax = abs(x), ay = abs(y), az = abs(z)
         return ax + ay + az == 1 && max(ax, ay, az) == 1

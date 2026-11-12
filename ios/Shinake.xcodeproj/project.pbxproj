@@ -13,6 +13,7 @@
 		A10000000000000000000030 /* Steering.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000002F /* Steering.swift */; };
 		A10000000000000000000032 /* SnakeGame.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000031 /* SnakeGame.swift */; };
 		A10000000000000000000053 /* CameraFit.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000052 /* CameraFit.swift */; };
+		A10000000000000000000061 /* SnakeMotion.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000060 /* SnakeMotion.swift */; };
 		A10000000000000000000034 /* ShinakeApp.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000033 /* ShinakeApp.swift */; };
 		A10000000000000000000036 /* AppModel.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000035 /* AppModel.swift */; };
 		A10000000000000000000038 /* Theme.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000037 /* Theme.swift */; };
@@ -28,6 +29,7 @@
 		A1000000000000000000004C /* SteeringTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000004B /* SteeringTests.swift */; };
 		A1000000000000000000004E /* SnakeGameTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000004D /* SnakeGameTests.swift */; };
 		A10000000000000000000055 /* CameraFitTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000054 /* CameraFitTests.swift */; };
+		A10000000000000000000063 /* SnakeMotionTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000062 /* SnakeMotionTests.swift */; };
 		A10000000000000000000057 /* FeedDesign.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000056 /* FeedDesign.swift */; };
 		A10000000000000000000059 /* FeedDesignTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000058 /* FeedDesignTests.swift */; };
 		A1000000000000000000005B /* FeedLabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000005A /* FeedLabView.swift */; };
@@ -52,6 +54,7 @@
 		A1000000000000000000002F /* Steering.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Steering.swift; sourceTree = "<group>"; };
 		A10000000000000000000031 /* SnakeGame.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnakeGame.swift; sourceTree = "<group>"; };
 		A10000000000000000000052 /* CameraFit.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraFit.swift; sourceTree = "<group>"; };
+		A10000000000000000000060 /* SnakeMotion.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnakeMotion.swift; sourceTree = "<group>"; };
 		A10000000000000000000033 /* ShinakeApp.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = ShinakeApp.swift; sourceTree = "<group>"; };
 		A10000000000000000000035 /* AppModel.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = AppModel.swift; sourceTree = "<group>"; };
 		A10000000000000000000037 /* Theme.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = Theme.swift; sourceTree = "<group>"; };
@@ -67,6 +70,7 @@
 		A1000000000000000000004B /* SteeringTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SteeringTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000004D /* SnakeGameTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnakeGameTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000054 /* CameraFitTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = CameraFitTests.swift; sourceTree = "<group>"; };
+		A10000000000000000000062 /* SnakeMotionTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = SnakeMotionTests.swift; sourceTree = "<group>"; };
 		A10000000000000000000056 /* FeedDesign.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDesign.swift; sourceTree = "<group>"; };
 		A10000000000000000000058 /* FeedDesignTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDesignTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000005A /* FeedLabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedLabView.swift; sourceTree = "<group>"; };
@@ -138,6 +142,7 @@
 				A1000000000000000000002F /* Steering.swift */,
 				A10000000000000000000031 /* SnakeGame.swift */,
 				A10000000000000000000052 /* CameraFit.swift */,
+				A10000000000000000000060 /* SnakeMotion.swift */,
 				A10000000000000000000056 /* FeedDesign.swift */,
 			);
 			name = ShinakeCore;
@@ -151,6 +156,7 @@
 				A1000000000000000000004B /* SteeringTests.swift */,
 				A1000000000000000000004D /* SnakeGameTests.swift */,
 				A10000000000000000000054 /* CameraFitTests.swift */,
+				A10000000000000000000062 /* SnakeMotionTests.swift */,
 				A10000000000000000000058 /* FeedDesignTests.swift */,
 			);
 			name = ShinakeTests;
@@ -263,6 +269,7 @@
 				A10000000000000000000030 /* Steering.swift in Sources */,
 				A10000000000000000000032 /* SnakeGame.swift in Sources */,
 				A10000000000000000000053 /* CameraFit.swift in Sources */,
+				A10000000000000000000061 /* SnakeMotion.swift in Sources */,
 				A10000000000000000000057 /* FeedDesign.swift in Sources */,
 				A1000000000000000000005B /* FeedLabView.swift in Sources */,
 				A1000000000000000000005D /* FeedLibrary.swift in Sources */,
@@ -288,6 +295,7 @@
 				A1000000000000000000004C /* SteeringTests.swift in Sources */,
 				A1000000000000000000004E /* SnakeGameTests.swift in Sources */,
 				A10000000000000000000055 /* CameraFitTests.swift in Sources */,
+				A10000000000000000000063 /* SnakeMotionTests.swift in Sources */,
 				A10000000000000000000059 /* FeedDesignTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;

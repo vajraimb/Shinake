@@ -4,20 +4,22 @@ import Foundation
 /// doesn't get a fisheye view; distance is what changes to fit the arena.
 public let playCameraVerticalFOV = 32.0
 
-/// Empty fraction of each screen edge. Tight enough that the arena fills the
-/// canvas, with a few percent left so a corner head is not shaved off.
-public let playCameraMargin = 0.045
+/// Empty fraction of each screen edge. The score sits in its own strip above
+/// the canvas, so this inset only keeps a corner head off the clip.
+public let playCameraMargin = 0.02
 
-/// Extra world units around the arena. Covers a head of radius 0.30, which is
-/// larger than the drawn head (0.23), plus the frame's edge tube.
-public let playCameraPad = 0.38
+/// Extra world units around the arena. Smaller than the drawn head (0.23);
+/// the head still lands inside the margin because the fit is limited by the
+/// box corner, not by a single axis. The frame's edge tube sits inside it.
+public let playCameraPad = 0.18
 
 /// How much farther the camera may sit versus the old cube, on a portrait canvas.
+/// The play boards are chosen explicitly and may exceed this; the helper is
+/// what the height search still uses.
 public let arenaDistanceGrowthLimit = 1.05
 
 /// Play-canvas aspect the height budget is measured on: a tall portrait phone,
-/// the same 0.62 the corner test uses. On that canvas the 14 / 16 / 19 targets
-/// grow the fit distance by about 3%. A shorter canvas still frames the board;
+/// the same 0.62 the corner test uses. A shorter canvas still frames the board;
 /// the camera just sits farther back. Landscape is not a supported orientation.
 public let portraitPlayAspects = [0.62]
 
@@ -35,8 +37,9 @@ public struct WorldPoint: Equatable {
     public static let zero = WorldPoint(0, 0, 0)
 }
 
-/// Width, height, and depth in cells. Depth stays equal to width so a layer
-/// step is the same length as a sideways step. Height is the portrait stretch.
+/// Width, height, and depth in cells. A step is one cell on every axis, so a
+/// layer change is the same length as a sideways step even when the counts differ.
+/// Height is the portrait stretch.
 public struct ArenaSize: Equatable {
     public var width: Int
     public var height: Int

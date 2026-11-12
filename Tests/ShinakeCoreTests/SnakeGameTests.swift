@@ -203,7 +203,7 @@ final class SnakeGameTests: XCTestCase {
         // Head sits on the +X wall. The four side cells are solid, and reversing
         // would enter the neck, so every rescue is fatal.
         var wall = DifficultyProfile.easy
-        let boxedHead = Vec3(8, 4, 4)
+        let boxedHead = Vec3(wall.arena.width - 1, 4, 4)
         wall.solids = [boxedHead + .yp, boxedHead + .yn, boxedHead + .zp, boxedHead + .zn]
         let sealed = SnakeGame(profile: wall, mode: .classic, seed: 1)
         sealed.debugArrange(
@@ -909,7 +909,9 @@ final class SnakeGameTests: XCTestCase {
 
     func testCeilingKillsAndCellsAboveTheOldCubeAreInside() {
         let hard = classic(.hard)
-        XCTAssertEqual(hard.depth, hard.width)
+        XCTAssertEqual(hard.width, 14)
+        XCTAssertEqual(hard.height, 24)
+        XCTAssertEqual(hard.depth, 12)
         XCTAssertGreaterThan(hard.height, hard.width)
         let x = hard.width / 2
         let z = hard.depth / 2
@@ -975,6 +977,59 @@ final class SnakeGameTests: XCTestCase {
             let span = pellet.position.manhattan(to: game.snake[0])
             XCTAssertGreaterThanOrEqual(span, FoodPlacement.laterMin)
             XCTAssertLessThanOrEqual(span, FoodPlacement.laterMax)
+        }
+    }
+
+    func testCollisionsStayOnTheGridForTheWideBoards() {
+        for difficulty in Difficulty.allCases {
+            let game = classic(difficulty)
+            let width = game.width
+            let height = game.height
+            let depth = game.depth
+            func kill(
+                _ snake: [Vec3],
+                direction: Vec3,
+                cause: DeathCause,
+                file: StaticString = #file,
+                line: UInt = #line
+            ) {
+                game.debugArrange(
+                    snake: snake,
+                    direction: direction,
+                    foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(0, 0, 1))],
+                    grace: 0,
+                    eaten: 8
+                )
+                game.debugSetElapsed(200)
+                let events = game.debugStep()
+                XCTAssertTrue(events.contains(.died), "\(difficulty.rawValue) \(cause)", file: file, line: line)
+                XCTAssertEqual(game.deathCause, cause, difficulty.rawValue, file: file, line: line)
+                XCTAssertEqual(game.snake[0], snake[0], "\(difficulty.rawValue) left the grid", file: file, line: line)
+            }
+            let midX = width / 2
+            let midY = height / 2
+            let midZ = depth / 2
+            kill(
+                [Vec3(width - 1, midY, midZ), Vec3(width - 2, midY, midZ), Vec3(width - 3, midY, midZ)],
+                direction: .xp,
+                cause: .wall
+            )
+            kill(
+                [Vec3(midX, height - 1, midZ), Vec3(midX, height - 2, midZ), Vec3(midX, height - 3, midZ)],
+                direction: .yp,
+                cause: .wall
+            )
+            kill(
+                [Vec3(midX, midY, depth - 1), Vec3(midX, midY, depth - 2), Vec3(midX, midY, depth - 3)],
+                direction: .zp,
+                cause: .wall
+            )
+            let head = Vec3(midX, midY, midZ)
+            kill(
+                [head, head + .yn, head + .yn + .xp, head + .xp, head + .xp + .yp],
+                direction: .xp,
+                cause: .ownBody
+            )
         }
     }
 }

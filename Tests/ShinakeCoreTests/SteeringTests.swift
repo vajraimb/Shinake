@@ -7,6 +7,8 @@ import XCTest
 
 final class SteeringTests: XCTestCase {
     func testStandardCameraSeparatesTheThreeAxes() {
+        XCTAssertEqual(CameraRig.standard.yaw, 0.40, accuracy: 0.0001)
+        XCTAssertEqual(CameraRig.standard.pitch, 0.26, accuracy: 0.0001)
         let mapping = steerMapping(rig: .standard)
         XCTAssertEqual(mapping.right, .xp)
         XCTAssertEqual(mapping.left, .xn)

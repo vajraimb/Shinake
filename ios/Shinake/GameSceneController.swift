@@ -9,9 +9,9 @@ private enum SnakeFood {
 }
 
 /// The arena, the snake and the food. Nodes are reused across frames so a
-/// 60 fps tick on iPhone 13 Pro Max is a handful of position writes, not a
-/// rebuild. The camera matches `CameraRig.standard`, which is also what
-/// swipe-to-axis mapping is tested against.
+/// tick on iPhone 13 Pro Max is a handful of position writes, not a rebuild.
+/// The camera matches `CameraRig.standard`, which is also what swipe-to-axis
+/// mapping is tested against.
 final class GameSceneController {
     let view: SCNView
     private let scene = SCNScene()
@@ -35,13 +35,17 @@ final class GameSceneController {
     private var snakeAlive = true
     private var bodyScale: Float = 1
     private var hueShift = false
+    private var tintKeys: [ObjectIdentifier: String] = [:]
+    private let depthRing = SCNNode()
+    private var snakeFrame: [SCNNode] = []
+    private var foodFrame: [SCNNode] = []
 
     init() {
         view = SCNView()
         view.scene = scene
         view.backgroundColor = Theme.bgUI
         view.antialiasingMode = .multisampling2X
-        view.preferredFramesPerSecond = 60
+        view.preferredFramesPerSecond = 0
         view.rendersContinuously = true
         view.allowsCameraControl = false
         view.autoenablesDefaultLighting = false
@@ -53,6 +57,11 @@ final class GameSceneController {
         world.addChildNode(foodLayer)
         snakeLayer.isHidden = true
         foodLayer.isHidden = true
+        if let material = foodLayer.geometry?.materials.first {
+            material.diffuse.contents = UIColor(red: 1, green: 0.36, blue: 0.42, alpha: 0.36)
+            material.emission.contents = UIColor(red: 1, green: 0.45, blue: 0.48, alpha: 1)
+        }
+        installDepthHints()
 
         let camera = SCNCamera()
         camera.fieldOfView = CGFloat(playCameraVerticalFOV)
@@ -239,12 +248,17 @@ final class GameSceneController {
     private func placeSnake(_ snapshot: RenderSnapshot) {
         snakeAlive = snapshot.alive
         let count = snapshot.snake.count
-        let alpha = smooth(Float(snapshot.fraction))
         var points: [SIMD3<Float>] = []
         points.reserveCapacity(count)
         for index in 0..<count {
-            let point = segmentPosition(index: index, snapshot: snapshot, alpha: alpha)
-            points.append(SIMD3<Float>(point.x, point.y, point.z))
+            let sample = SnakeMotion.position(
+                index: index,
+                previous: snapshot.previous,
+                current: snapshot.snake,
+                pendingTurn: snapshot.pendingTurn,
+                fraction: snapshot.fraction
+            )
+            points.append(scenePoint(sample, arena: snapshot.arena))
         }
         while jointNodes.count < count {
             jointNodes.append(makeJoint())
@@ -278,9 +292,16 @@ final class GameSceneController {
                 continue
             }
             node.isHidden = false
-            cone.bottomRadius = CGFloat(bodyRadius(index: index, count: count))
-            cone.topRadius = CGFloat(bodyRadius(index: index + 1, count: count))
-            cone.height = CGFloat(length)
+            let bottom = bodyRadiusBase(index: index, count: count)
+            let top = bodyRadiusBase(index: index + 1, count: count)
+            let ratio = CGFloat(top / max(bottom, 0.001))
+            if abs(cone.topRadius - ratio) > 0.0005 || abs(cone.bottomRadius - 1) > 0.0005 || abs(cone.height - 1) > 0.0005 {
+                cone.bottomRadius = 1
+                cone.topRadius = ratio
+                cone.height = 1
+            }
+            let thickness = bottom * bodyWave(index: index) * bodyScale
+            node.simdScale = SIMD3<Float>(thickness, length, thickness)
             node.simdPosition = (start + end) * 0.5
             orient(node, along: delta)
             tint(node, index: index, count: count, head: false)
@@ -309,7 +330,7 @@ final class GameSceneController {
     }
 
     private func makeLink() -> SCNNode {
-        let cone = SCNCone(topRadius: 0.2, bottomRadius: 0.2, height: 1)
+        let cone = SCNCone(topRadius: 1, bottomRadius: 1, height: 1)
         cone.radialSegmentCount = 12
         let material = glossMaterial(Theme.limeUI)
         material.emission.contents = Theme.limeUI.withAlphaComponent(0.16)
@@ -321,20 +342,26 @@ final class GameSceneController {
 
     /// Head radius 0.23. The neck is 0.20 and the tail tapers to 0.10.
     private func bodyRadius(index: Int, count: Int) -> Float {
-        let wave = 1 + 0.025 * sin(Float(time) * 3 + Float(index) * 0.55)
-        let base: Float
-        if index == 0 {
-            base = Float(SnakeBody.headRadius)
-        } else {
-            let t = Float(index) / Float(max(count - 1, 1))
-            let neck = Float(SnakeBody.neckRadius)
-            let tail = Float(SnakeBody.tailRadius)
-            base = neck + (tail - neck) * t
-        }
-        return base * wave * bodyScale
+        bodyRadiusBase(index: index, count: count) * bodyWave(index: index) * bodyScale
+    }
+
+    private func bodyRadiusBase(index: Int, count: Int) -> Float {
+        if index == 0 { return Float(SnakeBody.headRadius) }
+        let t = Float(index) / Float(max(count - 1, 1))
+        let neck = Float(SnakeBody.neckRadius)
+        let tail = Float(SnakeBody.tailRadius)
+        return neck + (tail - neck) * t
+    }
+
+    private func bodyWave(index: Int) -> Float {
+        1 + 0.025 * sin(Float(time) * 3 + Float(index) * 0.55)
     }
 
     private func tint(_ node: SCNNode, index: Int, count: Int, head: Bool) {
+        let key = tintKey(index: index, count: count, head: head)
+        let id = ObjectIdentifier(node)
+        if tintKeys[id] == key { return }
+        tintKeys[id] = key
         let t = CGFloat(index) / CGFloat(max(count - 1, 1))
         let band: CGFloat = index % 3 == 2 ? 0.78 : 1
         var color = UIColor(
@@ -361,6 +388,16 @@ final class GameSceneController {
             material.emission.contents = color.withAlphaComponent(0.14)
         }
         node.geometry?.materials = [material]
+    }
+
+    /// Stable while the body is not cycling colors, so a frame does not allocate
+    /// a UIColor per segment. The tint effect still updates every frame.
+    private func tintKey(index: Int, count: Int, head: Bool) -> String {
+        if hueShift {
+            return String(format: "shift-%d-%.3f", index, sin(time * 5 + Double(index) * 0.4))
+        }
+        if head { return snakeAlive ? "head-live" : "head-dead" }
+        return "body-\(index)-\(count)"
     }
 
     private func snapshotAliveEmission() -> UIColor {
@@ -893,6 +930,7 @@ final class GameSceneController {
         guard let head = snapshot.snake.first else {
             snakeLayer.isHidden = true
             foodLayer.isHidden = true
+            setDepthHint(visible: false)
             return
         }
         let headPoint = worldPoint(head, arena: snapshot.arena)
@@ -904,9 +942,78 @@ final class GameSceneController {
             foodLayer.isHidden = false
             foodLayer.position = SCNVector3(0, 0, foodPoint.z)
             foodLayer.scale = SCNVector3(spanX, spanY, 1)
+            // A flatter camera shrinks the gap between layers. The two frames,
+            // the ring on the snake's layer, and the sheet itself stay readable.
+            placeFrame(snakeFrame, z: headPoint.z, spanX: spanX, spanY: spanY)
+            placeFrame(foodFrame, z: foodPoint.z, spanX: spanX, spanY: spanY)
+            let mark = SIMD3<Float>(foodPoint.x, foodPoint.y, headPoint.z)
+            depthRing.isHidden = false
+            depthRing.simdPosition = mark
+            let pulse = 1 + 0.08 * sin(Float(time) * 4)
+            depthRing.simdScale = SIMD3<Float>(repeating: pulse)
         } else {
             foodLayer.isHidden = true
+            setDepthHint(visible: false)
         }
+    }
+
+    private func setDepthHint(visible: Bool) {
+        depthRing.isHidden = !visible
+        if !visible {
+            for node in snakeFrame + foodFrame { node.isHidden = true }
+        }
+    }
+
+    private func placeFrame(_ nodes: [SCNNode], z: Float, spanX: Float, spanY: Float) {
+        let hx = spanX * 0.5
+        let hy = spanY * 0.5
+        let corners = [
+            SIMD3<Float>(-hx, -hy, z),
+            SIMD3<Float>(hx, -hy, z),
+            SIMD3<Float>(hx, hy, z),
+            SIMD3<Float>(-hx, hy, z),
+        ]
+        for index in 0..<nodes.count {
+            let start = corners[index]
+            let end = corners[(index + 1) % corners.count]
+            let node = nodes[index]
+            let delta = end - start
+            node.isHidden = false
+            node.simdPosition = (start + end) * 0.5
+            node.simdScale = SIMD3<Float>(1, max(simd_length(delta), 0.001), 1)
+            orient(node, along: delta)
+        }
+    }
+
+    private func installDepthHints() {
+        let ring = SCNTorus(ringRadius: 0.42, pipeRadius: 0.045)
+        ring.ringSegmentCount = 48
+        ring.pipeSegmentCount = 12
+        let ringMaterial = SCNMaterial()
+        ringMaterial.lightingModel = .constant
+        ringMaterial.diffuse.contents = Theme.axisZ
+        ringMaterial.emission.contents = Theme.axisZ
+        ring.materials = [ringMaterial]
+        depthRing.geometry = ring
+        depthRing.simdOrientation = simd_quatf(angle: .pi / 2, axis: SIMD3<Float>(1, 0, 0))
+        depthRing.isHidden = true
+        world.addChildNode(depthRing)
+        snakeFrame = (0..<4).map { _ in frameBar(Theme.axisZ) }
+        foodFrame = (0..<4).map { _ in frameBar(UIColor(red: 1, green: 0.36, blue: 0.42, alpha: 1)) }
+    }
+
+    private func frameBar(_ color: UIColor) -> SCNNode {
+        let bar = SCNCylinder(radius: 0.045, height: 1)
+        bar.radialSegmentCount = 8
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.diffuse.contents = color
+        material.emission.contents = color
+        bar.materials = [material]
+        let node = SCNNode(geometry: bar)
+        node.isHidden = true
+        world.addChildNode(node)
+        return node
     }
 
     private func placeGuide(_ snapshot: RenderSnapshot, visible: Bool) {
@@ -925,19 +1032,12 @@ final class GameSceneController {
         guideNode = node
     }
 
-    private func segmentPosition(index: Int, snapshot: RenderSnapshot, alpha: Float) -> SCNVector3 {
-        let current = snapshot.snake
-        let previous = snapshot.previous
-        let arena = snapshot.arena
-        if index == 0 {
-            let from = previous.first ?? current[0]
-            return mix(worldPoint(from, arena: arena), worldPoint(current[0], arena: arena), alpha)
-        }
-        if previous.count == current.count, index < previous.count {
-            return mix(worldPoint(previous[index], arena: arena), worldPoint(current[index], arena: arena), alpha)
-        }
-        let from = (index - 1) < previous.count ? previous[index - 1] : current[index]
-        return mix(worldPoint(from, arena: arena), worldPoint(current[index], arena: arena), alpha)
+    private func scenePoint(_ point: WorldPoint, arena: ArenaSize) -> SIMD3<Float> {
+        SIMD3<Float>(
+            Float(point.x) - Float(arena.width - 1) * 0.5,
+            Float(point.y) - Float(arena.height - 1) * 0.5,
+            Float(point.z) - Float(arena.depth - 1) * 0.5
+        )
     }
 
     private func worldPoint(_ cell: Vec3, arena: ArenaSize) -> SCNVector3 {
@@ -1016,11 +1116,3 @@ private func faceNormal(_ a: SCNVector3, _ b: SCNVector3, _ c: SCNVector3) -> SC
     return n
 }
 
-private func mix(_ a: SCNVector3, _ b: SCNVector3, _ t: Float) -> SCNVector3 {
-    SCNVector3(a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t)
-}
-
-private func smooth(_ t: Float) -> Float {
-    let x = min(1, max(0, t))
-    return x * x * (3 - 2 * x)
-}

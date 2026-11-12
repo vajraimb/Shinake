@@ -3,8 +3,8 @@ import SceneKit
 import SwiftUI
 import UIKit
 
-/// Display link on the main run loop, locked to 60 fps. SceneKit node edits
-/// stay on that same thread.
+/// Display link on the main run loop, at the screen's own rate (120 Hz on
+/// ProMotion). SceneKit node edits stay on that same thread.
 struct GameCanvas: UIViewRepresentable {
     var model: AppModel
 
@@ -15,7 +15,8 @@ struct GameCanvas: UIViewRepresentable {
     func makeUIView(context: Context) -> SCNView {
         let view = context.coordinator.scene.view
         let link = CADisplayLink(target: context.coordinator, selector: #selector(Coordinator.tick))
-        link.preferredFramesPerSecond = 60
+        link.preferredFramesPerSecond = 0
+        link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         context.coordinator.link = link
         return view
