@@ -15,7 +15,7 @@ struct GameCanvas: UIViewRepresentable {
     func makeUIView(context: Context) -> SCNView {
         let view = context.coordinator.scene.view
         let link = CADisplayLink(target: context.coordinator, selector: #selector(Coordinator.tick))
-        link.preferredFramesPerSecond = 0
+        link.preferredFramesPerSecond = 120
         link.preferredFrameRateRange = CAFrameRateRange(minimum: 30, maximum: 120, preferred: 120)
         link.add(to: .main, forMode: .common)
         context.coordinator.link = link
@@ -45,6 +45,9 @@ struct GameCanvas: UIViewRepresentable {
                 last = now
                 return
             }
+            // Seconds since the previous tick, not a fixed 1/60. The snake's
+            // step clock consumes this, so 120 Hz and 60 Hz cover a cell in
+            // the same time. A hitch cannot jump farther than one twentieth.
             let dt = min(now - last, 1.0 / 20.0)
             last = now
             let snapshot = model.advance(dt: dt)

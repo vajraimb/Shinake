@@ -980,6 +980,32 @@ final class SnakeGameTests: XCTestCase {
         }
     }
 
+    func testMoveClockUsesElapsedTimeAtBothFrameRates() {
+        func sample(frame: Double) -> (cell: Vec3, fraction: Double) {
+            let game = classic()
+            let head = game.snake[0]
+            game.debugArrange(
+                snake: [head, head + .xn, head + .xn + .xn],
+                direction: .xp,
+                foods: [FoodPellet(id: 1, kind: .apple, position: Vec3(0, 0, 1))]
+            )
+            let seconds = 1.0
+            var advanced = 0.0
+            while advanced + 1e-12 < seconds {
+                let slice = min(frame, seconds - advanced)
+                game.update(dt: slice)
+                advanced += slice
+            }
+            return (game.snake[0], game.fraction)
+        }
+        let at60 = sample(frame: 1.0 / 60.0)
+        let at120 = sample(frame: 1.0 / 120.0)
+        XCTAssertEqual(at60.cell, at120.cell)
+        XCTAssertEqual(at60.cell.x, classic().snake[0].x + 1)
+        XCTAssertEqual(at60.fraction, at120.fraction, accuracy: 0.001)
+        XCTAssertEqual(at60.fraction, 0.36 / 0.64, accuracy: 0.001)
+    }
+
     func testCollisionsStayOnTheGridForTheWideBoards() {
         for difficulty in Difficulty.allCases {
             let game = classic(difficulty)

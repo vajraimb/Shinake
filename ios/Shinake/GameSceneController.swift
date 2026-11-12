@@ -45,7 +45,9 @@ final class GameSceneController {
         view.scene = scene
         view.backgroundColor = Theme.bgUI
         view.antialiasingMode = .multisampling2X
-        view.preferredFramesPerSecond = 0
+        // 120 is clamped to 60 unless Info.plist sets
+        // CADisableMinimumFrameDurationOnPhone. A 60 Hz phone stays at 60.
+        view.preferredFramesPerSecond = 120
         view.rendersContinuously = true
         view.allowsCameraControl = false
         view.autoenablesDefaultLighting = false
