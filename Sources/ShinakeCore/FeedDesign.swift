@@ -220,6 +220,13 @@ public struct FeedDesign: Codable, Equatable, Identifiable {
     public var cost: Int { effects.reduce(0) { $0 + $1.cost } }
     public var withinBudget: Bool { isLegal }
 
+    /// Classic spawn weight. Cheaper designs are more common. Nil when the
+    /// design is over budget or otherwise illegal.
+    public var classicSpawnWeight: Int? {
+        guard withinBudget else { return nil }
+        return max(1, 9 - cost)
+    }
+
     /// No duplicate effects, and the total cost fits the cap. Rares are
     /// allowed only when they already fit; the editor cannot add them.
     public var isLegal: Bool {

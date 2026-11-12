@@ -84,6 +84,28 @@ public struct RenderSnapshot: Equatable {
     public var colorShift: Bool
 }
 
+/// Drawn thickness of the snake, in cell radii. Collision stays on the grid.
+public enum SnakeBody {
+    public static let headRadius = 0.23
+    public static let neckRadius = 0.20
+    public static let tailRadius = 0.10
+    /// Eyes, pupils, sockets, and the tongue, relative to the old 0.30 head.
+    public static let featureScale = headRadius / 0.30
+    public static let growMultiplier = 1.28
+    public static let shrinkMultiplier = 0.72
+}
+
+/// Where a classic score is stored. A run that brought a feed loadout must
+/// not share a key with the plain 简单 / 普通 / 困难 record.
+public enum ScoreBoard {
+    public static func localBestKey(difficulty: Difficulty, separateLoadout: Bool) -> String {
+        if separateLoadout {
+            return "shinake.best.loadout.\(difficulty.rawValue)"
+        }
+        return "shinake.best.\(difficulty.rawValue)"
+    }
+}
+
 /// The whole playable game, with no UIKit and no clock of its own.
 /// `update(dt:)` is the frame entry; `debugStep()` forces a single move.
 public final class SnakeGame {
@@ -149,8 +171,16 @@ public final class SnakeGame {
     private var growScaleRemaining = 0.0
     private var shrinkScaleRemaining = 0.0
     private var scoreMultiplierRemaining = 0.0
+    /// In-budget designs the classic board may spawn. Empty means plain apples.
+    private var classicLoadout: [FeedDesign] = []
 
-    public init(profile: DifficultyProfile, mode: PlayMode, seed: UInt64, best: Int = 0) {
+    public init(
+        profile: DifficultyProfile,
+        mode: PlayMode,
+        seed: UInt64,
+        best: Int = 0,
+        loadout: [FeedDesign] = []
+    ) {
         self.profile = profile
         self.mode = mode
         self.mapping = steerMapping(rig: .standard)
@@ -158,8 +188,12 @@ public final class SnakeGame {
         self.graceLeft = profile.graceCharges
         self.rng = SplitMix64(seed: seed == 0 ? 1 : seed)
         self.solids = profile.solids
+        self.classicLoadout = Array(loadout.filter(\.withinBudget).prefix(3))
         resetBoard()
     }
+
+    /// Classic runs that field a loadout keep a separate local record.
+    public var recordsSeparately: Bool { mode == .classic && !classicLoadout.isEmpty }
 
     public var grid: Int { profile.grid }
     /// The turn that will apply on the next step, if the player already swiped.
@@ -170,8 +204,8 @@ public final class SnakeGame {
     public var controlsReversed: Bool { reverseRemaining > 0 }
     public var ghosting: Bool { ghostRemaining > 0 }
     public var snakeScale: Double {
-        if growScaleRemaining > 0 { return 1.28 }
-        if shrinkScaleRemaining > 0 { return 0.72 }
+        if growScaleRemaining > 0 { return SnakeBody.growMultiplier }
+        if shrinkScaleRemaining > 0 { return SnakeBody.shrinkMultiplier }
         return 1
     }
 
@@ -482,7 +516,7 @@ public final class SnakeGame {
             autopilot = false
             phase = .ready
             holdMovesUntil = 0
-            _ = spawn(kind: .apple, bias: profile.planarOpeningFoods > 0 ? .openingPlane : .standard)
+            spawnNextClassicFood(bias: profile.planarOpeningFoods > 0 ? .openingPlane : .standard)
             hintWatchDistance = foods.first.map { snake[0].manhattan(to: $0.position) } ?? 0
         }
     }
@@ -692,9 +726,45 @@ public final class SnakeGame {
         }
         events.append(.ate(pellet.recipe == nil ? pellet.kind : .apple))
         if mode == .classic {
-            _ = spawn(kind: .apple, bias: classicBias)
+            replenishClassicFoods()
         }
         return events
+    }
+
+    /// One food during the opening, then two. A loadout picks the design;
+    /// an empty loadout stays on plain apples.
+    private func replenishClassicFoods() {
+        let target = eaten >= 3 ? 2 : 1
+        if foods.count < target {
+            spawnNextClassicFood(bias: classicBias)
+        }
+        while foods.count < target {
+            spawnNextClassicFood(bias: .standard)
+        }
+    }
+
+    private func spawnNextClassicFood(bias: SpawnBias) {
+        _ = spawn(kind: .apple, bias: bias, recipe: nextClassicRecipe())
+    }
+
+    private func nextClassicRecipe() -> FeedDesign? {
+        let pool = classicLoadout
+        guard !pool.isEmpty else { return nil }
+        let weights = pool.map { max(1, 9 - $0.cost) }
+        let total = weights.reduce(0, +)
+        guard total > 0 else { return nil }
+        var roll = rng.int(below: total)
+        for (design, weight) in zip(pool, weights) {
+            if roll < weight { return design }
+            roll -= weight
+        }
+        return pool.last
+    }
+
+    /// Easy's free opening shows the design and pays its score, but holds
+    /// the disruptive effects until those three bites are done.
+    private var defersCombatEffects: Bool {
+        mode == .classic && profile.planarOpeningFoods >= 3 && eaten <= profile.planarOpeningFoods
     }
 
     private var classicBias: SpawnBias {
@@ -717,6 +787,7 @@ public final class SnakeGame {
         score += points
         pendingGrowth += 1
         for effect in recipe.effects {
+            if defersCombatEffects && Self.deferredCombatEffects.contains(effect) { continue }
             switch effect {
             case .speedBoost:
                 boostRemaining = max(boostRemaining, 5)
@@ -759,6 +830,10 @@ public final class SnakeGame {
         eatenRecipes.append(recipe.id)
         events.append(.recipeEaten(recipe.id))
     }
+
+    private static let deferredCombatEffects: Set<FeedEffect> = [
+        .speedBoost, .slowMo, .reverseControls, .timeFreeze, .shrink, .ghost, .phantomTrail,
+    ]
 
     private func pullFoodsTowardHead() {
         guard magnetRemaining > 0, let head = snake.first else { return }

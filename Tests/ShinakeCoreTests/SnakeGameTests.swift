@@ -781,4 +781,123 @@ final class SnakeGameTests: XCTestCase {
             XCTFail("expected the count to fall by one, got \(game.coachCue)")
         }
     }
+
+    func testSnakeBodyIsThinnerAndTheScaleMultipliersStay() {
+        XCTAssertEqual(SnakeBody.headRadius, 0.23, accuracy: 0.0001)
+        XCTAssertEqual(SnakeBody.neckRadius, 0.20, accuracy: 0.0001)
+        XCTAssertEqual(SnakeBody.tailRadius, 0.10, accuracy: 0.0001)
+        XCTAssertEqual(SnakeBody.featureScale, 0.23 / 0.30, accuracy: 0.0001)
+        XCTAssertEqual(SnakeBody.growMultiplier, 1.28, accuracy: 0.0001)
+        XCTAssertEqual(SnakeBody.shrinkMultiplier, 0.72, accuracy: 0.0001)
+        XCTAssertEqual(
+            ScoreBoard.localBestKey(difficulty: .easy, separateLoadout: false),
+            "shinake.best.easy"
+        )
+        XCTAssertEqual(
+            ScoreBoard.localBestKey(difficulty: .normal, separateLoadout: true),
+            "shinake.best.loadout.normal"
+        )
+    }
+
+    func testEmptyLoadoutStaysAnAppleGameThenKeepsTwoFoods() {
+        let game = classic(.easy, seed: 4)
+        XCTAssertFalse(game.recordsSeparately)
+        XCTAssertEqual(game.foods.count, 1)
+        XCTAssertNil(game.foods[0].recipe)
+        let head = game.snake[0]
+        let opening = game.foods[0].position
+        XCTAssertEqual(opening.z, head.z)
+        let distance = opening.manhattan(to: head)
+        XCTAssertGreaterThanOrEqual(distance, 2)
+        XCTAssertLessThanOrEqual(distance, 4)
+
+        for expected in 1...3 {
+            let food = game.foods[0].position
+            game.debugArrange(
+                snake: [food + .xn, food + .xn + .xn, food + .xn + .xn + .xn],
+                direction: .xp,
+                foods: [FoodPellet(id: expected, kind: .apple, position: food)],
+                eaten: game.eaten
+            )
+            let events = game.debugStep()
+            XCTAssertTrue(events.contains(.ate(.apple)))
+            XCTAssertEqual(game.score, expected * 10)
+            XCTAssertTrue(game.foods.allSatisfy { $0.recipe == nil && $0.kind == .apple })
+            if expected < 3 {
+                XCTAssertEqual(game.foods.count, 1)
+            }
+        }
+        XCTAssertEqual(game.eaten, 3)
+        XCTAssertEqual(game.foods.count, 2)
+    }
+
+    func testLoadoutSkipsIllegalDesignsAndHoldsCombatEffectsForTheOpening() {
+        var gentle = FeedDesign.blank(id: "gentle", name: "青")
+        gentle = gentle.adding(.grow)!
+        gentle = gentle.adding(.speedBoost)!
+        gentle = gentle.adding(.ghost)!
+        var broken = gentle
+        broken.id = "broken"
+        broken.effects = [.ghost, .burst, .split, .scoreMultiplier]
+        XCTAssertNil(broken.classicSpawnWeight)
+        XCTAssertEqual(gentle.classicSpawnWeight, 9 - gentle.cost)
+
+        let game = SnakeGame(profile: .easy, mode: .classic, seed: 9, loadout: [broken, gentle])
+        XCTAssertTrue(game.recordsSeparately)
+        XCTAssertEqual(game.foods.count, 1)
+        XCTAssertEqual(game.foods[0].recipe?.id, "gentle")
+        let food = game.foods[0].position
+        XCTAssertEqual(food.z, game.snake[0].z)
+        XCTAssertGreaterThanOrEqual(food.manhattan(to: game.snake[0]), 2)
+        XCTAssertLessThanOrEqual(food.manhattan(to: game.snake[0]), 4)
+        game.debugArrange(
+            snake: [food + .xn, food + .xn + .xn, food + .xn + .xn + .xn],
+            direction: .xp,
+            foods: [game.foods[0]],
+            eaten: 0
+        )
+        let events = game.debugStep()
+        XCTAssertTrue(events.contains(.recipeEaten("gentle")))
+        XCTAssertEqual(game.score, 12)
+        XCTAssertEqual(game.snakeScale, SnakeBody.growMultiplier, accuracy: 0.0001)
+        XCTAssertFalse(game.boostActive)
+        XCTAssertFalse(game.ghosting)
+        XCTAssertEqual(game.foods.count, 1)
+    }
+
+    func testBonusEffectsApplyImmediatelyAndCombatEffectsWaitUntilAfterThree() {
+        var bonus = FeedDesign.blank(id: "bonus", name: "金加倍")
+        bonus.effects = [.scoreMultiplier, .golden, .grow]
+        var harsh = FeedDesign.blank(id: "harsh", name: "反向")
+        harsh = harsh.adding(.shrink)!
+        harsh = harsh.adding(.reverseControls)!
+        harsh = harsh.adding(.ghost)!
+
+        let game = SnakeGame(profile: .easy, mode: .classic, seed: 2, loadout: [bonus])
+        let food = game.foods[0].position
+        game.debugArrange(
+            snake: [food + .xn, food + .xn + .xn, food + .xn + .xn + .xn],
+            direction: .xp,
+            foods: [FoodPellet(id: 1, kind: .apple, position: food, recipe: bonus)],
+            eaten: 0
+        )
+        _ = game.debugStep()
+        XCTAssertEqual(game.score, 44)
+        XCTAssertEqual(game.snakeScale, SnakeBody.growMultiplier, accuracy: 0.0001)
+
+        let later = Vec3(6, 4, 4)
+        game.debugArrange(
+            snake: [later + .xn, later + .xn + .xn, later + .xn + .xn + .xn],
+            direction: .xp,
+            foods: [FoodPellet(id: 2, kind: .apple, position: later, recipe: harsh)],
+            eaten: 3
+        )
+        _ = game.debugStep()
+        XCTAssertEqual(game.eaten, 4)
+        XCTAssertTrue(game.controlsReversed)
+        XCTAssertTrue(game.ghosting)
+        XCTAssertEqual(game.snakeScale, SnakeBody.shrinkMultiplier, accuracy: 0.0001)
+        XCTAssertEqual(game.foods.count, 2)
+        XCTAssertTrue(game.foods.allSatisfy { $0.recipe?.id == "bonus" })
+    }
 }

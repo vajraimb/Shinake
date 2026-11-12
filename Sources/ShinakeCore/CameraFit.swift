@@ -8,8 +8,8 @@ public let playCameraVerticalFOV = 32.0
 /// canvas, with a few percent left so a corner head is not shaved off.
 public let playCameraMargin = 0.045
 
-/// Extra world units around the grid. Covers the head radius (0.30) and the
-/// cube's edge tube without the old loose halo.
+/// Extra world units around the grid. Covers a head of radius 0.30, which is
+/// larger than the drawn head (0.23), plus the cube's edge tube.
 public let playCameraPad = 0.38
 
 public struct WorldPoint: Equatable {

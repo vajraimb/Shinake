@@ -89,11 +89,16 @@ final class AppModel: ObservableObject {
         pinchDepth = storedPinch
         sound.enabled = storedSound
         haptics.enabled = storedHaptics
+        let armed = AppModel.classicLoadout(from: library)
         game = SnakeGame(
             profile: storedDifficulty.profile,
             mode: .classic,
             seed: AppModel.seed(),
-            best: defaults.integer(forKey: Key.best(storedDifficulty))
+            best: defaults.integer(forKey: ScoreBoard.localBestKey(
+                difficulty: storedDifficulty,
+                separateLoadout: !armed.isEmpty
+            )),
+            loadout: armed
         )
         seenToken = game.uiToken
     }
@@ -102,7 +107,9 @@ final class AppModel: ObservableObject {
         game.mode == .classic && game.profile.showsGuide && game.eaten < 6 && game.phase != .over
     }
 
-    var bestForSelected: Int { defaults.integer(forKey: Key.best(difficulty)) }
+    var bestForSelected: Int {
+        defaults.integer(forKey: ScoreBoard.localBestKey(difficulty: difficulty, separateLoadout: false))
+    }
 
     func prepareFeedback() {
         sound.prepare()
@@ -139,11 +146,16 @@ final class AppModel: ObservableObject {
         runWasRecord = false
         loggedFeedResult = false
         shake = 0
+        let armed = mode == .classic ? AppModel.classicLoadout(from: library) : []
         game = SnakeGame(
             profile: difficulty.profile,
             mode: mode,
             seed: AppModel.seed(),
-            best: defaults.integer(forKey: Key.best(difficulty))
+            best: defaults.integer(forKey: ScoreBoard.localBestKey(
+                difficulty: difficulty,
+                separateLoadout: !armed.isEmpty
+            )),
+            loadout: armed
         )
         seenToken = game.uiToken
         if mode == .feeding, let first = library.loadoutDesigns.first {
@@ -242,8 +254,12 @@ final class AppModel: ObservableObject {
         for event in events {
             respond(to: event)
         }
-        if game.best > defaults.integer(forKey: Key.best(game.profile.idDifficulty)) {
-            defaults.set(game.best, forKey: Key.best(game.profile.idDifficulty))
+        let bestKey = ScoreBoard.localBestKey(
+            difficulty: game.profile.idDifficulty,
+            separateLoadout: game.recordsSeparately
+        )
+        if game.best > defaults.integer(forKey: bestKey) {
+            defaults.set(game.best, forKey: bestKey)
         }
         if game.uiToken != seenToken {
             seenToken = game.uiToken
@@ -309,6 +325,13 @@ final class AppModel: ObservableObject {
     }
 }
 
+extension AppModel {
+    /// Designs the title's 开始游戏 may spawn. Deleted and over-budget cards are left out.
+    static func classicLoadout(from library: FeedLibrary) -> [FeedDesign] {
+        Array(library.loadoutDesigns.filter(\.withinBudget).prefix(3))
+    }
+}
+
 private enum Key {
     static let sound = "shinake.sound"
     static let haptics = "shinake.haptics"
@@ -317,7 +340,6 @@ private enum Key {
     static let tutorial = "shinake.tutorialSeen"
     static let statusBar = "shinake.statusBarHidden"
     static let pinch = "shinake.pinchDepth"
-    static func best(_ difficulty: Difficulty) -> String { "shinake.best.\(difficulty.rawValue)" }
 }
 
 private extension DifficultyProfile {

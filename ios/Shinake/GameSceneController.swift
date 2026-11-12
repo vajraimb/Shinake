@@ -2,8 +2,8 @@ import SceneKit
 import simd
 import UIKit
 
-/// Body diameter stays near half a cell so the grid reads. Food is a smaller
-/// apple, not another ball of the same size as the head.
+/// Food stays a readable apple. The snake is thinner than the food:
+/// head diameter 0.46, neck 0.40, tail 0.20.
 private enum SnakeFood {
     static let radius: CGFloat = 0.275
 }
@@ -78,8 +78,9 @@ final class GameSceneController {
         keyNode.eulerAngles = SCNVector3(-0.9, 0.45, 0)
         scene.rootNode.addChildNode(keyNode)
 
+        let feature = CGFloat(SnakeBody.featureScale)
         for _ in 0..<2 {
-            let eye = SCNNode(geometry: SCNSphere(radius: 0.055))
+            let eye = SCNNode(geometry: SCNSphere(radius: 0.055 * feature))
             (eye.geometry as? SCNSphere)?.segmentCount = 12
             let material = SCNMaterial()
             material.lightingModel = .constant
@@ -88,7 +89,7 @@ final class GameSceneController {
             world.addChildNode(eye)
             eyeNodes.append(eye)
 
-            let pupil = SCNNode(geometry: SCNSphere(radius: 0.026))
+            let pupil = SCNNode(geometry: SCNSphere(radius: 0.026 * feature))
             (pupil.geometry as? SCNSphere)?.segmentCount = 8
             let pupilMaterial = SCNMaterial()
             pupilMaterial.lightingModel = .constant
@@ -97,7 +98,12 @@ final class GameSceneController {
             world.addChildNode(pupil)
             pupilNodes.append(pupil)
         }
-        let tongue = SCNBox(width: 0.045, height: 0.16, length: 0.02, chamferRadius: 0.008)
+        let tongue = SCNBox(
+            width: 0.045 * feature,
+            height: 0.16 * feature,
+            length: 0.02 * feature,
+            chamferRadius: 0.008 * feature
+        )
         let tongueMaterial = SCNMaterial()
         tongueMaterial.lightingModel = .constant
         tongueMaterial.diffuse.contents = UIColor(red: 0.95, green: 0.25, blue: 0.38, alpha: 1)
@@ -299,15 +305,17 @@ final class GameSceneController {
         return node
     }
 
-    /// Head diameter 0.60 of a cell. The body starts at 0.54 and tapers to 0.28.
+    /// Head radius 0.23. The neck is 0.20 and the tail tapers to 0.10.
     private func bodyRadius(index: Int, count: Int) -> Float {
         let wave = 1 + 0.025 * sin(Float(time) * 3 + Float(index) * 0.55)
         let base: Float
         if index == 0 {
-            base = 0.30
+            base = Float(SnakeBody.headRadius)
         } else {
             let t = Float(index) / Float(max(count - 1, 1))
-            base = 0.27 + (0.14 - 0.27) * t
+            let neck = Float(SnakeBody.neckRadius)
+            let tail = Float(SnakeBody.tailRadius)
+            base = neck + (tail - neck) * t
         }
         return base * wave * bodyScale
     }
@@ -359,21 +367,23 @@ final class GameSceneController {
         if abs(forward.y) > 0.95 { up = SIMD3<Float>(1, 0, 0) }
         let side = simd_normalize(simd_cross(forward, up))
         let lift = simd_normalize(simd_cross(side, forward))
+        let feature = Float(SnakeBody.featureScale)
         let sockets = [
-            forward * 0.20 + side * 0.105 + lift * 0.055,
-            forward * 0.20 - side * 0.105 + lift * 0.055,
+            forward * (0.20 * feature) + side * (0.105 * feature) + lift * (0.055 * feature),
+            forward * (0.20 * feature) - side * (0.105 * feature) + lift * (0.055 * feature),
         ]
         for (index, socket) in sockets.enumerated() where index < eyeNodes.count && index < pupilNodes.count {
             eyeNodes[index].isHidden = false
             pupilNodes[index].isHidden = false
             eyeNodes[index].simdPosition = head + socket
-            pupilNodes[index].simdPosition = head + socket + forward * 0.04
+            pupilNodes[index].simdPosition = head + socket + forward * (0.04 * feature)
         }
-        let flick = 0.04 + 0.14 * max(0, sin(Float(time) * 5.2))
+        let flick = (0.04 + 0.14 * max(0, sin(Float(time) * 5.2))) * feature
         tongueNode.isHidden = !snapshot.alive
-        tongueNode.simdPosition = head + forward * (0.30 + flick * 0.5)
+        tongueNode.simdPosition = head + forward * (Float(SnakeBody.headRadius) + flick * 0.5)
         orient(tongueNode, along: forward)
-        tongueNode.simdScale = SIMD3<Float>(1, max(0.35, flick / 0.16), 1)
+        let tongueLength = Float(0.16 * SnakeBody.featureScale)
+        tongueNode.simdScale = SIMD3<Float>(1, max(0.35, flick / tongueLength), 1)
     }
 
     private func facing(_ snapshot: RenderSnapshot) -> SIMD3<Float> {
