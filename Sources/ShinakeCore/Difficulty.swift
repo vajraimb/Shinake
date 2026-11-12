@@ -98,7 +98,7 @@ public struct DifficultyProfile: Equatable {
     /// during those 90s is still turned aside after the counter hits zero.
     public static let easy = DifficultyProfile(
         id: "easy",
-        arena: ArenaSize(width: 11, height: 18, depth: 9),
+        arena: ArenaSize(width: 11, height: 23, depth: 9),
         startInterval: 0.64,
         minInterval: 0.32,
         speedStep: 0.008,
@@ -116,7 +116,7 @@ public struct DifficultyProfile: Equatable {
     /// Floor 0.18s is still well above the desktop game's 0.08s panic speed.
     public static let normal = DifficultyProfile(
         id: "normal",
-        arena: ArenaSize(width: 12, height: 20, depth: 10),
+        arena: ArenaSize(width: 12, height: 26, depth: 10),
         startInterval: 0.40,
         minInterval: 0.18,
         speedStep: 0.012,
@@ -131,10 +131,10 @@ public struct DifficultyProfile: Equatable {
     )
 
     /// Desktop pace: 0.27s start, −0.007s per bite, floor 0.08s.
-    /// The board is a 14×24×12 portrait box. Phone controls are the only mercy.
+    /// The board is a 14×30×12 portrait box. Phone controls are the only mercy.
     public static let hard = DifficultyProfile(
         id: "hard",
-        arena: ArenaSize(width: 14, height: 24, depth: 12),
+        arena: ArenaSize(width: 14, height: 30, depth: 12),
         startInterval: LegacyTuning.startInterval,
         minInterval: LegacyTuning.minInterval,
         speedStep: LegacyTuning.speedStep,

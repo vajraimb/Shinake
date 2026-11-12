@@ -910,7 +910,7 @@ final class SnakeGameTests: XCTestCase {
     func testCeilingKillsAndCellsAboveTheOldCubeAreInside() {
         let hard = classic(.hard)
         XCTAssertEqual(hard.width, 14)
-        XCTAssertEqual(hard.height, 24)
+        XCTAssertEqual(hard.height, 30)
         XCTAssertEqual(hard.depth, 12)
         XCTAssertGreaterThan(hard.height, hard.width)
         let x = hard.width / 2

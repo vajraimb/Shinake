@@ -296,10 +296,10 @@ struct PlayView: View {
     private func hintBanner(_ text: String) -> some View {
         let depth = depthCueActive
         return Text(text)
-            .font(.system(size: depth ? 17 : 15, weight: .bold, design: .rounded))
+            .font(.system(size: depth ? 10 : 15, weight: .bold, design: .rounded))
             .foregroundColor(.white)
-            .padding(.horizontal, 16)
-            .padding(.vertical, depth ? 10 : 8)
+            .padding(.horizontal, 12)
+            .padding(.vertical, depth ? 6 : 8)
             .background(depth ? Theme.blue.opacity(0.94) : Color.black.opacity(0.45))
             .clipShape(Capsule())
             .padding(.horizontal, 16)
@@ -391,14 +391,14 @@ private struct AimArrow: View {
     var body: some View {
         VStack(spacing: 2) {
             Image(systemName: symbol)
-                .font(.system(size: 44, weight: .bold))
+                .font(.system(size: 26, weight: .bold))
                 .scaleEffect(urgent && pulse ? 1.22 : 1)
             Text(caption)
-                .font(.system(size: 18, weight: .bold, design: .rounded))
+                .font(.system(size: 11, weight: .bold, design: .rounded))
         }
         .foregroundColor(tint)
-        .shadow(color: .black.opacity(0.85), radius: 6, y: 1)
-        .shadow(color: tint.opacity(0.9), radius: urgent ? 16 : 8)
+        .shadow(color: .black.opacity(0.85), radius: 4, y: 1)
+        .shadow(color: tint.opacity(0.75), radius: urgent ? 8 : 4)
         .onAppear { startPulse() }
         .onChange(of: urgent) { _ in startPulse() }
     }

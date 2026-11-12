@@ -19,7 +19,7 @@ final class DifficultyTests: XCTestCase {
         let easy = Difficulty.easy.profile
         XCTAssertEqual(easy, .easy)
         XCTAssertEqual(easy.arena.width, 11)
-        XCTAssertEqual(easy.arena.height, 18)
+        XCTAssertEqual(easy.arena.height, 23)
         XCTAssertEqual(easy.arena.depth, 9)
         XCTAssertGreaterThan(easy.arena.height, easy.arena.width)
         XCTAssertEqual(easy.startInterval, 0.64, accuracy: 0.0001)
@@ -37,7 +37,7 @@ final class DifficultyTests: XCTestCase {
     func testHardMatchesTheDesktopPace() {
         let hard = Difficulty.hard.profile
         XCTAssertEqual(hard.arena.width, 14)
-        XCTAssertEqual(hard.arena.height, 24)
+        XCTAssertEqual(hard.arena.height, 30)
         XCTAssertEqual(hard.arena.depth, 12)
         XCTAssertGreaterThan(hard.arena.height, hard.arena.width)
         XCTAssertEqual(hard.startInterval, LegacyTuning.startInterval, accuracy: 0.0001)
@@ -54,7 +54,7 @@ final class DifficultyTests: XCTestCase {
         XCTAssertLessThan(normal.startInterval, Difficulty.easy.profile.startInterval)
         XCTAssertGreaterThan(normal.minInterval, LegacyTuning.minInterval)
         XCTAssertEqual(normal.arena.width, 12)
-        XCTAssertEqual(normal.arena.height, 20)
+        XCTAssertEqual(normal.arena.height, 26)
         XCTAssertEqual(normal.arena.depth, 10)
         XCTAssertGreaterThan(normal.arena.height, normal.arena.width)
         XCTAssertEqual(normal.graceCharges, 1)

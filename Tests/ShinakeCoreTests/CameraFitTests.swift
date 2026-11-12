@@ -10,9 +10,9 @@ final class CameraFitTests: XCTestCase {
 
     func testPortraitBoardsFitTheCanvasTheyWereChosenFor() {
         let expected: [(String, ArenaSize)] = [
-            ("easy", ArenaSize(width: 11, height: 18, depth: 9)),
-            ("normal", ArenaSize(width: 12, height: 20, depth: 10)),
-            ("hard", ArenaSize(width: 14, height: 24, depth: 12)),
+            ("easy", ArenaSize(width: 11, height: 23, depth: 9)),
+            ("normal", ArenaSize(width: 12, height: 26, depth: 10)),
+            ("hard", ArenaSize(width: 14, height: 30, depth: 12)),
         ]
         for (name, size) in expected {
             let arena = profiles.first { $0.id == name }?.arena
