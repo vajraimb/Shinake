@@ -214,6 +214,12 @@ public final class DuelMatch {
         if guestDropLeft == nil { guestDropLeft = DuelMatch.guestDropDelay }
     }
 
+    /// The guest socket came back inside the five-second window. The forfeit is cancelled.
+    public func remoteReturned() {
+        guard phase == .playing || phase == .sudden else { return }
+        guestDropLeft = nil
+    }
+
     @discardableResult
     public func update(dt raw: Double) -> DuelSnapshot {
         let dt = min(max(raw, 0), 1.0 / 20.0)

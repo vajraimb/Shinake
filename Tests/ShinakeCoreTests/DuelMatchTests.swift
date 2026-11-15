@@ -165,6 +165,18 @@ final class DuelMatchTests: XCTestCase {
         XCTAssertEqual(hostLeft.phase, .finished)
         XCTAssertNil(hostLeft.winner)
         XCTAssertEqual(hostLeft.reason, .hostLeft)
+
+        let back = DuelMatch(seed: 12)
+        back.remoteDropped(.joiner)
+        for _ in 0..<40 {
+            _ = back.update(dt: 0.05)
+        }
+        back.remoteReturned()
+        for _ in 0..<80 {
+            _ = back.update(dt: 0.05)
+        }
+        XCTAssertEqual(back.phase, .playing)
+        XCTAssertNil(back.winner)
     }
 
     func testSnapshotGlideAndWireRoundTrip() {

@@ -1,0 +1,14 @@
+# 食蛇房间。贴在 vajra.one 站点里，紧挨着语掼的 handle，并且写在更宽的回退之前。
+# 不要写成 handle /shinake/*，那会把别的路径也抢走。
+# 不要改 /yuguan/ws、/yuguan/join/*、/yuguan、/yuguan/privacy、/api/yi110。
+# 食蛇进程只听 127.0.0.1:8796。语掼仍是 8795。
+# AASA 改成 /var/www/vajra.one 上的静态文件，不再反代到 8795。
+handle /shinake/ws {
+	reverse_proxy 127.0.0.1:8796
+}
+handle /shinake/join {
+	reverse_proxy 127.0.0.1:8796
+}
+handle /shinake/join/* {
+	reverse_proxy 127.0.0.1:8796
+}

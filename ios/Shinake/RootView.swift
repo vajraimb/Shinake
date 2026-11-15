@@ -22,6 +22,7 @@ struct RootView: View {
         .preferredColorScheme(.dark)
         .statusBarHidden(model.statusBarHidden)
         .onAppear { model.prepareFeedback() }
+        .onOpenURL { model.openInvite($0) }
         .onChange(of: scenePhase) { phase in
             guard phase != .active, model.screen == .play, !model.inBattle else { return }
             model.pause()

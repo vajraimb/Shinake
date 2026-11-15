@@ -35,6 +35,23 @@ struct TitleView: View {
                         .font(.system(size: 14, weight: .medium, design: .rounded))
                         .foregroundColor(Theme.dim)
                         .multilineTextAlignment(.center)
+                    if let invite = model.battleInviteURL, !model.inBattle {
+                        ShareLink(item: invite) {
+                            Text("分享邀请")
+                                .font(.system(size: 18, weight: .semibold, design: .rounded))
+                                .frame(maxWidth: .infinity)
+                                .frame(height: 52)
+                                .background(Theme.card)
+                                .foregroundColor(.white)
+                                .overlay(
+                                    RoundedRectangle(cornerRadius: 16, style: .continuous)
+                                        .stroke(Theme.stroke, lineWidth: 1)
+                                )
+                                .clipShape(RoundedRectangle(cornerRadius: 16, style: .continuous))
+                        }
+                        .buttonStyle(PressStyle())
+                        .accessibilityIdentifier("shareInviteButton")
+                    }
                     Button("取消", action: model.cancelBattle)
                         .font(.system(size: 15, weight: .semibold, design: .rounded))
                         .foregroundColor(.white)

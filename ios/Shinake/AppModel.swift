@@ -57,11 +57,13 @@ final class AppModel: ObservableObject {
     }
     /// Depth is always the two-finger pinch: spread is 深入, pinch-in is 拉近.
     @Published private(set) var runWasRecord = false
-    /// Set while a Game Center match is on screen. Nil means solo.
+    /// Set while a friend-room match is on screen. Nil means solo.
     @Published private(set) var battleRole: DuelRole?
     @Published private(set) var battleSnapshot: DuelSnapshot?
-    /// Title-screen line while matchmaking, or a short failure.
+    /// Title-screen line while the room is opening, or a short failure.
     @Published var battleNote: String?
+    /// https invite shown on the title screen until the friend joins.
+    @Published private(set) var battleInviteURL: URL?
     let battle = MatchSession()
     private var battleClock = -1
 
@@ -113,8 +115,23 @@ final class AppModel: ObservableObject {
     }
 
     func requestBattle() {
+        battleInviteURL = nil
         battle.model = self
         battle.begin()
+    }
+
+    func openInvite(_ url: URL) {
+        guard let code = OnlineLinks.roomCode(from: url), !inBattle else { return }
+        battleInviteURL = nil
+        battle.stop()
+        battle.model = self
+        battle.join(code: code)
+    }
+
+    func battleLobby(code: String, invite: URL) {
+        battleInviteURL = invite
+        battleNote = "房间 \(code)"
+        hudTick += 1
     }
 
     func battleSearchEnded() {
@@ -125,12 +142,14 @@ final class AppModel: ObservableObject {
 
     func cancelBattle() {
         battle.stop()
+        battleInviteURL = nil
         battleNote = nil
         hudTick += 1
     }
 
     func leaveBattle() {
         battle.stop()
+        battleInviteURL = nil
         battleRole = nil
         battleSnapshot = nil
         battleNote = nil
@@ -147,6 +166,7 @@ final class AppModel: ObservableObject {
     func battleDidConnect(role: DuelRole, snapshot: DuelSnapshot?) {
         battleRole = role
         battleSnapshot = snapshot
+        battleInviteURL = nil
         battleNote = nil
         battleClock = snapshot.map { Int($0.timeLeft) } ?? -1
         screen = .play
@@ -156,6 +176,7 @@ final class AppModel: ObservableObject {
 
     func battleFailed(_ message: String) {
         battle.stop()
+        battleInviteURL = nil
         battleRole = nil
         battleSnapshot = nil
         battleNote = message
@@ -176,7 +197,6 @@ final class AppModel: ObservableObject {
         sound.prepare()
         haptics.prepare()
         battle.model = self
-        battle.listenIfAuthenticated()
     }
 
     func openLab() {

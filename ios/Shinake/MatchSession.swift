@@ -1,76 +1,80 @@
-import GameKit
-import UIKit
+import Foundation
 
-/// Game Center match for two phones. The smaller `gamePlayerID` is the host
-/// and the only one that runs `DuelMatch`. The guest sends inputs and glides
-/// the latest snapshot locally.
-final class MatchSession: NSObject, GKMatchDelegate, GKMatchmakerViewControllerDelegate, GKLocalPlayerListener {
+/// Friend room on vajra.one. The phone that creates the room is the host and
+/// the only one that runs `DuelMatch`. The guest sends inputs and glides the
+/// latest snapshot. Game Center is not used for matchmaking.
+final class MatchSession {
     weak var model: AppModel?
-    private var match: GKMatch?
-    private var maker: GKMatchmakerViewController?
-    private var localID = ""
-    private var remoteID: String?
+    private let session: URLSession
+    private let defaults: UserDefaults
+    private let clientID: String
+    private var task: URLSessionWebSocketTask?
+    private var clock: Timer?
     private var role: DuelRole?
     private var duel: DuelMatch?
+    private var isHost = false
+    private var roomCode: String?
+    private var resumeToken: String?
     private var inputSeq = 0
     private var appliedGuestSeq = 0
     private var guestBase: DuelSnapshot?
     private var guestReceivedAt = Date()
-    private var pendingSnapshot: DuelSnapshot?
     private var lastSentTick = -1
     private var lastSentPhase: DuelPhase?
     private var sinceSend = 0.0
-    private var looking = false
-    private var registered = false
+    private var lastInbound = Date()
+    private var lastPing = Date()
+    private var ping = 0
+    private var stopped = true
+    private var closing = false
+    private var settled = false
+    private var resumedOnce = false
 
-    /// So an accepted Game Center invite can open the matchmaker after login.
-    func listenIfAuthenticated() {
-        guard GKLocalPlayer.local.isAuthenticated else { return }
-        registerInviteListener()
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+        let key = "shinake.roomClientID"
+        if let stored = defaults.string(forKey: key), Self.isClientID(stored) {
+            clientID = stored
+        } else {
+            let made = UUID().uuidString.lowercased()
+            defaults.set(made, forKey: key)
+            clientID = made
+        }
+        let config = URLSessionConfiguration.default
+        config.waitsForConnectivity = false
+        session = URLSession(configuration: config)
     }
 
     func begin() {
-        looking = true
-        model?.showBattleNote("正在连接 Game Center")
-        let player = GKLocalPlayer.local
-        if player.isAuthenticated {
-            presentMaker()
-            return
-        }
-        player.authenticateHandler = { [weak self] viewController, _ in
-            DispatchQueue.main.async {
-                guard let self, self.looking else { return }
-                if let viewController {
-                    self.present(viewController)
-                    return
-                }
-                if GKLocalPlayer.local.isAuthenticated {
-                    self.presentMaker()
-                } else {
-                    self.looking = false
-                    self.model?.battleFailed("Game Center 没登录")
-                }
-            }
-        }
+        model?.showBattleNote("正在开房")
+        open(code: nil, token: nil, fresh: true)
+    }
+
+    func join(code: String) {
+        model?.showBattleNote("正在加入 \(code)")
+        open(code: code, token: nil, fresh: true)
     }
 
     func stop() {
-        looking = false
-        match?.delegate = nil
-        match?.disconnect()
-        match = nil
-        maker?.dismiss(animated: true)
-        maker = nil
+        stopped = true
+        send(.leave)
+        clock?.invalidate()
+        clock = nil
+        task?.cancel(with: .normalClosure, reason: nil)
+        task = nil
         role = nil
         duel = nil
-        remoteID = nil
+        isHost = false
+        roomCode = nil
+        resumeToken = nil
         guestBase = nil
-        pendingSnapshot = nil
         inputSeq = 0
         appliedGuestSeq = 0
         lastSentTick = -1
         lastSentPhase = nil
         sinceSend = 0
+        resumedOnce = false
+        settled = false
     }
 
     func steer(_ input: ControlInput) {
@@ -79,7 +83,7 @@ final class MatchSession: NSObject, GKMatchDelegate, GKMatchmakerViewControllerD
             duel?.input(.host, input)
         } else {
             inputSeq += 1
-            send(.input(seq: inputSeq, control: input), reliable: true)
+            send(.input(seq: inputSeq, control: input))
         }
     }
 
@@ -90,7 +94,7 @@ final class MatchSession: NSObject, GKMatchDelegate, GKMatchmakerViewControllerD
             sinceSend += dt
             let phaseChanged = snap.phase != lastSentPhase
             if snap.tick != lastSentTick || sinceSend >= 0.25 || phaseChanged {
-                send(.snapshot(snap), reliable: phaseChanged)
+                send(.snapshot(snap))
                 lastSentTick = snap.tick
                 lastSentPhase = snap.phase
                 sinceSend = 0
@@ -101,162 +105,166 @@ final class MatchSession: NSObject, GKMatchDelegate, GKMatchmakerViewControllerD
         return guestBase.advanced(by: Date().timeIntervalSince(guestReceivedAt))
     }
 
-    private func presentMaker() {
-        guard looking, maker == nil, match == nil else { return }
-        registerInviteListener()
-        let request = GKMatchRequest()
-        request.minPlayers = 2
-        request.maxPlayers = 2
-        request.inviteMessage = "来一局食蛇"
-        guard let controller = GKMatchmakerViewController(matchRequest: request) else {
-            looking = false
-            model?.battleFailed("对战界面打不开")
+    private func open(code: String?, token: String?, fresh: Bool) {
+        clock?.invalidate()
+        let previous = task
+        task = nil
+        previous?.cancel(with: .goingAway, reason: nil)
+        stopped = false
+        closing = false
+        if fresh {
+            settled = false
+            role = nil
+            duel = nil
+            isHost = false
+            guestBase = nil
+            resumeToken = nil
+            resumedOnce = false
+            inputSeq = 0
+            appliedGuestSeq = 0
+            lastSentTick = -1
+            lastSentPhase = nil
+            sinceSend = 0
+            roomCode = code
+        }
+        guard let url = OnlineLinks.webSocketURL() else {
+            model?.battleFailed("房间地址不对")
             return
         }
-        controller.matchmakerDelegate = self
-        maker = controller
-        model?.showBattleNote("寻找对手")
-        present(controller)
+        let hello = RoomHello(clientID: clientID, roomCode: code ?? roomCode, resumeToken: fresh ? nil : token)
+        let socket = session.webSocketTask(with: url)
+        task = socket
+        lastInbound = Date()
+        lastPing = Date()
+        socket.resume()
+        send(.hello(hello))
+        armClock()
+        read(socket)
     }
 
-    private func registerInviteListener() {
-        guard !registered else { return }
-        registered = true
-        GKLocalPlayer.local.register(self)
-    }
-
-    func player(_ player: GKPlayer, didAccept invite: GKInvite) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            self.looking = true
-            self.maker?.dismiss(animated: false)
-            guard let controller = GKMatchmakerViewController(invite: invite) else {
-                self.model?.battleFailed("邀请打不开")
-                return
-            }
-            controller.matchmakerDelegate = self
-            self.maker = controller
-            self.present(controller)
+    private func armClock() {
+        clock?.invalidate()
+        let timer = Timer(timeInterval: 1, repeats: true) { [weak self] _ in
+            self?.housekeep()
         }
+        clock = timer
+        RunLoop.main.add(timer, forMode: .common)
     }
 
-    func matchmakerViewControllerWasCancelled(_ viewController: GKMatchmakerViewController) {
-        let stillSearching = looking
-        looking = false
-        maker = nil
-        viewController.dismiss(animated: true)
-        if stillSearching {
-            model?.battleSearchEnded()
-        }
-    }
-
-    func matchmakerViewController(_ viewController: GKMatchmakerViewController, didFailWithError error: Error) {
-        looking = false
-        maker = nil
-        viewController.dismiss(animated: true)
-        model?.battleFailed("没找到对手")
-    }
-
-    func matchmakerViewController(_ viewController: GKMatchmakerViewController, didFind match: GKMatch) {
-        viewController.dismiss(animated: true)
-        maker = nil
-        looking = false
-        adopt(match)
-    }
-
-    private func adopt(_ match: GKMatch) {
-        self.match = match
-        match.delegate = self
-        localID = GKLocalPlayer.local.gamePlayerID
-        if localID.isEmpty {
-            localID = GKLocalPlayer.local.teamPlayerID
-        }
-        sendHello()
-        for player in match.players {
-            noteRemote(player.gamePlayerID)
-        }
-    }
-
-    private func sendHello() {
-        guard !localID.isEmpty else {
-            model?.battleFailed("Game Center 身份是空的")
+    private func housekeep() {
+        guard task != nil, !stopped else { return }
+        if Date().timeIntervalSince(lastInbound) >= RoomProtocol.heartbeatTimeout {
+            task?.cancel(with: .goingAway, reason: nil)
+            socketClosed()
             return
         }
-        send(.hello(localID), reliable: true)
+        if Date().timeIntervalSince(lastPing) >= RoomProtocol.heartbeatInterval {
+            lastPing = Date()
+            ping &+= 1
+            send(.ping(ping))
+        }
     }
 
-    func match(_ match: GKMatch, player: GKPlayer, didChange state: GKPlayerConnectionState) {
-        DispatchQueue.main.async { [weak self] in
-            guard let self else { return }
-            if state == .connected {
-                self.sendHello()
-                let remote = player.gamePlayerID.isEmpty ? player.teamPlayerID : player.gamePlayerID
-                self.noteRemote(remote)
-            } else if state == .disconnected {
-                self.remoteWentAway()
+    private func read(_ socket: URLSessionWebSocketTask) {
+        socket.receive { [weak self] result in
+            DispatchQueue.main.async {
+                guard let self, self.task === socket, !self.stopped else { return }
+                switch result {
+                case .failure:
+                    self.socketClosed()
+                case .success(let message):
+                    self.lastInbound = Date()
+                    if case .string(let text) = message {
+                        self.handle(text)
+                    }
+                    if self.task === socket, !self.stopped {
+                        self.read(socket)
+                    }
+                }
             }
         }
     }
 
-    func match(_ match: GKMatch, didReceive data: Data, fromRemotePlayer player: GKPlayer) {
-        guard let wire = DuelWireCodec.decode(data) else { return }
-        DispatchQueue.main.async { [weak self] in
-            self?.receive(wire, fallbackID: player.gamePlayerID)
-        }
-    }
-
-    func match(_ match: GKMatch, didFailWithError error: Error?) {
-        DispatchQueue.main.async { [weak self] in
-            self?.remoteWentAway()
-        }
-    }
-
-    private func receive(_ wire: DuelWire, fallbackID: String) {
-        switch wire {
-        case .hello(let id):
-            noteRemote(id.isEmpty ? fallbackID : id)
+    private func handle(_ text: String) {
+        guard let data = text.data(using: .utf8),
+              let message = try? JSONDecoder().decode(RoomServerMessage.self, from: data) else { return }
+        switch message {
+        case .welcome(let card):
+            resumeToken = card.resumeToken
+            roomCode = card.roomCode
+            isHost = card.host
+            if card.host {
+                if duel == nil, let invite = URL(string: card.inviteURL) {
+                    model?.battleLobby(code: card.roomCode, invite: invite)
+                }
+            } else if role == nil {
+                role = .joiner
+                model?.showBattleNote("正在同步")
+            }
+        case .peer(let peer):
+            guard isHost else { return }
+            if peer.connected {
+                if duel == nil {
+                    startHostMatch()
+                } else {
+                    duel?.remoteReturned()
+                }
+            } else {
+                duel?.remoteDropped(.joiner)
+            }
         case .input(let seq, let control):
             guard role == .host, seq > appliedGuestSeq else { return }
             appliedGuestSeq = seq
             duel?.input(.joiner, control)
         case .snapshot(let snap):
-            guard role != .host else { return }
-            if role == nil {
-                pendingSnapshot = snap
-                return
-            }
+            guard !isHost else { return }
+            role = .joiner
             accept(snap)
+            if model?.inBattle != true {
+                model?.battleDidConnect(role: .joiner, snapshot: snap)
+            }
+        case .rejected(let reason):
+            model?.battleFailed(reason)
+        case .ended(let reason):
+            settled = true
+            if reason == "hostLeft" {
+                finishGuest(note: "主机断开")
+            } else if reason == "expired" {
+                model?.battleFailed("房间已过期")
+            } else {
+                model?.battleFailed("对战结束了")
+            }
+        case .pong:
+            break
         }
     }
 
-    private func noteRemote(_ remote: String) {
-        guard remoteID == nil, !remote.isEmpty else { return }
-        guard !localID.isEmpty, localID != remote else {
-            if localID == remote {
-                model?.battleFailed("两台机器的 Game Center 身份一样")
-            }
+    private func startHostMatch() {
+        var seed = UInt64(Date().timeIntervalSince1970 * 1000)
+        if seed == 0 { seed = 1 }
+        let match = DuelMatch(seed: seed)
+        duel = match
+        role = .host
+        let opening = match.snapshot()
+        send(.snapshot(opening))
+        lastSentTick = opening.tick
+        lastSentPhase = opening.phase
+        sinceSend = 0
+        model?.battleDidConnect(role: .host, snapshot: opening)
+    }
+
+    private func finishGuest(note: String) {
+        guard var snap = guestBase else {
+            model?.battleFailed(note)
             return
         }
-        remoteID = remote
-        let hosting = localID < remote
-        role = hosting ? .host : .joiner
-        var opening: DuelSnapshot?
-        if hosting {
-            var seed = UInt64(Date().timeIntervalSince1970 * 1000)
-            if seed == 0 { seed = 1 }
-            duel = DuelMatch(seed: seed)
-            opening = duel?.snapshot()
-            if let opening {
-                send(.snapshot(opening), reliable: true)
-                lastSentTick = opening.tick
-                lastSentPhase = opening.phase
-            }
-        } else if let pendingSnapshot {
-            accept(pendingSnapshot)
-            opening = pendingSnapshot
-            self.pendingSnapshot = nil
+        snap.phase = .finished
+        snap.reason = .hostLeft
+        snap.winner = nil
+        accept(snap)
+        if model?.inBattle != true {
+            model?.battleDidConnect(role: .joiner, snapshot: snap)
         }
-        model?.battleDidConnect(role: role ?? .joiner, snapshot: opening)
     }
 
     private func accept(_ snap: DuelSnapshot) {
@@ -267,52 +275,26 @@ final class MatchSession: NSObject, GKMatchDelegate, GKMatchmakerViewControllerD
         guestReceivedAt = Date()
     }
 
-    private func remoteWentAway() {
-        guard match != nil || role != nil else { return }
-        if role == .host {
-            duel?.remoteDropped(.joiner)
+    private func socketClosed() {
+        guard !stopped, !closing, !settled else { return }
+        if !isHost, let code = roomCode, let token = resumeToken, !resumedOnce {
+            resumedOnce = true
+            open(code: code, token: token, fresh: false)
             return
         }
-        if role == .joiner {
-            if var snap = guestBase {
-                snap.phase = .finished
-                snap.reason = .hostLeft
-                snap.winner = nil
-                accept(snap)
-            } else {
-                model?.battleFailed("主机断开")
-            }
-            match?.disconnect()
-            match = nil
-            return
-        }
-        model?.battleFailed("对手离开了")
+        closing = true
+        model?.battleFailed("连接断了")
     }
 
-    /// Unreliable while the payload stays under Game Center's small datagram cap.
-    private func send(_ wire: DuelWire, reliable: Bool) {
-        guard let match, let data = try? DuelWireCodec.encode(wire) else { return }
-        let mode: GKMatch.SendDataMode = (reliable || data.count > 900) ? .reliable : .unreliable
-        try? match.sendData(toAllPlayers: data, with: mode)
+    private func send(_ message: RoomClientMessage) {
+        guard let task,
+              let data = try? JSONEncoder().encode(message),
+              let text = String(data: data, encoding: .utf8) else { return }
+        task.send(.string(text)) { _ in }
     }
 
-    private func present(_ controller: UIViewController) {
-        guard let root = Self.topViewController() else { return }
-        if let presented = root.presentedViewController {
-            presented.dismiss(animated: false) {
-                root.present(controller, animated: true)
-            }
-        } else {
-            root.present(controller, animated: true)
-        }
-    }
-
-    private static func topViewController() -> UIViewController? {
-        let scene = UIApplication.shared.connectedScenes.compactMap { $0 as? UIWindowScene }.first
-        var controller = scene?.windows.first(where: \.isKeyWindow)?.rootViewController
-        while let presented = controller?.presentedViewController {
-            controller = presented
-        }
-        return controller
+    private static func isClientID(_ raw: String) -> Bool {
+        guard (8...RoomProtocol.maxClientIDLength).contains(raw.count) else { return false }
+        return raw.allSatisfy { $0.isHexDigit || $0 == "-" }
     }
 }
