@@ -345,7 +345,7 @@ enum HTTP {
 
 enum POSIX {
     static func listen(host: String, port: Int) throws -> Int32 {
-        let fd = socket(AF_INET, posixStream, 0)
+        let fd = socket(AF_INET, posixSocketType(SOCK_STREAM), 0)
         if fd < 0 { throw POSIXError(message: "socket") }
         var yes: Int32 = 1
         setsockopt(fd, Int32(SOL_SOCKET), Int32(SO_REUSEADDR), &yes, socklen_t(MemoryLayout<Int32>.size))
@@ -435,13 +435,12 @@ enum POSIX {
     }
 }
 
-let posixStream: Int32 = {
-#if os(Linux)
-    Int32(SOCK_STREAM.rawValue)
-#else
-    SOCK_STREAM
-#endif
-}()
+/// glibc imports `SOCK_STREAM` as an enum. musl and Darwin import it as `Int32`.
+func posixSocketType(_ type: Int32) -> Int32 { type }
+
+func posixSocketType<T: RawRepresentable>(_ type: T) -> Int32 where T.RawValue: BinaryInteger {
+    Int32(type.rawValue)
+}
 
 private func systemListen(_ fd: Int32, _ backlog: Int32) -> Int32 { listen(fd, backlog) }
 private func systemShutdown(_ fd: Int32, _ how: Int32) -> Int32 { shutdown(fd, how) }

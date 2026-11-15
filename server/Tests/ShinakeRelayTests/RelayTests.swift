@@ -169,7 +169,7 @@ private func connectTCP(_ port: Int) throws -> Int32 {
     let deadline = Date().addingTimeInterval(2)
     var reason = "connect"
     while Date() < deadline {
-        let fd = socket(AF_INET, posixStream, 0)
+        let fd = socket(AF_INET, posixSocketType(SOCK_STREAM), 0)
         if fd < 0 { throw TestSocketError("socket") }
         var addr = sockaddr_in()
         addr.sin_family = sa_family_t(AF_INET)
