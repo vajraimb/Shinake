@@ -6,6 +6,17 @@
 	<true/>
 	<key>CFBundleDisplayName</key>
 	<string>Shinake</string>
+	<key>CFBundleURLTypes</key>
+	<array>
+		<dict>
+			<key>CFBundleURLName</key>
+			<string>one.vajra.shinake</string>
+			<key>CFBundleURLSchemes</key>
+			<array>
+				<string>shinake</string>
+			</array>
+		</dict>
+	</array>
 	<key>ITSAppUsesNonExemptEncryption</key>
 	<false/>
 	<key>LSApplicationCategoryType</key>

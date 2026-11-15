@@ -41,6 +41,8 @@
 		A1000000000000000000006B /* DuelMatchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000006A /* DuelMatchTests.swift */; };
 		A1000000000000000000006D /* MatchSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000006C /* MatchSession.swift */; };
 		A1000000000000000000006F /* GameKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1000000000000000000006E /* GameKit.framework */; };
+		A10000000000000000000071 /* OnlineRoom.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000070 /* OnlineRoom.swift */; };
+		A10000000000000000000073 /* OnlineRoomTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000072 /* OnlineRoomTests.swift */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -86,6 +88,8 @@
 		A10000000000000000000068 /* OfficialFoodTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfficialFoodTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000006A /* DuelMatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuelMatchTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000006C /* MatchSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MatchSession.swift; sourceTree = "<group>"; };
+		A10000000000000000000070 /* OnlineRoom.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineRoom.swift; sourceTree = "<group>"; };
+		A10000000000000000000072 /* OnlineRoomTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OnlineRoomTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000006E /* GameKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameKit.framework; path = System/Library/Frameworks/GameKit.framework; sourceTree = SDKROOT; };
 		A1000000000000000000005E /* Shinake.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Shinake.entitlements; sourceTree = "<group>"; };
 		A1000000000000000000004F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
@@ -161,6 +165,7 @@
 				A10000000000000000000056 /* FeedDesign.swift */,
 				A10000000000000000000064 /* OfficialMenu.swift */,
 				A10000000000000000000066 /* DuelMatch.swift */,
+				A10000000000000000000070 /* OnlineRoom.swift */,
 			);
 			name = ShinakeCore;
 			path = "../Sources/ShinakeCore";
@@ -177,6 +182,7 @@
 				A10000000000000000000058 /* FeedDesignTests.swift */,
 				A10000000000000000000068 /* OfficialFoodTests.swift */,
 				A1000000000000000000006A /* DuelMatchTests.swift */,
+				A10000000000000000000072 /* OnlineRoomTests.swift */,
 			);
 			name = ShinakeTests;
 			path = "../Tests/ShinakeCoreTests";
@@ -292,6 +298,7 @@
 				A10000000000000000000057 /* FeedDesign.swift in Sources */,
 				A10000000000000000000065 /* OfficialMenu.swift in Sources */,
 				A10000000000000000000067 /* DuelMatch.swift in Sources */,
+				A10000000000000000000071 /* OnlineRoom.swift in Sources */,
 				A1000000000000000000006D /* MatchSession.swift in Sources */,
 				A1000000000000000000005B /* FeedLabView.swift in Sources */,
 				A1000000000000000000005D /* FeedLibrary.swift in Sources */,
@@ -321,6 +328,7 @@
 				A10000000000000000000059 /* FeedDesignTests.swift in Sources */,
 				A10000000000000000000069 /* OfficialFoodTests.swift in Sources */,
 				A1000000000000000000006B /* DuelMatchTests.swift in Sources */,
+				A10000000000000000000073 /* OnlineRoomTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -385,7 +393,7 @@
 				CODE_SIGN_ENTITLEMENTS = Shinake/Shinake.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				"CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]" = NO;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = A5VCS5XD6R;
 				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -420,7 +428,7 @@
 				CODE_SIGN_ENTITLEMENTS = Shinake/Shinake.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				"CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]" = NO;
-				CURRENT_PROJECT_VERSION = 2;
+				CURRENT_PROJECT_VERSION = 3;
 				DEVELOPMENT_TEAM = A5VCS5XD6R;
 				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;

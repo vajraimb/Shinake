@@ -1,0 +1,20 @@
+[Unit]
+Description=Shinake friend-room relay
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=shinake
+Group=shinake
+WorkingDirectory=/opt/shinake
+Environment=SHINAKE_BIND=127.0.0.1
+Environment=SHINAKE_PORT=8796
+Environment=SHINAKE_PUBLIC_BASE=https://vajra.one
+ExecStart=/opt/shinake/shinake-server
+Restart=on-failure
+RestartSec=2
+NoNewPrivileges=true
+
+[Install]
+WantedBy=multi-user.target

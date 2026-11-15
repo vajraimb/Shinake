@@ -1,0 +1,19 @@
+{
+  "applinks": {
+    "apps": [],
+    "details": [
+      {
+        "appIDs": ["A5VCS5XD6R.one.vajra.yuguan"],
+        "components": [
+          { "/": "/yuguan/join/*", "comment": "friend room invite" }
+        ]
+      },
+      {
+        "appIDs": ["A5VCS5XD6R.one.vajra.shinake"],
+        "components": [
+          { "/": "/shinake/join/*", "comment": "shinake duel invite" }
+        ]
+      }
+    ]
+  }
+}
