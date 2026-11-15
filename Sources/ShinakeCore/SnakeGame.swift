@@ -17,11 +17,17 @@ public enum FoodKind: String, Codable, CaseIterable, Equatable {
     case apple
     case star
     case chili
+    case frost
+    case cherry
     case mushroom
     case shield
+    case bolt
+
+    /// The feeding tray stays the original five dishes. Official kinds join classic play on their own.
+    public static let tray: [FoodKind] = [.apple, .star, .chili, .mushroom, .shield]
 }
 
-public struct FoodPellet: Equatable {
+public struct FoodPellet: Equatable, Codable {
     public var id: Int
     public var kind: FoodKind
     public var position: Vec3
@@ -82,6 +88,8 @@ public struct RenderSnapshot: Equatable {
     /// 1 is the normal body. Grow and shrink feeds push it for a few seconds.
     public var snakeScale: Double
     public var colorShift: Bool
+    /// Official effect still showing on the body. Nil is the normal lime snake.
+    public var bodyAura: FoodKind?
 }
 
 /// Drawn thickness of the snake, in cell radii. Collision stays on the grid.
@@ -142,6 +150,9 @@ public final class SnakeGame {
     public private(set) var uiToken = 0
     public private(set) var shieldRemaining: Double = 0
     public private(set) var boostRemaining: Double = 0
+    /// Official chili: the next few steps use a fixed faster interval.
+    public private(set) var boostSteps = 0
+    public private(set) var frostRemaining: Double = 0
     public private(set) var confuseRemaining: Double = 0
     /// Recipes eaten during this run, in order, for the feed-card stats.
     public private(set) var eatenRecipes: [String] = []
@@ -180,6 +191,8 @@ public final class SnakeGame {
     private var growScaleRemaining = 0.0
     private var shrinkScaleRemaining = 0.0
     private var scoreMultiplierRemaining = 0.0
+    private var auraFlash: FoodKind?
+    private var auraFlashRemaining = 0.0
     /// In-budget designs the classic board may spawn. Empty means plain apples.
     private var classicLoadout: [FeedDesign] = []
 
@@ -212,7 +225,7 @@ public final class SnakeGame {
     public var pendingTurn: Vec3? { queue.first?.vector }
     public var length: Int { snake.count }
     public var shieldActive: Bool { shieldRemaining > 0 }
-    public var boostActive: Bool { boostRemaining > 0 }
+    public var boostActive: Bool { boostSteps > 0 || boostRemaining > 0 }
     public var controlsReversed: Bool { reverseRemaining > 0 }
     public var ghosting: Bool { ghostRemaining > 0 }
     public var snakeScale: Double {
@@ -224,16 +237,25 @@ public final class SnakeGame {
     /// How fast the snake is versus the opening tempo. Starts at 1.
     public var speedMultiple: Double {
         let base = moveInterval(eaten: eaten, profile: profile)
-        let multiplier = boostRemaining > 0 ? profile.chiliMultiplier : 1
+        let multiplier = boostSteps > 0 ? OfficialMenu.chiliFactor : (boostRemaining > 0 ? profile.chiliMultiplier : 1)
         let step = max(0.05, base * multiplier)
         return profile.startInterval / step
     }
 
+    /// Effect still painted on the body. Shield and pace win over a short flash.
+    public var bodyAura: FoodKind? {
+        if shieldRemaining > 0 { return .shield }
+        if frostRemaining > 0 { return .frost }
+        if boostSteps > 0 || boostRemaining > 0 { return .chili }
+        if reverseRemaining > 0 || confuseRemaining > 0 { return .mushroom }
+        return auraFlash
+    }
+
     public func currentStepDuration() -> Double {
         let base = moveInterval(eaten: eaten, profile: profile)
-        let multiplier = boostRemaining > 0 ? profile.chiliMultiplier : 1
+        let multiplier = boostSteps > 0 ? OfficialMenu.chiliFactor : (boostRemaining > 0 ? profile.chiliMultiplier : 1)
         let crawl = hintUrgent ? 1.35 : 1
-        let drag = slowRemaining > 0 ? 1.55 : 1
+        let drag = frostRemaining > 0 ? OfficialMenu.frostFactor : (slowRemaining > 0 ? 1.55 : 1)
         return max(0.05, base * multiplier * crawl * drag)
     }
 
@@ -286,7 +308,8 @@ public final class SnakeGame {
             alive: phase != .over,
             pendingTurn: queue.first?.vector,
             snakeScale: snakeScale,
-            colorShift: tintRemaining > 0
+            colorShift: tintRemaining > 0,
+            bodyAura: bodyAura
         )
     }
 
@@ -584,6 +607,11 @@ public final class SnakeGame {
 
     private func tickEffects(_ dt: Double) {
         if boostRemaining > 0 { boostRemaining = max(0, boostRemaining - dt) }
+        if frostRemaining > 0 { frostRemaining = max(0, frostRemaining - dt) }
+        if auraFlashRemaining > 0 {
+            auraFlashRemaining = max(0, auraFlashRemaining - dt)
+            if auraFlashRemaining == 0 { auraFlash = nil }
+        }
         if shieldRemaining > 0 { shieldRemaining = max(0, shieldRemaining - dt) }
         if confuseRemaining > 0 { confuseRemaining = max(0, confuseRemaining - dt) }
         if slowRemaining > 0 { slowRemaining = max(0, slowRemaining - dt) }
@@ -605,11 +633,16 @@ public final class SnakeGame {
         growScaleRemaining = 0
         shrinkScaleRemaining = 0
         scoreMultiplierRemaining = 0
+        boostSteps = 0
+        frostRemaining = 0
+        auraFlash = nil
+        auraFlashRemaining = 0
         eatenRecipes = []
     }
 
     private func step() -> [GameEvent] {
         var events: [GameEvent] = []
+        let boostWasActive = boostSteps > 0
         previous = snake
 
         if autopilot && !manualDrive {
@@ -680,6 +713,7 @@ public final class SnakeGame {
                 snake.removeLast()
             }
         }
+        if boostWasActive { boostSteps = max(0, boostSteps - 1) }
         keepOpeningFoodPlanar()
         pullFoodsTowardHead()
         let boardCleared = mode == .classic && foods.isEmpty
@@ -706,23 +740,36 @@ public final class SnakeGame {
         } else {
             switch pellet.kind {
             case .apple:
-                score += 10
+                score += OfficialMenu.appleScore
                 pendingGrowth += 1
             case .star:
-                score += 30
+                score += OfficialMenu.starScore
                 pendingGrowth += 1
+                flash(.star)
             case .chili:
-                score += 8
+                score += OfficialMenu.chiliScore
                 pendingGrowth += 1
-                boostRemaining = 5
+                boostSteps = OfficialMenu.chiliSteps
+            case .frost:
+                score += OfficialMenu.frostScore
+                frostRemaining = OfficialMenu.frostSeconds
+            case .cherry:
+                score += OfficialMenu.cherryScore
+                pendingGrowth += OfficialMenu.cherryGrowth
+                flash(.cherry)
             case .mushroom:
-                score += 5
-                confuseRemaining = 2.4
+                score += OfficialMenu.mushroomScore
+                confuseRemaining = OfficialMenu.mushroomReverse
+                reverseRemaining = OfficialMenu.mushroomReverse
                 // Head is already inserted, so count is one above the pre-bite length.
-                if snake.count > 9 { extraChop = 2 }
+                if snake.count > 9 { extraChop = OfficialMenu.mushroomChop }
             case .shield:
-                score += 6
-                shieldRemaining = max(shieldRemaining, 7)
+                score += OfficialMenu.shieldScore
+                shieldRemaining = max(shieldRemaining, OfficialMenu.shieldSeconds)
+            case .bolt:
+                score += OfficialMenu.boltScore
+                flash(.bolt)
+                pullFoods(steps: OfficialMenu.boltPull)
             }
         }
         if score > best {
@@ -758,7 +805,25 @@ public final class SnakeGame {
     }
 
     private func spawnNextClassicFood(bias: SpawnBias) {
-        _ = spawn(kind: .apple, bias: bias, recipe: nextClassicRecipe())
+        if classicLoadout.isEmpty {
+            let kind: FoodKind = eaten >= OfficialMenu.mixAfterEaten ? OfficialMenu.roll(&rng) : .apple
+            _ = spawn(kind: kind, bias: bias)
+        } else {
+            _ = spawn(kind: .apple, bias: bias, recipe: nextClassicRecipe())
+        }
+    }
+
+    private func flash(_ kind: FoodKind) {
+        auraFlash = kind
+        auraFlashRemaining = 1.6
+    }
+
+    /// Slide other foods toward the head along the strongest axis, up to `steps` cells.
+    private func pullFoods(steps: Int) {
+        guard steps > 0 else { return }
+        for _ in 0..<steps {
+            pullFoodsOneCell()
+        }
     }
 
     private func nextClassicRecipe() -> FeedDesign? {
@@ -850,7 +915,12 @@ public final class SnakeGame {
     ]
 
     private func pullFoodsTowardHead() {
-        guard magnetRemaining > 0, let head = snake.first else { return }
+        guard magnetRemaining > 0 else { return }
+        pullFoodsOneCell()
+    }
+
+    private func pullFoodsOneCell() {
+        guard let head = snake.first else { return }
         var occupied = solids
         for cell in snake { occupied.insert(cell) }
         for index in foods.indices {

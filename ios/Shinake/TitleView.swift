@@ -28,6 +28,17 @@ struct TitleView: View {
             VStack(spacing: 12) {
                 PrimaryButton(title: "开始游戏") { model.requestPlay(.classic) }
                     .accessibilityIdentifier("startButton")
+                SecondaryButton(title: "双人对战") { model.requestBattle() }
+                    .accessibilityIdentifier("battleButton")
+                if let note = model.battleNote {
+                    Text(note)
+                        .font(.system(size: 14, weight: .medium, design: .rounded))
+                        .foregroundColor(Theme.dim)
+                        .multilineTextAlignment(.center)
+                    Button("取消", action: model.cancelBattle)
+                        .font(.system(size: 15, weight: .semibold, design: .rounded))
+                        .foregroundColor(.white)
+                }
                 SecondaryButton(title: "投喂实验室") { model.openLab() }
                     .accessibilityIdentifier("feedLabButton")
                 difficultyPicker

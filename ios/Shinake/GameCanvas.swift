@@ -51,7 +51,13 @@ struct GameCanvas: UIViewRepresentable {
             let dt = min(now - last, 1.0 / 20.0)
             last = now
             let snapshot = model.advance(dt: dt)
-            scene.render(snapshot, showGuide: model.showGuide, shake: model.shake, dt: dt)
+            scene.render(
+                snapshot,
+                duel: model.duelRender,
+                showGuide: model.showGuide && !model.inBattle,
+                shake: model.shake,
+                dt: dt
+            )
         }
     }
 }

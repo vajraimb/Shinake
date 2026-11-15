@@ -40,7 +40,7 @@ public struct WorldPoint: Equatable {
 /// Width, height, and depth in cells. A step is one cell on every axis, so a
 /// layer change is the same length as a sideways step even when the counts differ.
 /// Height is the portrait stretch.
-public struct ArenaSize: Equatable {
+public struct ArenaSize: Equatable, Codable {
     public var width: Int
     public var height: Int
     public var depth: Int

@@ -35,6 +35,12 @@
 		A1000000000000000000005B /* FeedLabView.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000005A /* FeedLabView.swift */; };
 		A1000000000000000000005D /* FeedLibrary.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000005C /* FeedLibrary.swift */; };
 		A10000000000000000000050 /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000004F /* Assets.xcassets */; };
+		A10000000000000000000065 /* OfficialMenu.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000064 /* OfficialMenu.swift */; };
+		A10000000000000000000067 /* DuelMatch.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000066 /* DuelMatch.swift */; };
+		A10000000000000000000069 /* OfficialFoodTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A10000000000000000000068 /* OfficialFoodTests.swift */; };
+		A1000000000000000000006B /* DuelMatchTests.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000006A /* DuelMatchTests.swift */; };
+		A1000000000000000000006D /* MatchSession.swift in Sources */ = {isa = PBXBuildFile; fileRef = A1000000000000000000006C /* MatchSession.swift */; };
+		A1000000000000000000006F /* GameKit.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = A1000000000000000000006E /* GameKit.framework */; };
 /* End PBXBuildFile section */
 
 /* Begin PBXContainerItemProxy section */
@@ -75,6 +81,12 @@
 		A10000000000000000000058 /* FeedDesignTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedDesignTests.swift; sourceTree = "<group>"; };
 		A1000000000000000000005A /* FeedLabView.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedLabView.swift; sourceTree = "<group>"; };
 		A1000000000000000000005C /* FeedLibrary.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = FeedLibrary.swift; sourceTree = "<group>"; };
+		A10000000000000000000064 /* OfficialMenu.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfficialMenu.swift; sourceTree = "<group>"; };
+		A10000000000000000000066 /* DuelMatch.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuelMatch.swift; sourceTree = "<group>"; };
+		A10000000000000000000068 /* OfficialFoodTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = OfficialFoodTests.swift; sourceTree = "<group>"; };
+		A1000000000000000000006A /* DuelMatchTests.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = DuelMatchTests.swift; sourceTree = "<group>"; };
+		A1000000000000000000006C /* MatchSession.swift */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.swift; path = MatchSession.swift; sourceTree = "<group>"; };
+		A1000000000000000000006E /* GameKit.framework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.framework; name = GameKit.framework; path = System/Library/Frameworks/GameKit.framework; sourceTree = SDKROOT; };
 		A1000000000000000000005E /* Shinake.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Shinake.entitlements; sourceTree = "<group>"; };
 		A1000000000000000000004F /* Assets.xcassets */ = {isa = PBXFileReference; lastKnownFileType = folder.assetcatalog; path = Assets.xcassets; sourceTree = "<group>"; };
 		A10000000000000000000051 /* Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
@@ -87,6 +99,7 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				A1000000000000000000006F /* GameKit.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -103,6 +116,7 @@
 		A10000000000000000000016 = {
 			isa = PBXGroup;
 			children = (
+				A1000000000000000000006E /* GameKit.framework */,
 				A10000000000000000000017 /* Shinake */,
 				A10000000000000000000018 /* ShinakeCore */,
 				A10000000000000000000019 /* ShinakeTests */,
@@ -126,6 +140,7 @@
 				A10000000000000000000047 /* RootView.swift */,
 				A1000000000000000000005A /* FeedLabView.swift */,
 				A1000000000000000000005C /* FeedLibrary.swift */,
+				A1000000000000000000006C /* MatchSession.swift */,
 				A1000000000000000000005E /* Shinake.entitlements */,
 				A1000000000000000000004F /* Assets.xcassets */,
 				A10000000000000000000051 /* Info.plist */,
@@ -144,6 +159,8 @@
 				A10000000000000000000052 /* CameraFit.swift */,
 				A10000000000000000000060 /* SnakeMotion.swift */,
 				A10000000000000000000056 /* FeedDesign.swift */,
+				A10000000000000000000064 /* OfficialMenu.swift */,
+				A10000000000000000000066 /* DuelMatch.swift */,
 			);
 			name = ShinakeCore;
 			path = "../Sources/ShinakeCore";
@@ -158,6 +175,8 @@
 				A10000000000000000000054 /* CameraFitTests.swift */,
 				A10000000000000000000062 /* SnakeMotionTests.swift */,
 				A10000000000000000000058 /* FeedDesignTests.swift */,
+				A10000000000000000000068 /* OfficialFoodTests.swift */,
+				A1000000000000000000006A /* DuelMatchTests.swift */,
 			);
 			name = ShinakeTests;
 			path = "../Tests/ShinakeCoreTests";
@@ -271,6 +290,9 @@
 				A10000000000000000000053 /* CameraFit.swift in Sources */,
 				A10000000000000000000061 /* SnakeMotion.swift in Sources */,
 				A10000000000000000000057 /* FeedDesign.swift in Sources */,
+				A10000000000000000000065 /* OfficialMenu.swift in Sources */,
+				A10000000000000000000067 /* DuelMatch.swift in Sources */,
+				A1000000000000000000006D /* MatchSession.swift in Sources */,
 				A1000000000000000000005B /* FeedLabView.swift in Sources */,
 				A1000000000000000000005D /* FeedLibrary.swift in Sources */,
 				A10000000000000000000034 /* ShinakeApp.swift in Sources */,
@@ -297,6 +319,8 @@
 				A10000000000000000000055 /* CameraFitTests.swift in Sources */,
 				A10000000000000000000063 /* SnakeMotionTests.swift in Sources */,
 				A10000000000000000000059 /* FeedDesignTests.swift in Sources */,
+				A10000000000000000000069 /* OfficialFoodTests.swift in Sources */,
+				A1000000000000000000006B /* DuelMatchTests.swift in Sources */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
 		};
@@ -361,7 +385,7 @@
 				CODE_SIGN_ENTITLEMENTS = Shinake/Shinake.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				"CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]" = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = A5VCS5XD6R;
 				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -376,7 +400,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = one.vajra.shinake;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -396,7 +420,7 @@
 				CODE_SIGN_ENTITLEMENTS = Shinake/Shinake.entitlements;
 				CODE_SIGN_STYLE = Automatic;
 				"CODE_SIGNING_ALLOWED[sdk=iphonesimulator*]" = NO;
-				CURRENT_PROJECT_VERSION = 1;
+				CURRENT_PROJECT_VERSION = 2;
 				DEVELOPMENT_TEAM = A5VCS5XD6R;
 				ENABLE_TESTABILITY = YES;
 				GENERATE_INFOPLIST_FILE = YES;
@@ -411,7 +435,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 1.0;
+				MARKETING_VERSION = 1.1;
 				PRODUCT_BUNDLE_IDENTIFIER = one.vajra.shinake;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

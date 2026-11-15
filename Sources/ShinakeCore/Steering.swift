@@ -33,14 +33,14 @@ public struct CameraRig: Equatable {
     }
 }
 
-public enum ScreenAxis: String, Equatable, CaseIterable {
+public enum ScreenAxis: String, Codable, Equatable, CaseIterable {
     case left
     case right
     case up
     case down
 }
 
-public enum ControlInput: Equatable {
+public enum ControlInput: Codable, Equatable {
     case screen(ScreenAxis)
     case depthIn
     case depthOut

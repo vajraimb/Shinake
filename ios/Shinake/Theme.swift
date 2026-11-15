@@ -24,8 +24,11 @@ enum Theme {
         case .apple: return UIColor(red: 1.0, green: 0.34, blue: 0.40, alpha: 1)
         case .star: return UIColor(red: 1.0, green: 0.82, blue: 0.35, alpha: 1)
         case .chili: return UIColor(red: 1.0, green: 0.45, blue: 0.18, alpha: 1)
+        case .frost: return UIColor(red: 0.72, green: 0.90, blue: 1.0, alpha: 1)
+        case .cherry: return UIColor(red: 0.92, green: 0.16, blue: 0.32, alpha: 1)
         case .mushroom: return UIColor(red: 0.74, green: 0.50, blue: 0.98, alpha: 1)
         case .shield: return UIColor(red: 0.45, green: 0.90, blue: 0.95, alpha: 1)
+        case .bolt: return UIColor(red: 1.0, green: 0.96, blue: 0.55, alpha: 1)
         }
     }
 
@@ -46,18 +49,24 @@ enum Copy {
         case .apple: return "苹果"
         case .star: return "星星"
         case .chili: return "辣椒"
+        case .frost: return "冰果"
+        case .cherry: return "樱桃"
         case .mushroom: return "蘑菇"
         case .shield: return "护盾"
+        case .bolt: return "雷电"
         }
     }
 
     static func flavor(_ kind: FoodKind) -> String {
         switch kind {
         case .apple: return "苹果 · 扎实的十分"
-        case .star: return "星星 · 亮晶晶的加分"
-        case .chili: return "辣椒 · 它要加速了"
-        case .mushroom: return "蘑菇 · 味道很怪"
-        case .shield: return "护盾 · 撞一下也不怕"
+        case .star: return "星星 · 四十分"
+        case .chili: return "辣椒 · 接下来六步更快"
+        case .frost: return "冰果 · 五秒变慢"
+        case .cherry: return "樱桃 · 一次长三节"
+        case .mushroom: return "蘑菇 · 方向反了"
+        case .shield: return "护盾 · 十秒，挡一次"
+        case .bolt: return "雷电 · 把别的果子吸过来"
         }
     }
 

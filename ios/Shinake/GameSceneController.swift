@@ -8,6 +8,12 @@ private enum SnakeFood {
     static let radius: CGFloat = 0.275
 }
 
+/// A live duel frame. The host snake uses the normal body. The joiner is drawn apart.
+struct DuelRender {
+    var snapshot: DuelSnapshot
+    var screen: DuelRole
+}
+
 /// The arena, the snake and the food. Nodes are reused across frames so a
 /// tick on iPhone 13 Pro Max is a handful of position writes, not a rebuild.
 /// The camera matches `CameraRig.standard`, which is also what swipe-to-axis
@@ -35,7 +41,11 @@ final class GameSceneController {
     private var snakeAlive = true
     private var bodyScale: Float = 1
     private var hueShift = false
+    private var bodyAura: FoodKind?
     private var tintKeys: [ObjectIdentifier: String] = [:]
+    private var shadowJoints: [SCNNode] = []
+    private var shadowLinks: [SCNNode] = []
+    private let shadowRing = SCNNode()
     private let depthRing = SCNNode()
     private var snakeFrame: [SCNNode] = []
     private var foodFrame: [SCNNode] = []
@@ -121,21 +131,54 @@ final class GameSceneController {
         tongue.materials = [tongueMaterial]
         tongueNode.geometry = tongue
         world.addChildNode(tongueNode)
+
+        let ring = SCNTorus(ringRadius: 0.34, pipeRadius: 0.012)
+        let ringMaterial = SCNMaterial()
+        ringMaterial.lightingModel = .constant
+        ringMaterial.diffuse.contents = UIColor.white
+        ringMaterial.emission.contents = UIColor.white
+        ring.materials = [ringMaterial]
+        shadowRing.geometry = ring
+        shadowRing.isHidden = true
+        world.addChildNode(shadowRing)
     }
 
-    func render(_ snapshot: RenderSnapshot, showGuide: Bool, shake: Double, dt: Double) {
+    func render(_ snapshot: RenderSnapshot, duel: DuelRender? = nil, showGuide: Bool, shake: Double, dt: Double) {
         time += dt
-        bodyScale = Float(snapshot.snakeScale)
-        hueShift = snapshot.colorShift
-        if snapshot.arena != builtArena {
-            rebuildBoard(arena: snapshot.arena)
+        let arena = duel?.snapshot.arena ?? snapshot.arena
+        if arena != builtArena {
+            rebuildBoard(arena: arena)
         }
-        placeCamera(snapshot, shake: shake, dt: dt)
-        placeLayers(snapshot)
-        placeSnake(snapshot)
-        placeFoods(snapshot)
-        placeSolids(snapshot)
-        placeGuide(snapshot, visible: showGuide)
+        if let duel {
+            hueShift = false
+            bodyScale = 1
+            let local = duel.screen == .host ? duel.snapshot.host : duel.snapshot.joiner
+            let view = renderSnapshot(from: local, foods: duel.snapshot.foods, arena: duel.snapshot.arena)
+            let hostView = renderSnapshot(from: duel.snapshot.host, foods: duel.snapshot.foods, arena: duel.snapshot.arena)
+            placeCamera(view, shake: shake, dt: dt)
+            placeLayers(view)
+            bodyAura = duel.snapshot.host.aura
+            placeSnake(hostView)
+            placeShadow(
+                state: duel.snapshot.joiner,
+                arena: duel.snapshot.arena,
+                look: DuelLook.look(of: .joiner, on: duel.screen)
+            )
+            placeFoods(hostView)
+            placeSolids(hostView)
+            placeGuide(view, visible: false)
+        } else {
+            hideShadow()
+            bodyScale = Float(snapshot.snakeScale)
+            hueShift = snapshot.colorShift
+            bodyAura = snapshot.bodyAura
+            placeCamera(snapshot, shake: shake, dt: dt)
+            placeLayers(snapshot)
+            placeSnake(snapshot)
+            placeFoods(snapshot)
+            placeSolids(snapshot)
+            placeGuide(snapshot, visible: showGuide)
+        }
     }
 
     private func rebuildBoard(arena: ArenaSize) {
@@ -380,11 +423,15 @@ final class GameSceneController {
                 blue: min(1, 0.85 - 0.30 * wobble),
                 alpha: 1
             )
+        } else if let aura = bodyAura {
+            color = wash(color, with: Theme.foodUI(aura), amount: head ? 0.72 : 0.55)
         }
         let material = node.geometry?.materials.first ?? glossMaterial(color)
         if head {
-            material.diffuse.contents = UIColor(red: 0.78, green: 0.96, blue: 0.48, alpha: 1)
-            material.emission.contents = snapshotAliveEmission()
+            let headColor = bodyAura.map { wash(UIColor(red: 0.78, green: 0.96, blue: 0.48, alpha: 1), with: Theme.foodUI($0), amount: 0.72) }
+                ?? UIColor(red: 0.78, green: 0.96, blue: 0.48, alpha: 1)
+            material.diffuse.contents = headColor
+            material.emission.contents = bodyAura.map { Theme.foodUI($0).withAlphaComponent(0.55) } ?? snapshotAliveEmission()
         } else {
             material.diffuse.contents = color
             material.emission.contents = color.withAlphaComponent(0.14)
@@ -395,11 +442,27 @@ final class GameSceneController {
     /// Stable while the body is not cycling colors, so a frame does not allocate
     /// a UIColor per segment. The tint effect still updates every frame.
     private func tintKey(index: Int, count: Int, head: Bool) -> String {
+        let aura = bodyAura?.rawValue ?? ""
         if hueShift {
-            return String(format: "shift-%d-%.3f", index, sin(time * 5 + Double(index) * 0.4))
+            let wobble = String(format: "%.3f", sin(time * 5 + Double(index) * 0.4))
+            return "shift-\(index)-\(wobble)-\(aura)"
         }
-        if head { return snakeAlive ? "head-live" : "head-dead" }
-        return "body-\(index)-\(count)"
+        if head { return (snakeAlive ? "head-live-" : "head-dead-") + aura }
+        return "body-\(index)-\(count)-\(aura)"
+    }
+
+    private func wash(_ base: UIColor, with tint: UIColor, amount: CGFloat) -> UIColor {
+        var br: CGFloat = 0, bg: CGFloat = 0, bb: CGFloat = 0, ba: CGFloat = 0
+        var tr: CGFloat = 0, tg: CGFloat = 0, tb: CGFloat = 0, ta: CGFloat = 0
+        guard base.getRed(&br, green: &bg, blue: &bb, alpha: &ba),
+              tint.getRed(&tr, green: &tg, blue: &tb, alpha: &ta) else { return tint }
+        let mix = min(1, max(0, amount))
+        return UIColor(
+            red: br * (1 - mix) + tr * mix,
+            green: bg * (1 - mix) + tg * mix,
+            blue: bb * (1 - mix) + tb * mix,
+            alpha: 1
+        )
     }
 
     private func snapshotAliveEmission() -> UIColor {
@@ -504,16 +567,87 @@ final class GameSceneController {
     }
 
     private func makeFood(_ kind: FoodKind) -> SCNNode {
-        let sphere = SCNSphere(radius: kind == .star ? 0.30 : SnakeFood.radius)
-        sphere.segmentCount = 24
-        let material = glossMaterial(Theme.foodUI(kind))
-        material.emission.contents = Theme.foodUI(kind).withAlphaComponent(0.35)
-        sphere.materials = [material]
-        let node = SCNNode(geometry: sphere)
+        let color = Theme.foodUI(kind)
+        let node = SCNNode()
+        switch kind {
+        case .apple:
+            node.addChildNode(glossySphere(radius: SnakeFood.radius, color: color))
+            node.addChildNode(appleStem())
+        case .star:
+            let prism = SCNPyramid(width: 0.46, height: 0.46, length: 0.46)
+            let prismNode = SCNNode(geometry: prism)
+            paint(prismNode, glowMaterial(color))
+            prismNode.position = SCNVector3(0, -0.12, 0)
+            node.addChildNode(prismNode)
+            let ring = thinTorus(radius: 0.30, pipe: 0.02, color: color)
+            ring.eulerAngles.x = 1.15
+            node.addChildNode(ring)
+        case .frost:
+            let crystal = SCNPyramid(width: 0.30, height: 0.52, length: 0.30)
+            let crystalNode = SCNNode(geometry: crystal)
+            paint(crystalNode, glowMaterial(color))
+            crystalNode.position = SCNVector3(0, -0.16, 0)
+            node.addChildNode(crystalNode)
+            let shard = SCNPyramid(width: 0.16, height: 0.28, length: 0.16)
+            let shardNode = SCNNode(geometry: shard)
+            paint(shardNode, glowMaterial(UIColor.white))
+            shardNode.eulerAngles = SCNVector3(0.4, 0.2, 0.8)
+            shardNode.position = SCNVector3(0.16, -0.02, 0.04)
+            node.addChildNode(shardNode)
+        case .chili:
+            let pepper = SCNCone(topRadius: 0.05, bottomRadius: 0.13, height: 0.42)
+            let pepperNode = SCNNode(geometry: pepper)
+            paint(pepperNode, glowMaterial(color))
+            pepperNode.eulerAngles.z = 0.45
+            node.addChildNode(pepperNode)
+            for index in 0..<4 {
+                let bit = glossySphere(radius: 0.045, color: index % 2 == 0 ? color : UIColor(red: 1, green: 0.82, blue: 0.2, alpha: 1))
+                bit.name = "spark"
+                node.addChildNode(bit)
+            }
+        case .cherry:
+            let left = glossySphere(radius: 0.16, color: color)
+            left.position = SCNVector3(-0.13, 0, 0)
+            let right = glossySphere(radius: 0.16, color: color)
+            right.position = SCNVector3(0.13, 0, 0)
+            node.addChildNode(left)
+            node.addChildNode(right)
+            let pink = UIColor(red: 1, green: 0.62, blue: 0.74, alpha: 1)
+            node.addChildNode(thinTorus(radius: 0.24, pipe: 0.016, color: pink))
+        case .mushroom:
+            let cap = glossySphere(radius: 0.22, color: color)
+            cap.scale = SCNVector3(1, 0.58, 1)
+            cap.position = SCNVector3(0, 0.08, 0)
+            let stem = SCNCylinder(radius: 0.07, height: 0.22)
+            let stemNode = SCNNode(geometry: stem)
+            paint(stemNode, glowMaterial(UIColor(red: 0.93, green: 0.88, blue: 0.78, alpha: 1)))
+            stemNode.position = SCNVector3(0, -0.12, 0)
+            node.addChildNode(cap)
+            node.addChildNode(stemNode)
+        case .shield:
+            node.addChildNode(glossySphere(radius: 0.16, color: color))
+            let shell = SCNSphere(radius: 0.30)
+            shell.segmentCount = 24
+            let glass = SCNMaterial()
+            glass.lightingModel = .constant
+            glass.diffuse.contents = color.withAlphaComponent(0.28)
+            glass.emission.contents = color.withAlphaComponent(0.85)
+            glass.transparency = 0.45
+            glass.isDoubleSided = true
+            shell.materials = [glass]
+            node.addChildNode(SCNNode(geometry: shell))
+        case .bolt:
+            for index in 0..<5 {
+                let t = Float(index) / 4
+                let bit = glossySphere(radius: index == 2 ? 0.09 : 0.055, color: index % 2 == 0 ? color : UIColor.white)
+                bit.position = SCNVector3((t - 0.5) * 0.5, sin(t * .pi) * 0.22 - 0.04, 0)
+                node.addChildNode(bit)
+            }
+        }
         let beacon = SCNCylinder(radius: 0.04, height: 1)
         let beam = SCNMaterial()
         beam.lightingModel = .constant
-        beam.diffuse.contents = Theme.foodUI(kind).withAlphaComponent(0.28)
+        beam.diffuse.contents = color.withAlphaComponent(0.28)
         beam.writesToDepthBuffer = false
         beacon.materials = [beam]
         let beamNode = SCNNode(geometry: beacon)
@@ -522,7 +656,7 @@ final class GameSceneController {
         let disc = SCNCylinder(radius: 0.36, height: 0.04)
         let discMaterial = SCNMaterial()
         discMaterial.lightingModel = .constant
-        discMaterial.diffuse.contents = Theme.foodUI(kind).withAlphaComponent(0.9)
+        discMaterial.diffuse.contents = color.withAlphaComponent(0.9)
         disc.materials = [discMaterial]
         let discNode = SCNNode(geometry: disc)
         discNode.name = "shadow"
@@ -530,13 +664,35 @@ final class GameSceneController {
         let light = SCNLight()
         light.type = .omni
         light.intensity = 70
-        light.color = Theme.foodUI(kind)
+        light.color = color
         light.attenuationEndDistance = 3.5
         node.light = light
-        if kind == .apple {
-            node.addChildNode(appleStem())
-        }
         return node
+    }
+
+    private func glossySphere(radius: CGFloat, color: UIColor) -> SCNNode {
+        let sphere = SCNSphere(radius: radius)
+        sphere.segmentCount = 24
+        let material = glossMaterial(color)
+        material.emission.contents = color.withAlphaComponent(0.35)
+        sphere.materials = [material]
+        return SCNNode(geometry: sphere)
+    }
+
+    private func glowMaterial(_ color: UIColor) -> SCNMaterial {
+        let material = glossMaterial(color)
+        material.emission.contents = color.withAlphaComponent(0.4)
+        return material
+    }
+
+    private func thinTorus(radius: CGFloat, pipe: CGFloat, color: UIColor) -> SCNNode {
+        let torus = SCNTorus(ringRadius: radius, pipeRadius: pipe)
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.diffuse.contents = color
+        material.emission.contents = color
+        torus.materials = [material]
+        return SCNNode(geometry: torus)
     }
 
     private func makeRecipe(_ design: FeedDesign) -> SCNNode {
@@ -1066,6 +1222,140 @@ final class GameSceneController {
     }
 
     /// Points local +Y along `delta`. Cones and the tongue are built on that axis.
+    private func renderSnapshot(from state: DuelSnakeState, foods: [FoodPellet], arena: ArenaSize) -> RenderSnapshot {
+        RenderSnapshot(
+            snake: state.cells,
+            previous: state.previous.isEmpty ? state.cells : state.previous,
+            fraction: state.fraction,
+            direction: state.direction,
+            foods: foods,
+            solids: [],
+            arena: arena,
+            alive: state.alive,
+            pendingTurn: state.pendingTurn,
+            snakeScale: 1,
+            colorShift: false,
+            bodyAura: state.aura
+        )
+    }
+
+    /// Joiner body. Alpha comes from `DuelLook` (0.35). The thin ring is only on their own screen.
+    private func placeShadow(state: DuelSnakeState, arena: ArenaSize, look: SnakeLook) {
+        let snapshot = renderSnapshot(from: state, foods: [], arena: arena)
+        let count = state.cells.count
+        var points: [SIMD3<Float>] = []
+        points.reserveCapacity(count)
+        for index in 0..<count {
+            let sample = SnakeMotion.position(
+                index: index,
+                previous: snapshot.previous,
+                current: snapshot.snake,
+                pendingTurn: snapshot.pendingTurn,
+                fraction: snapshot.fraction
+            )
+            points.append(scenePoint(sample, arena: arena))
+        }
+        while shadowJoints.count < count {
+            shadowJoints.append(makeShadowJoint())
+        }
+        for index in count..<shadowJoints.count {
+            shadowJoints[index].isHidden = true
+        }
+        let linkCount = max(0, count - 1)
+        while shadowLinks.count < linkCount {
+            shadowLinks.append(makeShadowLink())
+        }
+        for index in linkCount..<shadowLinks.count {
+            shadowLinks[index].isHidden = true
+        }
+        let alpha = CGFloat(look.alpha)
+        let tint = state.aura.map(Theme.foodUI) ?? Theme.limeUI
+        for index in 0..<count {
+            let node = shadowJoints[index]
+            node.isHidden = false
+            node.opacity = alpha
+            node.simdPosition = points[index]
+            let radius = bodyRadius(index: index, count: count)
+            node.simdScale = SIMD3<Float>(repeating: radius)
+            if let material = node.geometry?.materials.first {
+                material.diffuse.contents = tint
+                material.emission.contents = tint.withAlphaComponent(0.45)
+            }
+        }
+        for index in 0..<linkCount {
+            let start = points[index]
+            let end = points[index + 1]
+            let delta = end - start
+            let length = simd_length(delta)
+            let node = shadowLinks[index]
+            guard length > 0.001, let cone = node.geometry as? SCNCone else {
+                node.isHidden = true
+                continue
+            }
+            node.isHidden = false
+            node.opacity = alpha
+            let bottom = bodyRadiusBase(index: index, count: count)
+            let top = bodyRadiusBase(index: index + 1, count: count)
+            let ratio = CGFloat(top / max(bottom, 0.001))
+            if abs(cone.topRadius - ratio) > 0.0005 {
+                cone.bottomRadius = 1
+                cone.topRadius = ratio
+                cone.height = 1
+            }
+            let thickness = bottom * bodyWave(index: index) * bodyScale
+            node.simdScale = SIMD3<Float>(thickness, length, thickness)
+            node.simdPosition = (start + end) * 0.5
+            orient(node, along: delta)
+            if let material = node.geometry?.materials.first {
+                material.diffuse.contents = tint
+            }
+        }
+        guard look.ownRing, let head = points.first, state.alive else {
+            shadowRing.isHidden = true
+            return
+        }
+        shadowRing.isHidden = false
+        shadowRing.opacity = 0.95
+        shadowRing.simdPosition = head
+        let forward = facing(snapshot)
+        orient(shadowRing, along: forward)
+    }
+
+    private func hideShadow() {
+        for node in shadowJoints + shadowLinks {
+            node.isHidden = true
+        }
+        shadowRing.isHidden = true
+    }
+
+    private func makeShadowJoint() -> SCNNode {
+        let sphere = SCNSphere(radius: 1)
+        sphere.segmentCount = 12
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.diffuse.contents = Theme.limeUI.withAlphaComponent(0.35)
+        material.transparencyMode = .aOne
+        sphere.materials = [material]
+        let node = SCNNode(geometry: sphere)
+        node.opacity = CGFloat(DuelLook.joinerAlpha)
+        world.addChildNode(node)
+        return node
+    }
+
+    private func makeShadowLink() -> SCNNode {
+        let cone = SCNCone(topRadius: 1, bottomRadius: 1, height: 1)
+        cone.radialSegmentCount = 8
+        let material = SCNMaterial()
+        material.lightingModel = .constant
+        material.diffuse.contents = Theme.limeUI.withAlphaComponent(0.35)
+        material.transparencyMode = .aOne
+        cone.materials = [material]
+        let node = SCNNode(geometry: cone)
+        node.opacity = CGFloat(DuelLook.joinerAlpha)
+        world.addChildNode(node)
+        return node
+    }
+
     private func orient(_ node: SCNNode, along delta: SIMD3<Float>) {
         let length = simd_length(delta)
         guard length > 1e-5 else { return }
