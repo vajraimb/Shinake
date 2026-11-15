@@ -23,7 +23,7 @@ struct RootView: View {
         .statusBarHidden(model.statusBarHidden)
         .onAppear { model.prepareFeedback() }
         .onChange(of: scenePhase) { phase in
-            guard phase != .active, model.screen == .play else { return }
+            guard phase != .active, model.screen == .play, !model.inBattle else { return }
             model.pause()
         }
         .sheet(isPresented: $model.showSettings) {

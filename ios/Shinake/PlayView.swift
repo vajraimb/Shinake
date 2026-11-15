@@ -25,7 +25,7 @@ struct PlayView: View {
                         onPinch: { model.steer(depthControl(for: $0)) }
                     )
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
-                    if let arrow = aimArrow {
+                    if let arrow = aimArrow, !model.inBattle {
                         AimArrow(
                             symbol: arrow.symbol,
                             caption: arrow.caption,
@@ -42,11 +42,14 @@ struct PlayView: View {
                 .frame(maxHeight: .infinity)
             }
 
-            if model.game.phase == .paused {
+            if !model.inBattle && model.game.phase == .paused {
                 pauseCard
             }
-            if model.game.phase == .over || model.game.phase == .won {
+            if !model.inBattle && (model.game.phase == .over || model.game.phase == .won) {
                 endCard
+            }
+            if model.inBattle, let snap = model.battleSnapshot, snap.phase == .finished {
+                battleEndCard(snap)
             }
         }
     }
@@ -84,7 +87,14 @@ struct PlayView: View {
                 }
                 .buttonStyle(.plain)
             }
-            if !runEnded {
+            if model.inBattle {
+                HStack {
+                    leaveBattleButton
+                    Spacer(minLength: 8)
+                }
+                .padding(.horizontal, 10)
+                ControlPad(model: model)
+            } else if !runEnded {
                 HStack {
                     pauseButton
                     Spacer(minLength: 8)
@@ -106,7 +116,21 @@ struct PlayView: View {
         .fixedSize(horizontal: false, vertical: true)
     }
 
+    @ViewBuilder
     private var hud: some View {
+        if model.inBattle, let snap = model.battleSnapshot, let role = model.battleRole {
+            battleHud(snap, role: role)
+        } else if model.inBattle {
+            Text("正在同步")
+                .font(.system(size: 20, weight: .semibold, design: .rounded))
+                .foregroundColor(.white)
+                .frame(maxWidth: .infinity, alignment: .leading)
+        } else {
+            soloHud
+        }
+    }
+
+    private var soloHud: some View {
         HStack(alignment: .center, spacing: 12) {
             VStack(alignment: .leading, spacing: 2) {
                 Text("\(model.game.score)")
@@ -121,6 +145,43 @@ struct PlayView: View {
             }
             Spacer(minLength: 0)
         }
+    }
+
+    private func battleHud(_ snap: DuelSnapshot, role: DuelRole) -> some View {
+        let mine = role == .host ? snap.host : snap.joiner
+        let theirs = role == .host ? snap.joiner : snap.host
+        return HStack(alignment: .center, spacing: 12) {
+            VStack(alignment: .leading, spacing: 2) {
+                Text("\(mine.score)")
+                    .font(.system(size: 34, weight: .bold, design: .rounded))
+                    .foregroundColor(.white)
+                    .monospacedDigit()
+                Text(battleStatus(mine))
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundColor(Theme.dim)
+                    .lineLimit(2)
+                    .minimumScaleFactor(0.75)
+            }
+            Spacer(minLength: 0)
+            VStack(alignment: .trailing, spacing: 2) {
+                Text(snap.phase == .sudden ? "加时" : clock(snap.timeLeft))
+                    .font(.system(size: 22, weight: .bold, design: .rounded))
+                    .foregroundColor(Theme.lime)
+                    .monospacedDigit()
+                Text("对手 \(theirs.score)")
+                    .font(.system(size: 13, weight: .medium, design: .rounded))
+                    .foregroundColor(Theme.dim)
+                    .monospacedDigit()
+            }
+        }
+    }
+
+    private func battleStatus(_ mine: DuelSnakeState) -> String {
+        var parts = ["长度 \(mine.cells.count)"]
+        if mine.shield { parts.append("金身") }
+        if mine.aura == .mushroom { parts.append("反向") }
+        if !mine.alive { parts.append("重生中") }
+        return parts.joined(separator: " · ")
     }
 
     private var runEnded: Bool {
@@ -147,6 +208,20 @@ struct PlayView: View {
         .accessibilityLabel("暂停")
     }
 
+    private var leaveBattleButton: some View {
+        Button(action: model.leaveBattle) {
+            Text("离开")
+                .font(.system(size: 16, weight: .bold, design: .rounded))
+                .foregroundColor(.white)
+                .frame(width: 72, height: 52)
+                .background(Theme.card)
+                .clipShape(Capsule())
+                .overlay(Capsule().stroke(Theme.stroke, lineWidth: 1))
+        }
+        .buttonStyle(PressStyle())
+        .accessibilityLabel("离开对战")
+    }
+
     private var statusLine: String {
         var parts = ["长度 \(model.game.length)"]
         let profile = model.game.profile
@@ -157,6 +232,9 @@ struct PlayView: View {
         }
         if model.game.shieldActive {
             parts.append("金身")
+        }
+        if model.game.controlsReversed {
+            parts.append("反向")
         }
         let speed = model.game.speedMultiple
         if speed > 1.05 || speed < 0.95 {
@@ -182,6 +260,13 @@ struct PlayView: View {
     }
 
     private var hintText: String? {
+        if model.inBattle {
+            guard let snap = model.battleSnapshot, let role = model.battleRole else { return nil }
+            if snap.phase == .sudden { return "加时 · 先吃到的赢" }
+            let mine = role == .host ? snap.host : snap.joiner
+            if mine.aura == .mushroom { return "反向" }
+            return nil
+        }
         if model.game.phase == .over || model.game.phase == .won || model.game.phase == .paused {
             return nil
         }
@@ -245,7 +330,7 @@ struct PlayView: View {
     }
 
     private var classicTray: some View {
-        ForEach(FoodKind.allCases, id: \.self) { kind in
+        ForEach(FoodKind.tray, id: \.self) { kind in
                 Button {
                     model.cast(kind)
                 } label: {
@@ -298,6 +383,43 @@ struct PlayView: View {
                 SecondaryButton(title: "重新开始", action: model.restart)
                 SecondaryButton(title: model.game.mode == .feeding ? "回实验室" : "回标题", action: model.backToTitle)
                 toggleRow
+            }
+        }
+    }
+
+    private func battleEndCard(_ snap: DuelSnapshot) -> some View {
+        let role = model.battleRole
+        let mine = role == .host ? snap.host.score : snap.joiner.score
+        let theirs = role == .host ? snap.joiner.score : snap.host.score
+        let title: String
+        let subtitle: String
+        if snap.reason == .hostLeft {
+            title = "主机断开"
+            subtitle = "这局结束了"
+        } else if snap.reason == .opponentLeft {
+            title = "你赢了"
+            subtitle = "对手离开"
+        } else if snap.winner == role {
+            title = "你赢了"
+            subtitle = snap.reason == .suddenFood ? "加时吃到了" : "分更高"
+        } else if snap.winner == nil {
+            title = "没有胜负"
+            subtitle = "这局结束了"
+        } else {
+            title = "你输了"
+            subtitle = snap.reason == .suddenFood ? "对手加时吃到了" : "对手分更高"
+        }
+        return ZStack {
+            Color.black.opacity(0.62).ignoresSafeArea()
+            card(title: title, subtitle: subtitle) {
+                Text("\(mine)")
+                    .font(.system(size: 64, weight: .bold, design: .rounded))
+                    .foregroundColor(Theme.lime)
+                    .monospacedDigit()
+                Text("对手 \(theirs)")
+                    .font(.system(size: 15, weight: .medium, design: .rounded))
+                    .foregroundColor(Theme.dim)
+                PrimaryButton(title: "回标题", action: model.leaveBattle)
             }
         }
     }

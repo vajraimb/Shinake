@@ -57,6 +57,13 @@ final class AppModel: ObservableObject {
     }
     /// Depth is always the two-finger pinch: spread is 深入, pinch-in is 拉近.
     @Published private(set) var runWasRecord = false
+    /// Set while a Game Center match is on screen. Nil means solo.
+    @Published private(set) var battleRole: DuelRole?
+    @Published private(set) var battleSnapshot: DuelSnapshot?
+    /// Title-screen line while matchmaking, or a short failure.
+    @Published var battleNote: String?
+    let battle = MatchSession()
+    private var battleClock = -1
 
     let library: FeedLibrary
     private(set) var game: SnakeGame
@@ -95,6 +102,66 @@ final class AppModel: ObservableObject {
             loadout: armed
         )
         seenToken = game.uiToken
+        battle.model = self
+    }
+
+    var inBattle: Bool { battleRole != nil }
+
+    var duelRender: DuelRender? {
+        guard let battleSnapshot, let battleRole else { return nil }
+        return DuelRender(snapshot: battleSnapshot, screen: battleRole)
+    }
+
+    func requestBattle() {
+        battle.model = self
+        battle.begin()
+    }
+
+    func battleSearchEnded() {
+        guard !inBattle else { return }
+        battleNote = nil
+        hudTick += 1
+    }
+
+    func cancelBattle() {
+        battle.stop()
+        battleNote = nil
+        hudTick += 1
+    }
+
+    func leaveBattle() {
+        battle.stop()
+        battleRole = nil
+        battleSnapshot = nil
+        battleNote = nil
+        battleClock = -1
+        screen = .title
+        hudTick += 1
+    }
+
+    func showBattleNote(_ message: String) {
+        battleNote = message
+        hudTick += 1
+    }
+
+    func battleDidConnect(role: DuelRole, snapshot: DuelSnapshot?) {
+        battleRole = role
+        battleSnapshot = snapshot
+        battleNote = nil
+        battleClock = snapshot.map { Int($0.timeLeft) } ?? -1
+        screen = .play
+        hudTick += 1
+        sound.play("ui")
+    }
+
+    func battleFailed(_ message: String) {
+        battle.stop()
+        battleRole = nil
+        battleSnapshot = nil
+        battleNote = message
+        battleClock = -1
+        if screen == .play { screen = .title }
+        hudTick += 1
     }
 
     var showGuide: Bool {
@@ -108,6 +175,8 @@ final class AppModel: ObservableObject {
     func prepareFeedback() {
         sound.prepare()
         haptics.prepare()
+        battle.model = self
+        battle.listenIfAuthenticated()
     }
 
     func openLab() {
@@ -191,6 +260,11 @@ final class AppModel: ObservableObject {
     }
 
     func steer(_ input: ControlInput) {
+        if inBattle {
+            battle.steer(input)
+            haptics.tap()
+            return
+        }
         let before = game.uiToken
         game.input(input)
         if game.uiToken != before {
@@ -241,6 +315,10 @@ final class AppModel: ObservableObject {
 
     /// Called from the display link. Does not publish unless the HUD changed.
     func advance(dt: Double) -> RenderSnapshot {
+        if inBattle {
+            advanceBattle(dt: dt)
+            return game.snapshot()
+        }
         let events = game.update(dt: dt)
         if shake > 0 {
             shake = max(0, shake - dt / 0.42)
@@ -264,6 +342,49 @@ final class AppModel: ObservableObject {
             library.finishRun(score: game.score, recipes: game.eatenRecipes)
         }
         return game.snapshot()
+    }
+
+    private func advanceBattle(dt: Double) {
+        guard let snap = battle.tick(dt: dt) else { return }
+        let clock = Int(snap.timeLeft)
+        let previous = battleSnapshot
+        let changed = previous == nil
+            || snap.tick != previous?.tick
+            || snap.phase != previous?.phase
+            || snap.reason != previous?.reason
+            || snap.winner != previous?.winner
+            || snap.host.score != previous?.host.score
+            || snap.joiner.score != previous?.joiner.score
+            || snap.host.alive != previous?.host.alive
+            || snap.joiner.alive != previous?.joiner.alive
+            || snap.host.aura != previous?.host.aura
+            || snap.joiner.aura != previous?.joiner.aura
+            || clock != battleClock
+        if let role = battleRole, let previous {
+            let was = role == .host ? previous.host : previous.joiner
+            let now = role == .host ? snap.host : snap.joiner
+            if now.score > was.score {
+                haptics.eat()
+                sound.play("eat")
+            }
+            if was.alive && !now.alive {
+                shake = 1
+                haptics.die()
+                sound.play("die")
+            }
+            if previous.phase != .finished && snap.phase == .finished {
+                if snap.winner == role {
+                    haptics.record()
+                    sound.play("record")
+                }
+            }
+        }
+        if shake > 0 {
+            shake = max(0, shake - dt / 0.42)
+        }
+        battleSnapshot = snap
+        battleClock = clock
+        if changed { hudTick += 1 }
     }
 
     private func respond(to event: GameEvent) {

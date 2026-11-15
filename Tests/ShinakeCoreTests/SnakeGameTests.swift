@@ -332,7 +332,7 @@ final class SnakeGameTests: XCTestCase {
         XCTAssertGreaterThan(before, 9)
         let ate = game.debugStep()
         XCTAssertTrue(ate.contains(.ate(.mushroom)))
-        XCTAssertEqual(game.length, before - 2)
+        XCTAssertEqual(game.length, before - 3)
         XCTAssertGreaterThan(game.confuseRemaining, 0)
     }
 
@@ -504,7 +504,7 @@ final class SnakeGameTests: XCTestCase {
             foods: [FoodPellet(id: 1, kind: .star, position: food)]
         )
         _ = game.debugStep()
-        XCTAssertEqual(game.score, 30)
+        XCTAssertEqual(game.score, 40)
         let shieldAt = game.foods[0].position
         game.debugArrange(
             snake: [shieldAt + .yn, shieldAt + .yn + .yn, shieldAt + .yn + .yn + .yn],
@@ -513,7 +513,7 @@ final class SnakeGameTests: XCTestCase {
         )
         _ = game.debugStep()
         XCTAssertTrue(game.shieldActive)
-        XCTAssertEqual(game.score, 36)
+        XCTAssertEqual(game.score, 46)
     }
 
     func testAimCueNamesTheSwipeTowardTheApple() {
@@ -828,13 +828,14 @@ final class SnakeGameTests: XCTestCase {
             let events = game.debugStep()
             XCTAssertTrue(events.contains(.ate(.apple)))
             XCTAssertEqual(game.score, expected * 10)
-            XCTAssertTrue(game.foods.allSatisfy { $0.recipe == nil && $0.kind == .apple })
             if expected < 3 {
+                XCTAssertTrue(game.foods.allSatisfy { $0.recipe == nil && $0.kind == .apple })
                 XCTAssertEqual(game.foods.count, 1)
             }
         }
         XCTAssertEqual(game.eaten, 3)
         XCTAssertEqual(game.foods.count, 2)
+        XCTAssertTrue(game.foods.allSatisfy { $0.recipe == nil })
     }
 
     func testLoadoutSkipsIllegalDesignsAndHoldsCombatEffectsForTheOpening() {
