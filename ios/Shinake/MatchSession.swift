@@ -205,7 +205,7 @@ final class MatchSession: NSObject, GKMatchDelegate, GKMatchmakerViewControllerD
         }
     }
 
-    func match(_ match: GKMatch, didFailWithError error: Error) {
+    func match(_ match: GKMatch, didFailWithError error: Error?) {
         DispatchQueue.main.async { [weak self] in
             self?.remoteWentAway()
         }
